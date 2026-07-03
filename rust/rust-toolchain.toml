@@ -1,4 +1,9 @@
 [toolchain]
 channel = "stable"
 components = ["rustfmt", "clippy"]
+# Android cross-compile targets for voxel-core (Phase 0 H4 / Phase 2 mobile).
+# voxel-core is pure Rust (no FFI), so these compile to a static `.a` with no
+# NDK required — only rustc's bundled `llvm-ar`. The NDK becomes necessary in
+# Phase 2 when gdext links a final `.so` against Android's libc.
+targets = ["aarch64-linux-android", "x86_64-linux-android"]
 profile = "default"
