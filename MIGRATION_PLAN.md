@@ -228,37 +228,50 @@ godot_voxel (fork)
 |---|---|---|
 | 2026-07-03 | 0.1-0.4: workspace + math + storage | ✅ 21/21 тестов проходят, clippy чист |
 | 2026-07-03 | 0.5-0.6: transvoxel mesher (regular-cell) | ✅ 29/29 тестов проходят, mesh генерируется на SDF-сфере |
-| 2026-07-03 | Сессия приостановлена | ⏳ продолжение на другом устройстве |
+| 2026-07-03 | 0.8: criterion benches (16³/32³/64³) | ✅ Rust floor: 147–238 Melem/s. C++ compare pending |
+| 2026-07-03 | 0.9: Android NDK cross-compile (H4) | ✅ `.a` + `.so` для aarch64/x86_64-android; +Apple arm64 `.a` с Linux |
+| 2026-07-03 | 0.7: parity framework + self-consistent golden | ✅ GoldenMesh JSON + comparator, sphere_16/32 |
+| 2026-07-03 | 0.7 (real C++): table parity | ✅ Rust-таблицы byte-identical upstream C++ (`transvoxel_tables_parity`) |
+| 2026-07-03 | 0.10: REPORT.md | ✅ Conditional GO; подробности в `REPORT.md` |
+| — | 0.7 (mesh byte-parity vs C++) + 0.8 (C++ perf baseline) | ⏳ единственный открытый пункт — godot-cpp harness |
 
 ### Где остановились (для возобновления)
 
-**Готово:** Cargo workspace, math (constants/funcs/vector3), storage (VoxelBuffer trait +
-DenseVoxelBuffer), transvoxel regular mesher (таблицы + структуры + алгоритм + интеграционный
-тест на сфере). 29/29 тестов, clippy чист.
+**Готово:** весь пилот, кроме mesh byte-parity vs C++ и C++ perf-baseline. 32/32 теста проходят,
+clippy/fmt чист. voxel-core кросс-компилируется под все приоритетные мобильные/десктоп-таргеты.
+Полный разбор и GO/NO-GO — в **`REPORT.md`**.
 
-**Следующие шаги Фазы 0 (по приоритету):**
-1. **Бенчмарки criterion vs C++ baseline** — главный GO/NO-GO критерий (H2 производительность).
-   Нужно: добавить criterion dev-dep, написать bench на сфере 16³/32³, собрать C++ baseline.
-2. **Кросс-компиляция под Android NDK** (H4, приоритет пользователя) —
-   `rustup target add aarch64-linux-android` + `cargo build --target aarch64-linux-android`.
-3. **Parity-тесты vs C++ golden data** — скомпилировать C++, снять эталонный mesh, сравнить
-   byte-for-byte. Только после этого можно доверять порту полностью.
+**Единственный открытый пункт (gating final Phase 0 sign-off):** godot-cpp mesh-harness.
+Тело mesher'а зависит от Godot-типов (`util/godot` shim не имеет standalone-режима), поэтому
+для mesh byte-parity нужен либо godot-cpp, либо Godot-source. План и оценка effort'а — в
+`rust/cpp-baseline/README.md`. Тот же harness закроет и C++ perf-baseline (H2).
+
+**Следующие шаги (по приоритету):**
+1. **godot-cpp mesh harness** → закрыть H1 (regenerate golden из C++) и H2 (perf vs C++) одной задачей.
+2. **Фаза 1** (math/containers/string/io/memory core) — не зависит от harness, можно начинать параллельно.
+3. **Фаза 2 kick-off** — Android `.so` + минимальный gdext hello-world (`rust/scripts/android-build.sh` готов).
 
 ### Команды для возобновления работы
 ```bash
 git clone https://github.com/sandsaber/godot_voxel.git
-cd godot_voxel
-git checkout rust/pilot
+cd godot_voxel && git checkout rust/pilot
 cd rust
-cargo test        # 29/29 должны пройти
-cargo clippy      # должен быть чистый
-cargo bench       # (после добавления criterion) perf vs C++
+cargo test                 # 32/32 должны пройти
+cargo clippy --all-targets # должен быть чистый
+cargo bench                # transvoxel benches (147–238 Melem/s)
+./scripts/android-build.sh --so   # Android aarch64 .so (NDK r29 + rust-lld workaround)
 ```
 
-### Ключевая находка при портации transvoxel
-C++ `VoxelBuffer` использует **ZXY memory layout** (`index = y + sy*(x + sx*z)`, Y innermost),
-не XYZ. Это было неочевидно и потребовало корректировки индексации в порте.
-Зафиксировано в `voxel_index` helper и в алгоритме `build_regular_mesh`.
+### Ключевые находки сессии
+- **ZXY memory layout** в C++ `VoxelBuffer` (`index = y + sy*(x + sx*z)`, Y innermost) —
+  зафиксировано в `voxel_index` и `build_regular_mesh`.
+- **LLVM skew** rustc 1.96.1 (LLVM 22) vs NDK r29 (LLVM 21): NDK `lld` не читает объекты rustc
+  при линковке `.so` (`Unknown attribute kind 103`). Workaround — заставить NDK-clang линковать
+  rust-`lld` через `-fuse-ld=lld` + symlink. Зафиксировано в `rust/scripts/android-build.sh`.
+  `.a` (статический архив) этому не подвержен — работает даже без NDK.
+- **voxel-core чистый Rust без FFI** → кросс-компилируется в `.a` под Android и Apple arm64
+  прямо с Linux, без SDK (нужен только встроенный `llvm-ar`). SDK/NDK потребуются только на
+  финальной линковке `.so`/`.dylib` в Фазе 2.
 
 ### Решение по внешним крейтам (после исследования экосистемы)
 - `transvoxel` (Gnurfos, v2.0) — **НЕ используем напрямую**: статус experimental,

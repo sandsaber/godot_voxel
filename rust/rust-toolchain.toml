@@ -1,9 +1,17 @@
 [toolchain]
 channel = "stable"
 components = ["rustfmt", "clippy"]
-# Android cross-compile targets for voxel-core (Phase 0 H4 / Phase 2 mobile).
-# voxel-core is pure Rust (no FFI), so these compile to a static `.a` with no
-# NDK required — only rustc's bundled `llvm-ar`. The NDK becomes necessary in
-# Phase 2 when gdext links a final `.so` against Android's libc.
-targets = ["aarch64-linux-android", "x86_64-linux-android"]
+# Mobile/desktop cross-compile targets for voxel-core (Phase 0 H4 / Phase 2).
+# voxel-core is pure Rust (no FFI), so it compiles to a static `.a` for every
+# target below with no platform SDK required — only rustc's bundled llvm-ar.
+# Verified on Linux: Android (aarch64, x86_64) and Apple (iOS, macOS arm64)
+# all produce correct ELF / Mach-O ARM64 objects.
+# Final linking (Android .so / iOS .dylib) needs the NDK / Xcode respectively,
+# which arrives in Phase 2 with gdext.
+targets = [
+    "aarch64-linux-android",
+    "x86_64-linux-android",
+    "aarch64-apple-ios",
+    "aarch64-apple-darwin",
+]
 profile = "default"
