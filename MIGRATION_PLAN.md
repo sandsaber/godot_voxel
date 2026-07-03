@@ -276,16 +276,19 @@ clippy/fmt чист. voxel-core кросс-компилируется под в�
 | `math::vector3i` utils | `util/math/vector3i.h` | ✅ +8 тестов (Vector3iUtil: create/sort_min_max/volume_u64/zxy+zyx index + inverse/distances/dot/abs/min/max/clamp/floordiv/ceildiv/wrap; 90° rotations + rotate_90/rotate_90_slice; Shl/Shr/BitAnd/Rem trait impls; Hash через djb2-цепочку Vector3iHasher; Eq на Vector3T для integer-алиасов) |
 | `math::ortho_basis` | `util/math/ortho_basis.{h,cpp}` | ✅ +11 тестов (24-элементная lookup-таблица 90°-базисов + OrthoRotationId enum + name-таблица, позиционно связаны; from_axis_turns/transpose/invert/xform/composition; таблица верифицирована биективным round-trip) |
 | `math::vector4` | `util/math/vector4{t,f}.h` | ✅ +5 тестов (Vector4T<T>: add/componentwise+scalar mul, Index; Vector4f math length_squared/normalized; исправлен upstream-баг `v.w+v.w`→`v.w*v.w` с заметкой в модуле) |
+| `string` | `util/string/{conv,format}.{h,cpp}` | ✅ +14 тестов (conv: int32/int64 base10→buffer, float32/64 %g→buffer, string→int32 prefix-parse, константы размеров буферов; format: runtime `{}`-подстановка + dev hex-dump). **Skip:** `std_string`/`std_stringstream`/`fwd_std_string` (нативные Rust `String`/`str`). **Defer to Phase 3:** `expression_parser` (единственный потребитель — `generators/graph`) |
+| `memory` | `util/memory/{memory,std_allocator}.h` | ✅ документирующий модуль (таблица C++→Rust: `ZN_ALLOC`/`UniquePtr`/`StdDefaultAllocator` → глобальный аллокатор + `Box`/`Vec`); debug-счётчики аллокаций за feature-флагом `alloc-counters` (+2 feature-gated теста) |
 
-**Осталось из Фазы 1:** `util/math` завершён. Далее — `util/string`,
-`util/io`, `util/memory`, `util/testing` (фреймворк parity-тестов).
+**Осталось из Фазы 1:** `util/math` ✅, `util/string` ✅, `util/memory` ✅ — завершены.
+Далее — `util/io` (text_writer/serialization/log/file_locker), `util/testing`
+(фреймворк parity-тестов). `expression_parser` отложен до Фазы 3.
 
 ### Команды для возобновления работы
 ```bash
 git clone https://github.com/sandsaber/godot_voxel.git
 cd godot_voxel && git checkout rust/pilot
 cd rust
-cargo test                 # 156 проходят (151 unit + 5 integration; +1 ignored golden-gen)
+cargo test                 # 170 проходят (165 unit + 5 integration; +1 ignored golden-gen)
 cargo clippy --all-targets # должен быть чистый
 cargo bench                # transvoxel benches (147–238 Melem/s)
 ./scripts/android-build.sh --so   # Android aarch64 .so (NDK r29 + rust-lld workaround)
