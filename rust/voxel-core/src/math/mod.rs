@@ -15,6 +15,7 @@ pub mod box3f;
 pub mod box3i;
 pub mod color;
 pub mod constants;
+pub mod conv;
 pub mod funcs;
 pub mod interval;
 pub mod quaternion;
