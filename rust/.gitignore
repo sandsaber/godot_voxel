@@ -1,0 +1,8 @@
+# Rust build artifacts
+/target
+**/target
+Cargo.lock
+
+# Keep these tracked:
+!rust/Cargo.toml
+!rust/Cargo.lock
