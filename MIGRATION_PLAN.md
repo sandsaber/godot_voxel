@@ -268,8 +268,12 @@ clippy/fmt чист. voxel-core кросс-компилируется под в�
 | `math::interval` | `util/math/interval.h` | ✅ +10 тестов (IntervalT<T> f32-инстанциация: все операции + интервальная математика min/max/sqrt/abs/clamp/lerp/sin/atan/atan2/floor/round/snapped/wrapf/smoothstep/squared/cubed/polynomial/get_length/pow; закрывает отложенные interval-SDF) |
 | `math::basis3f` + `transform3f` | `util/math/{basis3f,transform3f}.h` | ✅ +7 тестов (3×3 rotation matrix + affine transform; +Index/IndexMut на Vector3T) |
 | `math::conv` | `util/math/conv.h` (ZN-часть) | ✅ +2 теста (vec3i↔vec3f, floor/round/ceil_to_int) |
+| `math::triangle` | `util/math/triangle.h` | ✅ +7 тестов (point-in-triangle, area/degenerate, barycentric round-trip, random-bary, ray–triangle f32+f64, baked-intersect-for-fixed-direction) |
+| `math::box2f` | `util/math/box2f.h` | ✅ +4 теста (float 2D min/max box: from_min_size/intersects/clip/difference→Vec) |
+| `math::box_bounds` | `util/math/box_bounds_{2i,3i}.h` | ✅ +5 тестов (min/exclusive-max int boxes: ctors, intersects, contains half-open, size) |
+| `math::vector3i16` | `util/math/vector3i16.h` | ✅ +4 теста (`Vector3T<i16>` alias + i16 ops instance; `pack_hash` воспроизводит C++ sign-extension через int→uint64) |
 
-**Осталось из Фазы 1:** `util/math` (triangle, vector3i16, и т.д. — мелочи), `util/string`,
+**Осталось из Фазы 1:** `util/math` (ortho_basis, vector4f — мелочи), `util/string`,
 `util/io`, `util/memory`, `util/testing` (фреймворк parity-тестов).
 
 ### Команды для возобновления работы
@@ -277,7 +281,7 @@ clippy/fmt чист. voxel-core кросс-компилируется под в�
 git clone https://github.com/sandsaber/godot_voxel.git
 cd godot_voxel && git checkout rust/pilot
 cd rust
-cargo test                 # 105 проходят (100 unit + 5 integration; +1 ignored golden-gen)
+cargo test                 # 126 проходят (121 unit + 5 integration; +1 ignored golden-gen)
 cargo clippy --all-targets # должен быть чистый
 cargo bench                # transvoxel benches (147–238 Melem/s)
 ./scripts/android-build.sh --so   # Android aarch64 .so (NDK r29 + rust-lld workaround)
