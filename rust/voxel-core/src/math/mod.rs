@@ -26,6 +26,7 @@ pub mod transform3f;
 pub mod triangle;
 pub mod vector2;
 pub mod vector3;
+pub mod vector3i16;
 
 // Convenience re-exports at crate root path `voxel_core::math::*`.
 pub use basis3f::Basis3f;
@@ -42,3 +43,4 @@ pub use quaternion::Quaternionf;
 pub use transform3f::Transform3f;
 pub use vector2::{Vector2T, Vector2d, Vector2f, Vector2i};
 pub use vector3::{Vector3T, Vector3d, Vector3f, Vector3i};
+pub use vector3i16::Vector3i16;
