@@ -10,9 +10,11 @@
 //! - [`sdf`] — scalar signed-distance-field primitives.
 
 pub mod basis3f;
+pub mod box2f;
 pub mod box2i;
 pub mod box3f;
 pub mod box3i;
+pub mod box_bounds;
 pub mod color;
 pub mod constants;
 pub mod conv;
@@ -27,9 +29,11 @@ pub mod vector3;
 
 // Convenience re-exports at crate root path `voxel_core::math::*`.
 pub use basis3f::Basis3f;
+pub use box2f::Box2f;
 pub use box2i::Box2i;
 pub use box3f::{Box3f, Box3fT};
 pub use box3i::Box3i;
+pub use box_bounds::{BoxBounds2i, BoxBounds3i};
 pub use color::{Color, Color8};
 pub use constants::*;
 pub use funcs::*;
