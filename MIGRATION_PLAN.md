@@ -227,7 +227,33 @@ godot_voxel (fork)
 | Дата | Шаг | Статус |
 |---|---|---|
 | 2026-07-03 | 0.1-0.4: workspace + math + storage | ✅ 21/21 тестов проходят, clippy чист |
-| 2026-07-03 | 0.5: transvoxel mesher (regular-cell) | ✅ 29/29 тестов проходят, mesh генерируется на SDF-сфере |
+| 2026-07-03 | 0.5-0.6: transvoxel mesher (regular-cell) | ✅ 29/29 тестов проходят, mesh генерируется на SDF-сфере |
+| 2026-07-03 | Сессия приостановлена | ⏳ продолжение на другом устройстве |
+
+### Где остановились (для возобновления)
+
+**Готово:** Cargo workspace, math (constants/funcs/vector3), storage (VoxelBuffer trait +
+DenseVoxelBuffer), transvoxel regular mesher (таблицы + структуры + алгоритм + интеграционный
+тест на сфере). 29/29 тестов, clippy чист.
+
+**Следующие шаги Фазы 0 (по приоритету):**
+1. **Бенчмарки criterion vs C++ baseline** — главный GO/NO-GO критерий (H2 производительность).
+   Нужно: добавить criterion dev-dep, написать bench на сфере 16³/32³, собрать C++ baseline.
+2. **Кросс-компиляция под Android NDK** (H4, приоритет пользователя) —
+   `rustup target add aarch64-linux-android` + `cargo build --target aarch64-linux-android`.
+3. **Parity-тесты vs C++ golden data** — скомпилировать C++, снять эталонный mesh, сравнить
+   byte-for-byte. Только после этого можно доверять порту полностью.
+
+### Команды для возобновления работы
+```bash
+git clone https://github.com/sandsaber/godot_voxel.git
+cd godot_voxel
+git checkout rust/pilot
+cd rust
+cargo test        # 29/29 должны пройти
+cargo clippy      # должен быть чистый
+cargo bench       # (после добавления criterion) perf vs C++
+```
 
 ### Ключевая находка при портации transvoxel
 C++ `VoxelBuffer` использует **ZXY memory layout** (`index = y + sy*(x + sx*z)`, Y innermost),
