@@ -78,6 +78,34 @@ impl<T: Copy> Vector3T<T> {
     }
 }
 
+// `v[i]` indexing (matches `operator[]` / the `get`+`set` pair above).
+impl<T: Copy> core::ops::Index<usize> for Vector3T<T> {
+    type Output = T;
+    #[inline]
+    fn index(&self, i: usize) -> &T {
+        debug_assert!(i < 3);
+        match i {
+            0 => &self.x,
+            1 => &self.y,
+            2 => &self.z,
+            _ => panic!("Vector3 index out of range"),
+        }
+    }
+}
+
+impl<T: Copy> core::ops::IndexMut<usize> for Vector3T<T> {
+    #[inline]
+    fn index_mut(&mut self, i: usize) -> &mut T {
+        debug_assert!(i < 3);
+        match i {
+            0 => &mut self.x,
+            1 => &mut self.y,
+            2 => &mut self.z,
+            _ => panic!("Vector3 index out of range"),
+        }
+    }
+}
+
 // ---- Swizzles (match vector3t.h xyz/zyx/zxy/yzx) ----
 
 impl<T: Copy> Vector3T<T> {
