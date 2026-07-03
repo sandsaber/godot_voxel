@@ -251,12 +251,27 @@ clippy/fmt чист. voxel-core кросс-компилируется под в�
 2. **Фаза 1** (math/containers/string/io/memory core) — не зависит от harness, можно начинать параллельно.
 3. **Фаза 2 kick-off** — Android `.so` + минимальный gdext hello-world (`rust/scripts/android-build.sh` готов).
 
+### Фаза 1 (в работе)
+
+Чистое ядро портится инкрементально, каждый модуль — отдельный коммит, clippy/fmt чист.
+
+| Модуль | C++ источник | Статус |
+|---|---|---|
+| `math::box3i` | `util/math/box3i.h` | ✅ +13 тестов |
+| `math::vector2` | `util/math/vector2{t,f,i}.h` | ✅ +8 тестов |
+| `math::box2i` | `util/math/box2i.h` | ✅ +10 тестов (вынесен общий `funcs::clip_range`) |
+| `containers` | `util/containers/{span,fixed_array,container_funcs}.h` | ✅ +8 тестов (Span→slice, FixedArray→`[T;N]`, Vec; алгоритмы shift_up/unordered_remove*/find_duplicate/is_uniform) |
+| `math::sdf` | `util/math/sdf.h` (скалярная часть) | ✅ +5 тестов (box/sphere/plane/torus/CSG/round_cone; interval-перегрузки отложены с `interval.h`) |
+
+**Осталось из Фазы 1:** `util/math` (Color/Color8, Quaternion, Box3f, interval, conv и т.д.), `util/string`,
+`util/io`, `util/memory`, `util/testing` (фреймворк parity-тестов).
+
 ### Команды для возобновления работы
 ```bash
 git clone https://github.com/sandsaber/godot_voxel.git
 cd godot_voxel && git checkout rust/pilot
 cd rust
-cargo test                 # 32/32 должны пройти
+cargo test                 # 76 проходят (71 unit + 5 integration; +1 ignored golden-gen)
 cargo clippy --all-targets # должен быть чистый
 cargo bench                # transvoxel benches (147–238 Melem/s)
 ./scripts/android-build.sh --so   # Android aarch64 .so (NDK r29 + rust-lld workaround)
