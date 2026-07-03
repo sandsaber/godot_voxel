@@ -21,6 +21,7 @@ pub mod interval;
 pub mod quaternion;
 pub mod sdf;
 pub mod transform3f;
+pub mod triangle;
 pub mod vector2;
 pub mod vector3;
 
