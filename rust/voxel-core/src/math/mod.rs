@@ -11,6 +11,7 @@
 
 pub mod box2i;
 pub mod box3i;
+pub mod color;
 pub mod constants;
 pub mod funcs;
 pub mod sdf;
@@ -20,6 +21,7 @@ pub mod vector3;
 // Convenience re-exports at crate root path `voxel_core::math::*`.
 pub use box2i::Box2i;
 pub use box3i::Box3i;
+pub use color::{Color, Color8};
 pub use constants::*;
 pub use funcs::*;
 pub use vector2::{Vector2T, Vector2d, Vector2f, Vector2i};
