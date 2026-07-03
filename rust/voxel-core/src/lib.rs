@@ -14,6 +14,7 @@
 pub mod containers;
 pub mod hash;
 pub mod math;
+pub mod memory;
 pub mod meshers;
 pub mod storage;
 pub mod string;

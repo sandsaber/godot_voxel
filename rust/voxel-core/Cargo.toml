@@ -21,6 +21,9 @@ criterion = "0.5"
 
 [features]
 default = []
+# Enable debug allocation counters (mirrors C++ StdDefaultAllocatorCounters).
+# Off by default to avoid atomic overhead in hot paths.
+alloc-counters = []
 
 # `cargo bench` entry point. `harness = false` lets criterion provide main().
 [[bench]]
