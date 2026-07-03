@@ -70,7 +70,7 @@ impl BoxBounds2i {
 }
 
 /// 3D integer box stored as min + exclusive-max. Matches `BoxBounds3i`.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(C)]
 pub struct BoxBounds3i {
     pub min_pos: Vector3i,

@@ -16,7 +16,7 @@ use super::funcs;
 ///
 /// Stored as `#[repr(C)]` so it can be passed across FFI / copied into GPU
 /// buffers with the exact same memory layout as the C++ `union { struct {x,y,z}; T coords[3]; }`.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(C)]
 pub struct Vector3T<T: Copy> {
     pub x: T,
@@ -483,6 +483,320 @@ pub mod math {
     }
 }
 
+// ---- Vector3i utilities (ported from vector3i.h Vector3iUtil / math::) ----
+
+impl Vector3i {
+    /// Broadcast a scalar to all axes. Matches `Vector3iUtil::create(int)`.
+    #[inline]
+    pub fn create(xyz: i32) -> Self {
+        Self::splat(xyz)
+    }
+
+    /// Sort two vectors component-wise into (min, max). Matches
+    /// `Vector3iUtil::sort_min_max`.
+    #[inline]
+    pub fn sort_min_max(a: &mut Vector3i, b: &mut Vector3i) {
+        funcs::sort2(&mut a.x, &mut b.x);
+        funcs::sort2(&mut a.y, &mut b.y);
+        funcs::sort2(&mut a.z, &mut b.z);
+    }
+
+    /// Unsigned volume `x*y*z` as `u64` (overflows checked in debug).
+    /// Matches `Vector3iUtil::get_volume_u64`. Expects non-negative components.
+    #[inline]
+    pub fn volume_u64(self) -> u64 {
+        debug_assert!(self.x >= 0 && self.y >= 0 && self.z >= 0);
+        funcs::multiply_check_overflow_u64(
+            self.x as u64,
+            funcs::multiply_check_overflow_u64(self.y as u64, self.z as u64),
+        )
+    }
+
+    /// Row-major ZXY flat index into a buffer of size `area_size`.
+    /// Matches `Vector3iUtil::get_zxy_index`: `y + sy*(x + sx*z)`.
+    #[inline]
+    pub fn zxy_index(self, area_size: Vector3i) -> u32 {
+        (self.y as u32).wrapping_add((area_size.y as u32).wrapping_mul(
+            (self.x as u32).wrapping_add((area_size.x as u32).wrapping_mul(self.z as u32)),
+        ))
+    }
+
+    /// Same as [`zxy_index`](Self::zxy_index) taking scalars. Matches the
+    /// 5-argument overload `get_zxy_index(x, y, z, sx, sy)`.
+    #[inline]
+    pub fn zxy_index_scalars(x: i32, y: i32, z: i32, sx: i32, sy: i32) -> u32 {
+        (y as u32).wrapping_add(
+            (sy as u32).wrapping_mul((x as u32).wrapping_add((sx as u32).wrapping_mul(z as u32))),
+        )
+    }
+
+    /// Row-major ZYX flat index. Matches `Vector3iUtil::get_zyx_index`:
+    /// `x + sx*(y + sy*z)`.
+    #[inline]
+    pub fn zyx_index(self, area_size: Vector3i) -> u32 {
+        (self.x as u32).wrapping_add((area_size.x as u32).wrapping_mul(
+            (self.y as u32).wrapping_add((area_size.y as u32).wrapping_mul(self.z as u32)),
+        ))
+    }
+
+    /// Inverse of [`zxy_index`](Self::zxy_index). Matches `from_zxy_index`.
+    #[inline]
+    pub fn from_zxy_index(i: u32, area_size: Vector3i) -> Vector3i {
+        Vector3i::new(
+            (i / area_size.y as u32) as i32 % area_size.x,
+            (i % area_size.y as u32) as i32,
+            (i / (area_size.y as u32 * area_size.x as u32)) as i32,
+        )
+    }
+
+    /// True if all three components are equal. Matches `all_members_equal`.
+    #[inline]
+    pub fn all_members_equal(self) -> bool {
+        self.x == self.y && self.y == self.z
+    }
+
+    /// True if the vector has length 1 (sum of abs components == 1).
+    /// Matches `Vector3iUtil::is_unit_vector`.
+    #[inline]
+    pub fn is_unit_vector(self) -> bool {
+        funcs::abs_i32(self.x) + funcs::abs_i32(self.y) + funcs::abs_i32(self.z) == 1
+    }
+
+    /// True if all components are non-negative. Matches `is_valid_size`.
+    #[inline]
+    pub fn is_valid_size(self) -> bool {
+        self.x >= 0 && self.y >= 0 && self.z >= 0
+    }
+
+    /// True if any component is zero. Matches `is_empty_size`.
+    #[inline]
+    pub fn is_empty_size(self) -> bool {
+        self.x == 0 || self.y == 0 || self.z == 0
+    }
+
+    /// Manhattan (L1) distance. Matches `math::manhattan_distance`.
+    #[inline]
+    pub fn manhattan_distance_to(self, b: Vector3i) -> i32 {
+        funcs::abs_i32(self.x - b.x) + funcs::abs_i32(self.y - b.y) + funcs::abs_i32(self.z - b.z)
+    }
+
+    /// Chebyshev (chessboard) distance. Matches `math::chebyshev_distance`.
+    #[inline]
+    pub fn chebyshev_distance_to(self, b: Vector3i) -> i32 {
+        funcs::max(
+            funcs::max(funcs::abs_i32(self.x - b.x), funcs::abs_i32(self.y - b.y)),
+            funcs::abs_i32(self.z - b.z),
+        )
+    }
+
+    /// Integer dot product. Matches `math::dot(Vector3i, Vector3i)`.
+    #[inline]
+    pub fn dot(self, b: Vector3i) -> i32 {
+        self.x * b.x + self.y * b.y + self.z * b.z
+    }
+
+    /// Component-wise abs. Matches `math::abs(Vector3i)`.
+    #[inline]
+    pub fn abs(self) -> Vector3i {
+        Vector3i::new(
+            funcs::abs_i32(self.x),
+            funcs::abs_i32(self.y),
+            funcs::abs_i32(self.z),
+        )
+    }
+
+    /// Component-wise min. Matches `math::min(Vector3i, Vector3i)`.
+    #[inline]
+    pub fn min(self, b: Vector3i) -> Vector3i {
+        Vector3i::new(
+            funcs::min(self.x, b.x),
+            funcs::min(self.y, b.y),
+            funcs::min(self.z, b.z),
+        )
+    }
+
+    /// Component-wise max. Matches `math::max(Vector3i, Vector3i)`.
+    #[inline]
+    pub fn max(self, b: Vector3i) -> Vector3i {
+        Vector3i::new(
+            funcs::max(self.x, b.x),
+            funcs::max(self.y, b.y),
+            funcs::max(self.z, b.z),
+        )
+    }
+
+    /// Component-wise clamp. Matches `math::clamp(Vector3i, ...)`.
+    #[inline]
+    pub fn clamp(self, lo: Vector3i, hi: Vector3i) -> Vector3i {
+        Vector3i::new(
+            funcs::clamp(self.x, lo.x, hi.x),
+            funcs::clamp(self.y, lo.y, hi.y),
+            funcs::clamp(self.z, lo.z, hi.z),
+        )
+    }
+
+    /// Component-wise floor division by another vector.
+    /// Matches `math::floordiv(Vector3i, Vector3i)`.
+    #[inline]
+    pub fn floordiv(self, d: Vector3i) -> Vector3i {
+        Vector3i::new(
+            funcs::floordiv(self.x, d.x),
+            funcs::floordiv(self.y, d.y),
+            funcs::floordiv(self.z, d.z),
+        )
+    }
+
+    /// Floor division by a scalar. Matches `math::floordiv(Vector3i, int)`.
+    #[inline]
+    pub fn floordiv_scalar(self, d: i32) -> Vector3i {
+        Vector3i::new(
+            funcs::floordiv(self.x, d),
+            funcs::floordiv(self.y, d),
+            funcs::floordiv(self.z, d),
+        )
+    }
+
+    /// Component-wise ceil division. Matches `math::ceildiv(Vector3i, Vector3i)`.
+    #[inline]
+    pub fn ceildiv(self, d: Vector3i) -> Vector3i {
+        Vector3i::new(
+            funcs::ceildiv(self.x, d.x),
+            funcs::ceildiv(self.y, d.y),
+            funcs::ceildiv(self.z, d.z),
+        )
+    }
+
+    /// Ceil division by a scalar. Matches `math::ceildiv(Vector3i, int)`.
+    #[inline]
+    pub fn ceildiv_scalar(self, d: i32) -> Vector3i {
+        Vector3i::new(
+            funcs::ceildiv(self.x, d),
+            funcs::ceildiv(self.y, d),
+            funcs::ceildiv(self.z, d),
+        )
+    }
+
+    /// Component-wise wrap. Matches `math::wrap(Vector3i, Vector3i)`.
+    #[inline]
+    pub fn wrap(self, d: Vector3i) -> Vector3i {
+        Vector3i::new(
+            funcs::wrap_i32(self.x, d.x),
+            funcs::wrap_i32(self.y, d.y),
+            funcs::wrap_i32(self.z, d.z),
+        )
+    }
+}
+
+// ---- 90° rotations on Vector3i (match vector3i.h math::rotate_*_90_*) ----
+// CW/CW convention: axis pointed at the viewer; CCW = positive angle.
+impl Vector3i {
+    #[inline]
+    pub fn rotate_x_90_ccw(self) -> Vector3i {
+        Vector3i::new(self.x, -self.z, self.y)
+    }
+    #[inline]
+    pub fn rotate_x_90_cw(self) -> Vector3i {
+        Vector3i::new(self.x, self.z, -self.y)
+    }
+    #[inline]
+    pub fn rotate_y_90_ccw(self) -> Vector3i {
+        Vector3i::new(self.z, self.y, -self.x)
+    }
+    #[inline]
+    pub fn rotate_y_90_cw(self) -> Vector3i {
+        Vector3i::new(-self.z, self.y, self.x)
+    }
+    #[inline]
+    pub fn rotate_z_90_ccw(self) -> Vector3i {
+        Vector3i::new(-self.y, self.x, self.z)
+    }
+    #[inline]
+    pub fn rotate_z_90_cw(self) -> Vector3i {
+        Vector3i::new(self.y, -self.x, self.z)
+    }
+
+    /// Dispatch 90° rotation by [`Axis`]. Matches `math::rotate_90(Vector3i, ...)`.
+    /// `clockwise = true` picks the CW variant, else CCW.
+    #[inline]
+    pub fn rotate_90(self, axis: Axis, clockwise: bool) -> Vector3i {
+        match (axis, clockwise) {
+            (Axis::X, true) => self.rotate_x_90_cw(),
+            (Axis::X, false) => self.rotate_x_90_ccw(),
+            (Axis::Y, true) => self.rotate_y_90_cw(),
+            (Axis::Y, false) => self.rotate_y_90_ccw(),
+            (Axis::Z, true) => self.rotate_z_90_cw(),
+            (Axis::Z, false) => self.rotate_z_90_ccw(),
+        }
+    }
+
+    /// Apply the same 90° rotation to every vector in `vecs` in place.
+    /// Matches `math::rotate_90(Span<Vector3i>, Axis, bool)`.
+    #[inline]
+    pub fn rotate_90_slice(vecs: &mut [Vector3i], axis: Axis, clockwise: bool) {
+        for v in vecs.iter_mut() {
+            *v = v.rotate_90(axis, clockwise);
+        }
+    }
+}
+
+// ---- Bitwise operators on Vector3i (match vector3i.h operator<< >> & %) ----
+// C++ defines these as free operators in the Godot namespace; here they are
+// std::ops trait impls so `v << n`, `v >> n`, `v & m`, `v % d` all work directly.
+
+/// Left shift each component by `b`. Matches `operator<<(Vector3i, int)`.
+impl core::ops::Shl<u32> for Vector3i {
+    type Output = Vector3i;
+    #[inline]
+    fn shl(self, b: u32) -> Vector3i {
+        debug_assert!(b < 32);
+        Vector3i::new(self.x << b, self.y << b, self.z << b)
+    }
+}
+
+/// Arithmetic right shift each component by `b` (sign-extending).
+/// Matches `operator>>`. Rust `>>` on `i32` is already arithmetic.
+impl core::ops::Shr<u32> for Vector3i {
+    type Output = Vector3i;
+    #[inline]
+    fn shr(self, b: u32) -> Vector3i {
+        debug_assert!(b < 32);
+        Vector3i::new(self.x >> b, self.y >> b, self.z >> b)
+    }
+}
+
+/// Bitwise AND of each component with `b`. Matches `operator&(Vector3i, uint32_t)`.
+impl core::ops::BitAnd<u32> for Vector3i {
+    type Output = Vector3i;
+    #[inline]
+    fn bitand(self, b: u32) -> Vector3i {
+        Vector3i::new(self.x & b as i32, self.y & b as i32, self.z & b as i32)
+    }
+}
+
+/// Remainder of each component divided by `b`. Matches `operator%(Vector3i, int)`.
+impl core::ops::Rem<i32> for Vector3i {
+    type Output = Vector3i;
+    #[inline]
+    fn rem(self, b: i32) -> Vector3i {
+        Vector3i::new(self.x % b, self.y % b, self.z % b)
+    }
+}
+
+// ---- Hash (matches Vector3iHasher using hash_djb2_one_32) ----
+
+impl core::hash::Hash for Vector3i {
+    #[inline]
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        // Reproduces the C++ Vector3iHasher chain: djb2 over x, then y, then z.
+        // We write a single u32 so equality on equal vectors always hashes equal,
+        // independent of the Hasher's own write strategy.
+        let mut h = crate::hash::hash_djb2_one_32(self.x as u32, 5381);
+        h = crate::hash::hash_djb2_one_32(self.y as u32, h);
+        h = crate::hash::hash_djb2_one_32(self.z as u32, h);
+        state.write_u32(h);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -560,5 +874,129 @@ mod tests {
         let a = Vector3i::new(1, 2, 3);
         let b = Vector3i::new(4, 5, 6);
         assert_eq!(a + b, Vector3i::new(5, 7, 9));
+    }
+
+    #[test]
+    fn vector3i_util_helpers() {
+        assert_eq!(Vector3i::create(7), Vector3i::splat(7));
+        assert_eq!(Vector3i::new(3, 4, 5).volume_u64(), 60);
+        assert!(Vector3i::new(1, 0, 0).is_unit_vector());
+        assert!(!Vector3i::new(1, 1, 0).is_unit_vector());
+        assert!(Vector3i::new(2, 2, 2).all_members_equal());
+        assert!(!Vector3i::new(2, 2, 3).all_members_equal());
+        assert!(Vector3i::new(0, 4, 4).is_empty_size());
+        assert!(Vector3i::new(2, 2, 2).is_valid_size());
+        assert!(!Vector3i::new(-1, 2, 2).is_valid_size());
+    }
+
+    #[test]
+    fn vector3i_sort_min_max() {
+        let mut a = Vector3i::new(5, 1, 9);
+        let mut b = Vector3i::new(2, 8, 3);
+        Vector3i::sort_min_max(&mut a, &mut b);
+        assert_eq!(a, Vector3i::new(2, 1, 3));
+        assert_eq!(b, Vector3i::new(5, 8, 9));
+    }
+
+    #[test]
+    fn vector3i_zxy_zyx_index_roundtrip() {
+        let v = Vector3i::new(1, 2, 3);
+        let size = Vector3i::new(10, 10, 10);
+        // ZXY: y + sy*(x + sx*z) = 2 + 10*(1 + 10*3) = 2 + 10*31 = 312
+        assert_eq!(v.zxy_index(size), 312);
+        // ZYX: x + sx*(y + sy*z) = 1 + 10*(2 + 10*3) = 1 + 10*32 = 321
+        assert_eq!(v.zyx_index(size), 321);
+        // Inverse of ZXY recovers the vector.
+        assert_eq!(Vector3i::from_zxy_index(312, size), v);
+        // Scalar overload matches vector one.
+        assert_eq!(Vector3i::zxy_index_scalars(1, 2, 3, 10, 10), 312);
+    }
+
+    #[test]
+    fn vector3i_distances_and_dot() {
+        let a = Vector3i::new(0, 0, 0);
+        let b = Vector3i::new(1, 2, 3);
+        assert_eq!(a.manhattan_distance_to(b), 6);
+        assert_eq!(a.chebyshev_distance_to(b), 3);
+        assert_eq!(Vector3i::new(1, 2, 3).dot(Vector3i::new(4, 5, 6)), 32);
+    }
+
+    #[test]
+    fn vector3i_min_max_clamp_abs() {
+        assert_eq!(
+            Vector3i::new(1, 5, 3).min(Vector3i::new(4, 2, 6)),
+            Vector3i::new(1, 2, 3)
+        );
+        assert_eq!(
+            Vector3i::new(1, 5, 3).max(Vector3i::new(4, 2, 6)),
+            Vector3i::new(4, 5, 6)
+        );
+        assert_eq!(
+            Vector3i::new(10, 10, 10).clamp(Vector3i::new(2, 2, 2), Vector3i::new(5, 5, 5)),
+            Vector3i::new(5, 5, 5)
+        );
+        assert_eq!(Vector3i::new(-1, 2, -3).abs(), Vector3i::new(1, 2, 3));
+    }
+
+    #[test]
+    fn vector3i_div_helpers() {
+        let v = Vector3i::new(-1, 7, 4);
+        assert_eq!(v.floordiv_scalar(3), Vector3i::new(-1, 2, 1));
+        assert_eq!(v.ceildiv_scalar(3), Vector3i::new(0, 3, 2));
+        assert_eq!(
+            Vector3i::new(5, 5, 5).wrap(Vector3i::new(3, 3, 3)),
+            Vector3i::new(2, 2, 2)
+        );
+    }
+
+    #[test]
+    fn vector3i_rotate_90_axis_dispatch() {
+        let x = Vector3i::new(1, 0, 0);
+        // Rotating +X around Y by 90 CW sends +X to +Z (matches the f32 test).
+        assert_eq!(x.rotate_90(Axis::Y, true), Vector3i::new(0, 0, 1));
+        assert_eq!(x.rotate_90(Axis::Y, false), Vector3i::new(0, 0, -1));
+        // Direct helpers agree with the dispatch.
+        assert_eq!(x.rotate_y_90_cw(), x.rotate_90(Axis::Y, true));
+        assert_eq!(x.rotate_y_90_ccw(), x.rotate_90(Axis::Y, false));
+        // Slice variant applies to all elements.
+        let mut vs = [Vector3i::new(1, 0, 0), Vector3i::new(0, 1, 0)];
+        Vector3i::rotate_90_slice(&mut vs, Axis::Z, true);
+        assert_eq!(vs[0], Vector3i::new(0, -1, 0));
+        assert_eq!(vs[1], Vector3i::new(1, 0, 0));
+    }
+
+    #[test]
+    fn vector3i_bitwise_ops() {
+        let v = Vector3i::new(1, 2, 3);
+        assert_eq!(v << 1, Vector3i::new(2, 4, 6));
+        assert_eq!(Vector3i::new(-4, 8, -16) >> 1, Vector3i::new(-2, 4, -8)); // arithmetic shift
+        assert_eq!(Vector3i::new(7, 7, 7) & 3u32, Vector3i::new(3, 3, 3));
+        assert_eq!(Vector3i::new(7, 8, 9) % 3, Vector3i::new(1, 2, 0));
+    }
+
+    #[test]
+    fn vector3i_hash_matches_djb2_chain() {
+        // Equal vectors must hash equal; distinct vectors very likely differ.
+        use core::hash::{BuildHasherDefault, Hash, Hasher};
+        use std::collections::hash_map::DefaultHasher;
+        let hash_of = |v: Vector3i| -> u64 {
+            let mut h = DefaultHasher::new();
+            v.hash(&mut h);
+            h.finish()
+        };
+        assert_eq!(
+            hash_of(Vector3i::new(1, 2, 3)),
+            hash_of(Vector3i::new(1, 2, 3))
+        );
+        assert_ne!(
+            hash_of(Vector3i::new(1, 2, 3)),
+            hash_of(Vector3i::new(3, 2, 1))
+        );
+        // Sanity: also works inside a HashMap (uses our Hash impl).
+        let mut map =
+            std::collections::HashMap::<Vector3i, i32, BuildHasherDefault<DefaultHasher>>::default(
+            );
+        map.insert(Vector3i::new(1, 2, 3), 42);
+        assert_eq!(map.get(&Vector3i::new(1, 2, 3)), Some(&42));
     }
 }
