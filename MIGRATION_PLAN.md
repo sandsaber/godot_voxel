@@ -265,8 +265,11 @@ clippy/fmt чист. voxel-core кросс-компилируется под в�
 | `math::color` | `util/math/color{,8}.h` | ✅ +6 тестов (Color rgba + lerp, Color8 + packed u8/u16/u32 конверсии) |
 | `math::box3f` | `util/math/box3f.h` | ✅ +2 теста (float min/max bounds, contains, distance_squared) |
 | `math::quaternion` | `util/math/quaternionf.h` | ✅ +2 теста (length/normalize, identity default) |
+| `math::interval` | `util/math/interval.h` | ✅ +10 тестов (IntervalT<T> f32-инстанциация: все операции + интервальная математика min/max/sqrt/abs/clamp/lerp/sin/atan/atan2/floor/round/snapped/wrapf/smoothstep/squared/cubed/polynomial/get_length/pow; закрывает отложенные interval-SDF) |
+| `math::basis3f` + `transform3f` | `util/math/{basis3f,transform3f}.h` | ✅ +7 тестов (3×3 rotation matrix + affine transform; +Index/IndexMut на Vector3T) |
+| `math::conv` | `util/math/conv.h` (ZN-часть) | ✅ +2 теста (vec3i↔vec3f, floor/round/ceil_to_int) |
 
-**Осталось из Фазы 1:** `util/math` (interval, conv, transform3f, triangle и т.д.), `util/string`,
+**Осталось из Фазы 1:** `util/math` (triangle, vector3i16, и т.д. — мелочи), `util/string`,
 `util/io`, `util/memory`, `util/testing` (фреймворк parity-тестов).
 
 ### Команды для возобновления работы
@@ -274,7 +277,7 @@ clippy/fmt чист. voxel-core кросс-компилируется под в�
 git clone https://github.com/sandsaber/godot_voxel.git
 cd godot_voxel && git checkout rust/pilot
 cd rust
-cargo test                 # 86 проходят (81 unit + 5 integration; +1 ignored golden-gen)
+cargo test                 # 105 проходят (100 unit + 5 integration; +1 ignored golden-gen)
 cargo clippy --all-targets # должен быть чистый
 cargo bench                # transvoxel benches (147–238 Melem/s)
 ./scripts/android-build.sh --so   # Android aarch64 .so (NDK r29 + rust-lld workaround)
