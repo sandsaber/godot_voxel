@@ -262,8 +262,11 @@ clippy/fmt чист. voxel-core кросс-компилируется под в�
 | `math::box2i` | `util/math/box2i.h` | ✅ +10 тестов (вынесен общий `funcs::clip_range`) |
 | `containers` | `util/containers/{span,fixed_array,container_funcs}.h` | ✅ +8 тестов (Span→slice, FixedArray→`[T;N]`, Vec; алгоритмы shift_up/unordered_remove*/find_duplicate/is_uniform) |
 | `math::sdf` | `util/math/sdf.h` (скалярная часть) | ✅ +5 тестов (box/sphere/plane/torus/CSG/round_cone; interval-перегрузки отложены с `interval.h`) |
+| `math::color` | `util/math/color{,8}.h` | ✅ +6 тестов (Color rgba + lerp, Color8 + packed u8/u16/u32 конверсии) |
+| `math::box3f` | `util/math/box3f.h` | ✅ +2 теста (float min/max bounds, contains, distance_squared) |
+| `math::quaternion` | `util/math/quaternionf.h` | ✅ +2 теста (length/normalize, identity default) |
 
-**Осталось из Фазы 1:** `util/math` (Color/Color8, Quaternion, Box3f, interval, conv и т.д.), `util/string`,
+**Осталось из Фазы 1:** `util/math` (interval, conv, transform3f, triangle и т.д.), `util/string`,
 `util/io`, `util/memory`, `util/testing` (фреймворк parity-тестов).
 
 ### Команды для возобновления работы
@@ -271,7 +274,7 @@ clippy/fmt чист. voxel-core кросс-компилируется под в�
 git clone https://github.com/sandsaber/godot_voxel.git
 cd godot_voxel && git checkout rust/pilot
 cd rust
-cargo test                 # 76 проходят (71 unit + 5 integration; +1 ignored golden-gen)
+cargo test                 # 86 проходят (81 unit + 5 integration; +1 ignored golden-gen)
 cargo clippy --all-targets # должен быть чистый
 cargo bench                # transvoxel benches (147–238 Melem/s)
 ./scripts/android-build.sh --so   # Android aarch64 .so (NDK r29 + rust-lld workaround)
