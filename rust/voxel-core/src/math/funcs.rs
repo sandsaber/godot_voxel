@@ -9,12 +9,20 @@ use super::constants::UNIT_EPSILON;
 
 #[inline]
 pub fn min<T: PartialOrd>(a: T, b: T) -> T {
-    if a < b { a } else { b }
+    if a < b {
+        a
+    } else {
+        b
+    }
 }
 
 #[inline]
 pub fn max<T: PartialOrd>(a: T, b: T) -> T {
-    if a > b { a } else { b }
+    if a > b {
+        a
+    } else {
+        b
+    }
 }
 
 #[inline]
@@ -36,6 +44,23 @@ pub fn clamp<T: PartialOrd + Copy>(x: T, lo: T, hi: T) -> T {
 #[inline]
 pub fn clampf(x: f32, lo: f32, hi: f32) -> f32 {
     clamp(x, lo, hi)
+}
+
+/// Clip a 1D half-open range `[pos, pos+size)` into `[lim_pos, lim_pos+lim_size)`.
+/// Shared by `Box2i`/`Box3i::clip_range`. Mutates `pos`/`size` in place; clamps
+/// the resulting size to be non-negative.
+#[inline]
+pub fn clip_range(pos: &mut i32, size: &mut i32, lim_pos: i32, lim_size: i32) {
+    let mut max_pos = *pos + *size;
+    let lim_max_pos = lim_pos + lim_size;
+
+    *pos = clamp(*pos, lim_pos, lim_max_pos);
+    max_pos = clamp(max_pos, lim_pos, lim_max_pos);
+
+    *size = max_pos - *pos;
+    if *size < 0 {
+        *size = 0;
+    }
 }
 
 #[inline]
@@ -99,7 +124,11 @@ pub fn wrap_i32(x: i32, d: i32) -> i32 {
 /// `Math::wrapf` with zero min.
 #[inline]
 pub fn wrapf_f32(x: f32, d: f32) -> f32 {
-    if is_zero_approx(d) { 0.0 } else { x - (d * f32::floor(x / d)) }
+    if is_zero_approx(d) {
+        0.0
+    } else {
+        x - (d * f32::floor(x / d))
+    }
 }
 
 #[inline]
@@ -212,13 +241,21 @@ pub fn snappedf(value: f32, step: f32) -> f32 {
 /// Returns -1 if `x` is negative, and 1 otherwise. Returns 1 (not 0) when `x == 0`.
 #[inline]
 pub fn sign_nonzero_f32(x: f32) -> f32 {
-    if x < 0.0 { -1.0 } else { 1.0 }
+    if x < 0.0 {
+        -1.0
+    } else {
+        1.0
+    }
 }
 
 /// Returns -1 if `x` is negative, and 1 otherwise. Returns 1 (not 0) when `x == 0`.
 #[inline]
 pub fn sign_nonzero_i32(x: i32) -> i32 {
-    if x < 0 { -1 } else { 1 }
+    if x < 0 {
+        -1
+    } else {
+        1
+    }
 }
 
 #[inline]
@@ -284,8 +321,14 @@ pub fn remap_intervals_to_linear_params(
 #[inline]
 #[allow(clippy::too_many_arguments)]
 pub fn interpolate_trilinear_f32(
-    v000: f32, v100: f32, v101: f32, v001: f32,
-    v010: f32, v110: f32, v111: f32, v011: f32,
+    v000: f32,
+    v100: f32,
+    v101: f32,
+    v001: f32,
+    v010: f32,
+    v110: f32,
+    v111: f32,
+    v011: f32,
     p: super::vector3::Vector3f,
 ) -> f32 {
     let v00 = v000 + p.x * (v100 - v000);
@@ -324,29 +367,53 @@ pub fn arithmetic_rshift(a: i32, b: u32) -> i32 {
 // ---- Scalar math forwarding (Math:: namespace) ----
 
 #[inline]
-pub fn floor_f32(x: f32) -> f32 { f32::floor(x) }
+pub fn floor_f32(x: f32) -> f32 {
+    f32::floor(x)
+}
 #[inline]
-pub fn ceil_f32(x: f32) -> f32 { f32::ceil(x) }
+pub fn ceil_f32(x: f32) -> f32 {
+    f32::ceil(x)
+}
 #[inline]
-pub fn sqrt_f32(x: f32) -> f32 { f32::sqrt(x) }
+pub fn sqrt_f32(x: f32) -> f32 {
+    f32::sqrt(x)
+}
 #[inline]
-pub fn abs_f32(x: f32) -> f32 { f32::abs(x) }
+pub fn abs_f32(x: f32) -> f32 {
+    f32::abs(x)
+}
 #[inline]
-pub fn abs_i32(x: i32) -> i32 { i32::abs(x) }
+pub fn abs_i32(x: i32) -> i32 {
+    i32::abs(x)
+}
 #[inline]
-pub fn sin_f32(x: f32) -> f32 { f32::sin(x) }
+pub fn sin_f32(x: f32) -> f32 {
+    f32::sin(x)
+}
 #[inline]
-pub fn cos_f32(x: f32) -> f32 { f32::cos(x) }
+pub fn cos_f32(x: f32) -> f32 {
+    f32::cos(x)
+}
 #[inline]
-pub fn tan_f32(x: f32) -> f32 { f32::tan(x) }
+pub fn tan_f32(x: f32) -> f32 {
+    f32::tan(x)
+}
 #[inline]
-pub fn atan2_f32(y: f32, x: f32) -> f32 { f32::atan2(y, x) }
+pub fn atan2_f32(y: f32, x: f32) -> f32 {
+    f32::atan2(y, x)
+}
 #[inline]
-pub fn pow_f32(x: f32, y: f32) -> f32 { f32::powf(x, y) }
+pub fn pow_f32(x: f32, y: f32) -> f32 {
+    f32::powf(x, y)
+}
 #[inline]
-pub fn exp_f32(x: f32) -> f32 { f32::exp(x) }
+pub fn exp_f32(x: f32) -> f32 {
+    f32::exp(x)
+}
 #[inline]
-pub fn log_f32(x: f32) -> f32 { f32::ln(x) }
+pub fn log_f32(x: f32) -> f32 {
+    f32::ln(x)
+}
 
 #[cfg(test)]
 mod tests {

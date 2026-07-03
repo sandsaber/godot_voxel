@@ -6,7 +6,9 @@
 //! - [`vector3`] — `Vector3T<T>` and the `Vector3f` / `Vector3i` aliases.
 //! - [`vector2`] — `Vector2T<T>` and the `Vector2f` / `Vector2i` aliases.
 //! - [`box3i`] — `Box3i` axis-aligned integer bounds.
+//! - [`box2i`] — `Box2i` axis-aligned integer bounds.
 
+pub mod box2i;
 pub mod box3i;
 pub mod constants;
 pub mod funcs;
@@ -14,6 +16,7 @@ pub mod vector2;
 pub mod vector3;
 
 // Convenience re-exports at crate root path `voxel_core::math::*`.
+pub use box2i::Box2i;
 pub use box3i::Box3i;
 pub use constants::*;
 pub use funcs::*;

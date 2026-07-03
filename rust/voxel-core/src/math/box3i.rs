@@ -183,35 +183,20 @@ impl Box3i {
         r
     }
 
-    /// Clip a 1D range `[pos, pos+size)` into `[lim_pos, lim_pos+lim_size)`.
-    /// Matches the static `clip_range` helper.
-    fn clip_range(pos: &mut i32, size: &mut i32, lim_pos: i32, lim_size: i32) {
-        let mut max_pos = *pos + *size;
-        let lim_max_pos = lim_pos + lim_size;
-
-        *pos = funcs::clamp(*pos, lim_pos, lim_max_pos);
-        max_pos = funcs::clamp(max_pos, lim_pos, lim_max_pos);
-
-        *size = max_pos - *pos;
-        if *size < 0 {
-            *size = 0;
-        }
-    }
-
     pub fn clip(&mut self, lim: Box3i) {
-        Self::clip_range(
+        funcs::clip_range(
             &mut self.position.x,
             &mut self.size.x,
             lim.position.x,
             lim.size.x,
         );
-        Self::clip_range(
+        funcs::clip_range(
             &mut self.position.y,
             &mut self.size.y,
             lim.position.y,
             lim.size.y,
         );
-        Self::clip_range(
+        funcs::clip_range(
             &mut self.position.z,
             &mut self.size.z,
             lim.position.z,
@@ -220,9 +205,9 @@ impl Box3i {
     }
 
     pub fn clip_to_size(&mut self, lim_size: Vector3i) {
-        Self::clip_range(&mut self.position.x, &mut self.size.x, 0, lim_size.x);
-        Self::clip_range(&mut self.position.y, &mut self.size.y, 0, lim_size.y);
-        Self::clip_range(&mut self.position.z, &mut self.size.z, 0, lim_size.z);
+        funcs::clip_range(&mut self.position.x, &mut self.size.x, 0, lim_size.x);
+        funcs::clip_range(&mut self.position.y, &mut self.size.y, 0, lim_size.y);
+        funcs::clip_range(&mut self.position.z, &mut self.size.z, 0, lim_size.z);
     }
 
     pub fn clipped(&self, lim: Box3i) -> Box3i {
