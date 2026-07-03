@@ -272,8 +272,12 @@ clippy/fmt чист. voxel-core кросс-компилируется под в�
 | `math::box2f` | `util/math/box2f.h` | ✅ +4 теста (float 2D min/max box: from_min_size/intersects/clip/difference→Vec) |
 | `math::box_bounds` | `util/math/box_bounds_{2i,3i}.h` | ✅ +5 тестов (min/exclusive-max int boxes: ctors, intersects, contains half-open, size) |
 | `math::vector3i16` | `util/math/vector3i16.h` | ✅ +4 теста (`Vector3T<i16>` alias + i16 ops instance; `pack_hash` воспроизводит C++ sign-extension через int→uint64) |
+| `hash` | `util/hash_funcs.h` | ✅ +9 тестов (djb2 32/64-bit combiner, MurmurHash3 one-shot, fmix32 finalizer — переносит Godot-core хеши в `crate::hash`) |
+| `math::vector3i` utils | `util/math/vector3i.h` | ✅ +8 тестов (Vector3iUtil: create/sort_min_max/volume_u64/zxy+zyx index + inverse/distances/dot/abs/min/max/clamp/floordiv/ceildiv/wrap; 90° rotations + rotate_90/rotate_90_slice; Shl/Shr/BitAnd/Rem trait impls; Hash через djb2-цепочку Vector3iHasher; Eq на Vector3T для integer-алиасов) |
+| `math::ortho_basis` | `util/math/ortho_basis.{h,cpp}` | ✅ +11 тестов (24-элементная lookup-таблица 90°-базисов + OrthoRotationId enum + name-таблица, позиционно связаны; from_axis_turns/transpose/invert/xform/composition; таблица верифицирована биективным round-trip) |
+| `math::vector4` | `util/math/vector4{t,f}.h` | ✅ +5 тестов (Vector4T<T>: add/componentwise+scalar mul, Index; Vector4f math length_squared/normalized; исправлен upstream-баг `v.w+v.w`→`v.w*v.w` с заметкой в модуле) |
 
-**Осталось из Фазы 1:** `util/math` (ortho_basis, vector4f — мелочи), `util/string`,
+**Осталось из Фазы 1:** `util/math` завершён. Далее — `util/string`,
 `util/io`, `util/memory`, `util/testing` (фреймворк parity-тестов).
 
 ### Команды для возобновления работы
@@ -281,7 +285,7 @@ clippy/fmt чист. voxel-core кросс-компилируется под в�
 git clone https://github.com/sandsaber/godot_voxel.git
 cd godot_voxel && git checkout rust/pilot
 cd rust
-cargo test                 # 126 проходят (121 unit + 5 integration; +1 ignored golden-gen)
+cargo test                 # 156 проходят (151 unit + 5 integration; +1 ignored golden-gen)
 cargo clippy --all-targets # должен быть чистый
 cargo bench                # transvoxel benches (147–238 Melem/s)
 ./scripts/android-build.sh --so   # Android aarch64 .so (NDK r29 + rust-lld workaround)
