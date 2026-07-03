@@ -19,6 +19,7 @@ pub mod memory;
 pub mod meshers;
 pub mod storage;
 pub mod string;
+pub mod testing;
 
 /// Crate version (matches `Cargo.toml`).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
