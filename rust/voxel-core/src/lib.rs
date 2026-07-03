@@ -13,6 +13,7 @@
 
 pub mod containers;
 pub mod hash;
+pub mod io;
 pub mod math;
 pub mod memory;
 pub mod meshers;
