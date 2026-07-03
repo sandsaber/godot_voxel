@@ -33,13 +33,13 @@ pub trait VoxelBufferRead {
     fn channel_bytes(&self, channel_index: u32) -> &[u8];
 }
 
-/// Indexing helper matching C++ `get_index` (used by tests and by future
-/// per-element accessors). Layout is X-minor, Z-major:
-/// `index = x + sx * (y + sy * z)`.
+/// Indexing helper matching C++ `VoxelBuffer::get_index`. The C++ VoxelBuffer
+/// uses a ZXY memory layout: `index = y + size.y * (x + size.x * z)`. Y is the
+/// innermost axis.
 #[inline]
 pub fn voxel_index(size: Vector3i, x: usize, y: usize, z: usize) -> usize {
     debug_assert!(x < size.x as usize && y < size.y as usize && z < size.z as usize);
-    x + size.x as usize * (y + size.y as usize * z)
+    y + (size.y as usize) * (x + (size.x as usize) * z)
 }
 
 /// Number of voxels in a buffer of the given size, as `u64`. Matches
@@ -154,13 +154,18 @@ mod tests {
     use crate::math::Vector3i;
 
     #[test]
-    fn index_layout_is_x_minor_z_major() {
-        // Matches C++ get_index(x,y,z) = x + sx*(y + sy*z)
+    fn index_layout_is_zxy() {
+        // Matches C++ VoxelBuffer::get_index(x,y,z) = y + sy*(x + sx*z).
+        // Y is innermost.
         let s = Vector3i::new(4, 5, 6);
         assert_eq!(voxel_index(s, 0, 0, 0), 0);
-        assert_eq!(voxel_index(s, 1, 0, 0), 1);
-        assert_eq!(voxel_index(s, 0, 1, 0), 4);
-        assert_eq!(voxel_index(s, 0, 0, 1), 4 * 5);
+        // Y+1 advances by 1 (Y innermost).
+        assert_eq!(voxel_index(s, 0, 1, 0), 1);
+        // X+1 advances by sy (=5).
+        assert_eq!(voxel_index(s, 1, 0, 0), 5);
+        // Z+1 advances by sy*sx (=5*4=20).
+        assert_eq!(voxel_index(s, 0, 0, 1), 20);
+        // Last voxel.
         assert_eq!(voxel_index(s, 3, 4, 5), 4 * 5 * 6 - 1);
     }
 

@@ -132,11 +132,12 @@ godot_voxel (fork)
 | 0.2 | Инициализировать Cargo workspace в `rust/` | компилируемый пустой crate | `cargo build` ✅ |
 | 0.3 | Перевести `util/math/*` (Vector3f/i, Color, FixedArray) | unit-тесты | `cargo test math` ✅ |
 | 0.4 | Перевести минимальный `VoxelBuffer` (только SDF-чтение) | unit-тесты | `cargo test storage` ✅ |
-| 0.5 | Перевести `transvoxel.cpp` + lookup-таблицы | компилируется | `cargo build` ⏳ |
-| 0.6 | **Parity-тесты:** Rust vs C++ на эталонных данных | golden mesh files совпадают | ⏳ |
-| 0.7 | **Бенчмарки:** `criterion` vs C++ baseline | perf report | ⏳ |
-| 0.8 | **Cross-compile на Android NDK** | `.a` под aarch64 | ⏳ |
-| 0.9 | Документировать результаты, решение GO/NO-GO | REPORT.md | ⏳ |
+| 0.5 | Перевести `transvoxel.cpp` + lookup-таблицы | компилируется | `cargo build` ✅ |
+| 0.6 | Интеграционный тест: SDF-сфера → mesh | mesh генерируется | `cargo test` ✅ |
+| 0.7 | **Parity-тесты:** Rust vs C++ на эталонных данных | golden mesh files совпадают | ⏳ |
+| 0.8 | **Бенчмарки:** `criterion` vs C++ baseline | perf report | ⏳ |
+| 0.9 | **Cross-compile на Android NDK** | `.a` под aarch64 | ⏳ |
+| 0.10 | Документировать результаты, решение GO/NO-GO | REPORT.md | ⏳ |
 
 ### Критерий GO/NO-GO (Фаза 0)
 
@@ -226,6 +227,19 @@ godot_voxel (fork)
 | Дата | Шаг | Статус |
 |---|---|---|
 | 2026-07-03 | 0.1-0.4: workspace + math + storage | ✅ 21/21 тестов проходят, clippy чист |
+| 2026-07-03 | 0.5: transvoxel mesher (regular-cell) | ✅ 29/29 тестов проходят, mesh генерируется на SDF-сфере |
+
+### Ключевая находка при портации transvoxel
+C++ `VoxelBuffer` использует **ZXY memory layout** (`index = y + sy*(x + sx*z)`, Y innermost),
+не XYZ. Это было неочевидно и потребовало корректировки индексации в порте.
+Зафиксировано в `voxel_index` helper и в алгоритме `build_regular_mesh`.
+
+### Решение по внешним крейтам (после исследования экосистемы)
+- `transvoxel` (Gnurfos, v2.0) — **НЕ используем напрямую**: статус experimental,
+  другой формат вывода, нет parity с C++. Свой порт даёт byte-for-byte совместимость.
+- `block-mesh` — **кандидат для blocky mesher** (Фаза 3), зрелый.
+- `fastnoise-lite` (pure Rust) — **кандидат для замены FastNoise2** без C++ FFI.
+- Rapier3d — **primary для физики** (Фаза 3-4), Avian — fallback.
 
 ---
 
