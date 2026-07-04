@@ -280,12 +280,10 @@ impl Noise {
         1.0 / funcs::max(freq, 0.0001)
     }
 
-    /// Best-effort accessor for the configured frequency. fastnoise-lite stores
-    /// it as an `Option<f32>`; `None` maps to the library default (0.01).
+    /// Accessor for the configured frequency. The crate stores the effective
+    /// value directly and maps `set_frequency(None)` back to the default 0.01.
     fn frequency(&self) -> f32 {
-        // The crate doesn't expose a getter, so we mirror the C++ approach of
-        // trusting the configured value; if unset, assume the default 0.01.
-        0.01
+        self.noise.frequency
     }
 }
 
@@ -798,6 +796,18 @@ mod tests {
         let gen = configured_noise();
         let g: &dyn VoxelGenerator = &gen;
         assert_eq!(g.used_channels_mask(), 1 << ChannelId::Sdf.index());
+    }
+
+    #[test]
+    fn noise_period_tracks_configured_frequency() {
+        let mut gen = Noise::default();
+        assert!((gen.noise_period() - 100.0).abs() < 1e-5);
+
+        gen.noise_mut().set_frequency(Some(0.05));
+        assert!((gen.noise_period() - 20.0).abs() < 1e-5);
+
+        gen.noise_mut().set_frequency(Some(0.0));
+        assert!((gen.noise_period() - 10_000.0).abs() < 1e-3);
     }
 
     #[test]

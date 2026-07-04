@@ -11,7 +11,16 @@ use super::voxel_buffer::{
     DEFAULT_INDICES_CHANNEL_DEPTH, DEFAULT_SDF_CHANNEL_DEPTH, DEFAULT_TYPE_CHANNEL_DEPTH,
     DEFAULT_WEIGHTS_CHANNEL_DEPTH, MAX_CHANNELS,
 };
-use crate::math::Vector3i;
+const CHANNEL_IDS: [ChannelId; MAX_CHANNELS] = [
+    ChannelId::Type,
+    ChannelId::Sdf,
+    ChannelId::Color,
+    ChannelId::Indices,
+    ChannelId::Weights,
+    ChannelId::Data5,
+    ChannelId::Data6,
+    ChannelId::Data7,
+];
 
 /// A min/max range of supported [`ChannelDepth`]s for a given channel.
 /// Matches `VoxelFormat::DepthRange` (C++ stores raw `uint32_t` depth indices).
@@ -91,30 +100,24 @@ impl VoxelFormat {
     /// `configure_buffer`. Clears the buffer.
     pub fn configure_buffer(&self, vb: &mut VoxelBuffer) {
         let size = vb.size();
-        if size == Vector3i::zero() {
-            // No size yet; just clear (depths applied on next create).
-            apply_format_depths(vb, self);
-        } else {
-            apply_format_depths(vb, self);
-            vb.create(size);
-        }
+        vb.create(size);
+        apply_format_depths(vb, self);
     }
 }
 
 /// Apply this format's depths to `vb`'s channels (without reallocating).
 fn apply_format_depths(vb: &mut VoxelBuffer, format: &VoxelFormat) {
-    // The depths live on VoxelBuffer's channels; expose a setter via a re-create
-    // is heavy, so we set them through a tiny dedicated API. For now, channels
-    // are private, so we re-create to apply — `configure_buffer` already does
-    // this for the non-empty case; the empty case is a no-op until create.
-    // (This helper exists for parity; full per-channel depth mutation arrives
-    // when VoxelBuffer exposes `set_channel_depth`.)
-    let _ = (vb, format);
+    for (ci, channel) in CHANNEL_IDS.iter().copied().enumerate() {
+        let depth = format.depths[ci];
+        vb.set_channel_depth(ci, depth);
+        vb.clear_channel(ci, get_default_raw_value(channel, depth));
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::math::Vector3i;
     use ChannelDepth::*;
 
     #[test]
@@ -167,10 +170,30 @@ mod tests {
     #[test]
     fn default_raw_value_uses_format_depth() {
         let f = VoxelFormat::new();
-        // SDF at 16-bit default = i16::MIN encoded.
-        assert_eq!(f.default_raw_value(ChannelId::Sdf), i16::MIN as u16 as u64);
+        // SDF at 16-bit default = max positive snorm, i.e. far outside/air.
+        assert_eq!(f.default_raw_value(ChannelId::Sdf), i16::MAX as u16 as u64);
         // Type at 16-bit default = 0 (air).
         assert_eq!(f.default_raw_value(ChannelId::Type), 0);
+    }
+
+    #[test]
+    fn configure_buffer_applies_custom_depths_and_defaults() {
+        let mut f = VoxelFormat::new();
+        f.depths[ChannelId::Sdf.index()] = Bit32;
+        f.depths[ChannelId::Color.index()] = Bit16;
+
+        let mut vb = VoxelBuffer::with_size(Vector3i::new(2, 2, 2));
+        vb.set_voxel_f(-3.0, 0, 0, 0, ChannelId::Sdf.index());
+
+        f.configure_buffer(&mut vb);
+
+        assert_eq!(vb.size(), Vector3i::new(2, 2, 2));
+        assert_eq!(vb.channel_depth(ChannelId::Sdf.index()), Bit32);
+        assert_eq!(vb.channel_depth(ChannelId::Color.index()), Bit16);
+        assert_eq!(
+            vb.get_voxel_f(0, 0, 0, ChannelId::Sdf.index()),
+            crate::storage::voxel_buffer::SDF_FAR_OUTSIDE
+        );
     }
 
     #[test]

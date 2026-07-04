@@ -9,7 +9,7 @@
 ///
 /// Idiomatic Rust can also express this as `v.drain(..pos);`.
 pub fn shift_up<T>(v: &mut Vec<T>, pos: usize) {
-    if pos == 0 || pos >= v.len() {
+    if pos == 0 || pos > v.len() {
         return;
     }
     v.drain(..pos);
@@ -93,12 +93,12 @@ pub fn has_duplicate<T: PartialEq>(items: &[T]) -> bool {
 }
 
 /// True if every element equals the first (i.e. the buffer is uniform). An
-/// empty slice is uniform. Matches `is_uniform` (without the C++ bucket
+/// empty slice is not uniform. Matches `is_uniform` (without the C++ bucket
 /// micro-optimization, which LLVM vectorizes the simple loop to match).
 pub fn is_uniform<T: PartialEq>(items: &[T]) -> bool {
     match items.first() {
         Some(first) => items.iter().all(|x| x == first),
-        None => true,
+        None => false,
     }
 }
 
@@ -117,6 +117,9 @@ mod tests {
         let mut u = vec![1, 2];
         shift_up(&mut u, 5); // out of range: no-op
         assert_eq!(u, vec![1, 2]);
+        let mut clear = vec![1, 2];
+        shift_up(&mut clear, 2);
+        assert_eq!(clear, Vec::<i32>::new());
     }
 
     #[test]
@@ -148,7 +151,7 @@ mod tests {
     fn is_uniform_check() {
         assert!(is_uniform(&[7u32; 5]));
         assert!(!is_uniform(&[7u32, 7, 8]));
-        assert!(is_uniform::<u32>(&[]));
+        assert!(!is_uniform::<u32>(&[]));
     }
 
     #[test]

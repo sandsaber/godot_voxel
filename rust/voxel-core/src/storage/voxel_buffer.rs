@@ -10,11 +10,9 @@
 //! ## `QUANTIZED_SDF_*` constants
 //!
 //! `voxel_buffer.h` references `constants::QUANTIZED_SDF_{8,16}_BITS_SCALE[_INV]`,
-//! which in this fork are engine-provided (not in the module source). They scale
-//! SDF floats into the `[-1,1]` snorm range before 8/16-bit quantization. We
-//! define them here as the reciprocals of the snorm denominators (so an SDF
-//! value of ±1.0 maps to ±127/±32767 exactly); adjust if a future parity test
-//! reveals the engine uses a different SDF range.
+//! which scale SDF floats into the `[-1,1]` snorm range before 8/16-bit
+//! quantization. The C++ constants intentionally give 8-bit SDF about
+//! `[-10, 10]` range and 16-bit SDF about `[-500, 500]` range.
 
 use super::depth::ChannelDepth;
 use super::funcs;
@@ -30,16 +28,25 @@ pub const ALL_CHANNELS_MASK: u8 = 0xff;
 pub const MAX_SIZE: u32 = 65535;
 
 /// SDF quantization scale for 8-bit channels. Matches `QUANTIZED_SDF_8_BITS_SCALE`.
-/// The SDF values are already normalized into `[-1, 1]` (one voxel's distance
-/// range maps onto the snorm range), so the scale is `1.0` — `snorm_to_s8(sdf)`
-/// directly. `raw = snorm_to_s8(sdf * SCALE)`; `sdf = s8_to_snorm(raw) * SCALE_INV`.
-pub const QUANTIZED_SDF_8_BITS_SCALE: f32 = 1.0;
+/// `raw = snorm_to_s8(sdf * SCALE)`;
+/// `sdf = s8_to_snorm(raw) * SCALE_INV`.
+pub const QUANTIZED_SDF_8_BITS_SCALE: f32 = 0.1;
 /// Inverse of [`QUANTIZED_SDF_8_BITS_SCALE`].
-pub const QUANTIZED_SDF_8_BITS_SCALE_INV: f32 = 1.0;
+pub const QUANTIZED_SDF_8_BITS_SCALE_INV: f32 = 1.0 / QUANTIZED_SDF_8_BITS_SCALE;
 /// SDF quantization scale for 16-bit channels. Matches `QUANTIZED_SDF_16_BITS_SCALE`.
-pub const QUANTIZED_SDF_16_BITS_SCALE: f32 = 1.0;
+pub const QUANTIZED_SDF_16_BITS_SCALE: f32 = 0.002;
 /// Inverse of [`QUANTIZED_SDF_16_BITS_SCALE`].
-pub const QUANTIZED_SDF_16_BITS_SCALE_INV: f32 = 1.0;
+pub const QUANTIZED_SDF_16_BITS_SCALE_INV: f32 = 1.0 / QUANTIZED_SDF_16_BITS_SCALE;
+
+/// Matches `constants::SDF_FAR_OUTSIDE`.
+pub const SDF_FAR_OUTSIDE: f32 = 100.0;
+/// Matches `constants::SDF_FAR_INSIDE`.
+pub const SDF_FAR_INSIDE: f32 = -100.0;
+
+/// Matches `mixel4::encode_indices_to_packed_u16(0, 1, 2, 3)`.
+pub const MIXEL4_DEFAULT_INDICES: u64 = 0x3210;
+/// Matches `mixel4::encode_weights_to_packed_u16_lossy(255, 0, 0, 0)`.
+pub const MIXEL4_DEFAULT_WEIGHTS: u64 = 0x000f;
 
 /// Identifies a channel within a [`VoxelBuffer`]. Matches `ChannelId`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -67,14 +74,14 @@ impl ChannelId {
     /// Human-readable name. Matches `get_channel_name`.
     pub fn name(self) -> &'static str {
         match self {
-            ChannelId::Type => "Type",
-            ChannelId::Sdf => "Sdf",
-            ChannelId::Color => "Color",
-            ChannelId::Indices => "Indices",
-            ChannelId::Weights => "Weights",
-            ChannelId::Data5 => "Data5",
-            ChannelId::Data6 => "Data6",
-            ChannelId::Data7 => "Data7",
+            ChannelId::Type => "type",
+            ChannelId::Sdf => "sdf",
+            ChannelId::Color => "color",
+            ChannelId::Indices => "indices",
+            ChannelId::Weights => "weights",
+            ChannelId::Data5 => "data5",
+            ChannelId::Data6 => "data6",
+            ChannelId::Data7 => "data7",
         }
     }
 
@@ -128,42 +135,37 @@ pub const DEFAULT_INDICES_CHANNEL_DEPTH: ChannelDepth = ChannelDepth::Bit16;
 pub const DEFAULT_WEIGHTS_CHANNEL_DEPTH: ChannelDepth = ChannelDepth::Bit16;
 
 /// Get the default raw (integer) value for a channel at the given depth.
-/// Matches `VoxelBuffer::get_default_raw_value`. "Air" for type, full-solid for SDF.
+/// Matches `VoxelBuffer::get_default_raw_value`.
 pub fn get_default_raw_value(channel: ChannelId, depth: ChannelDepth) -> u64 {
     match channel {
         ChannelId::Type => 0,
-        // SDF default: max negative = fully solid (after snorm, the most-negative
-        // representable). Matches the C++ SDF default of "-1 inside solid".
         ChannelId::Sdf => get_default_sdf_raw_value(depth),
         ChannelId::Indices => get_default_indices_raw_value(depth),
-        ChannelId::Color
-        | ChannelId::Weights
-        | ChannelId::Data5
-        | ChannelId::Data6
-        | ChannelId::Data7 => 0,
+        ChannelId::Weights => MIXEL4_DEFAULT_WEIGHTS,
+        ChannelId::Color | ChannelId::Data5 | ChannelId::Data6 | ChannelId::Data7 => 0,
     }
 }
 
-/// Default SDF raw value at `depth`: the most-negative representable, encoding
-/// "fully inside the solid". Matches `get_default_sdf_raw_value`.
+/// Default SDF raw value at `depth`: far outside/air. Matches
+/// `get_default_sdf_raw_value`.
 pub fn get_default_sdf_raw_value(depth: ChannelDepth) -> u64 {
     match depth {
-        ChannelDepth::Bit8 => i8::MIN as u8 as u64,
-        ChannelDepth::Bit16 => i16::MIN as u16 as u64,
-        ChannelDepth::Bit32 => f32::to_bits(-1.0) as u64,
-        ChannelDepth::Bit64 => f64::to_bits(-1.0),
+        ChannelDepth::Bit8 => funcs::snorm_to_s8(1.0) as u8 as u64,
+        ChannelDepth::Bit16 => funcs::snorm_to_s16(1.0) as u16 as u64,
+        ChannelDepth::Bit32 => f32::to_bits(SDF_FAR_OUTSIDE) as u64,
+        ChannelDepth::Bit64 => f64::to_bits(SDF_FAR_OUTSIDE as f64),
     }
 }
 
-/// Default SDF float value at `depth`. Matches `get_default_sdf_value` (-1.0).
-pub fn get_default_sdf_value(_depth: ChannelDepth) -> f32 {
-    -1.0
+/// Default SDF float value at `depth`. Matches the decoded C++ default.
+pub fn get_default_sdf_value(depth: ChannelDepth) -> f32 {
+    raw_voxel_to_real(get_default_sdf_raw_value(depth), depth)
 }
 
-/// Default indices raw value at `depth`: all material slots 0. Matches
+/// Default indices raw value at `depth`: material slots 0,1,2,3. Matches
 /// `get_default_indices_raw_value`.
 pub fn get_default_indices_raw_value(_depth: ChannelDepth) -> u64 {
-    0
+    MIXEL4_DEFAULT_INDICES
 }
 
 /// Convert a float to a raw (integer) voxel value at `depth`. Matches
@@ -261,7 +263,7 @@ impl VoxelBuffer {
     pub fn new(allocator: Allocator) -> Self {
         Self {
             size: Vector3i::zero(),
-            channels: Default::default(),
+            channels: std::array::from_fn(default_channel_for_index),
             allocator,
             pool: None,
         }
@@ -294,9 +296,8 @@ impl VoxelBuffer {
         );
         self.size = size;
         for (i, ch) in self.channels.iter_mut().enumerate() {
-            ch.data.clear();
+            free_channel_data(self.allocator, self.pool.as_ref(), ch);
             ch.compression = Compression::Uniform;
-            ch.size_in_bytes = 0;
             // Default depths: type channel at 16-bit, sdf at 16-bit, others 8-bit,
             // matching the C++ DEFAULT_*_CHANNEL_DEPTH constants.
             ch.depth = default_depth_for_channel_index(i);
@@ -322,15 +323,19 @@ impl VoxelBuffer {
         self.channels[channel_index].depth
     }
 
-    /// Set the depth of a channel. Matches `set_channel_depth`. Only safe to
-    /// call on a freshly-created (uniform, unallocated) channel — changing the
-    /// depth of an allocated `Compression::None` channel would invalidate its
-    /// backing buffer size, which is the caller's responsibility to keep
-    /// consistent (this matches the C++ contract, where the serializer sets
-    /// depth before writing voxel bytes).
-    #[inline]
+    /// Set the depth of a channel. Matches `set_channel_depth`: changing an
+    /// allocated channel resets it to a uniform default because existing bytes
+    /// no longer match the new element width.
     pub fn set_channel_depth(&mut self, channel_index: usize, depth: ChannelDepth) {
-        self.channels[channel_index].depth = depth;
+        if self.channels[channel_index].depth == depth {
+            return;
+        }
+        let channel_id = channel_id_from_index(channel_index).unwrap();
+        let ch = &mut self.channels[channel_index];
+        free_channel_data(self.allocator, self.pool.as_ref(), ch);
+        ch.depth = depth;
+        ch.defval = get_default_raw_value(channel_id, depth);
+        ch.compression = Compression::Uniform;
     }
 
     /// Compression of a channel. Matches `get_channel_compression`.
@@ -513,14 +518,33 @@ impl VoxelBuffer {
 
     /// Copy an entire channel from `other`. Matches `copy_channel_from`.
     pub fn copy_channel_from(&mut self, other: &VoxelBuffer, channel_index: usize) {
+        assert_eq!(
+            self.size, other.size,
+            "copy_channel_from requires equal buffer sizes"
+        );
         let src = &other.channels[channel_index];
+        assert_eq!(
+            self.channels[channel_index].depth, src.depth,
+            "copy_channel_from requires equal channel depths"
+        );
+
+        if src.compression == Compression::None {
+            let bytes = src.size_in_bytes as usize;
+            let mut data = self.alloc(bytes);
+            data[..bytes].copy_from_slice(&src.data[..bytes]);
+            let dst = &mut self.channels[channel_index];
+            free_channel_data(self.allocator, self.pool.as_ref(), dst);
+            dst.defval = src.defval;
+            dst.compression = Compression::None;
+            dst.size_in_bytes = src.size_in_bytes;
+            dst.data = data;
+            return;
+        }
+
         let dst = &mut self.channels[channel_index];
         free_channel_data(self.allocator, self.pool.as_ref(), dst);
-        dst.depth = src.depth;
         dst.defval = src.defval;
-        dst.compression = src.compression;
-        dst.size_in_bytes = src.size_in_bytes;
-        dst.data = src.data.clone();
+        dst.compression = Compression::Uniform;
     }
 
     /// Copy all channels from `other`. Matches `copy_channels_from`.
@@ -557,10 +581,10 @@ fn free_channel_data(allocator: Allocator, pool: Option<&Arc<VoxelMemoryPool>>, 
         if let Some(pool) = pool {
             pool.recycle(std::mem::take(&mut ch.data));
         } else {
-            ch.data.clear();
+            ch.data = Vec::new();
         }
     } else {
-        ch.data.clear();
+        ch.data = Vec::new();
     }
     ch.size_in_bytes = 0;
 }
@@ -633,6 +657,15 @@ fn default_depth_for_channel_index(i: usize) -> ChannelDepth {
     }
 }
 
+fn default_channel_for_index(i: usize) -> Channel {
+    let depth = default_depth_for_channel_index(i);
+    Channel {
+        depth,
+        defval: get_default_raw_value(channel_id_from_index(i).unwrap(), depth),
+        ..Default::default()
+    }
+}
+
 /// Recover a `ChannelId` from a linear index, or `None` if out of range.
 fn channel_id_from_index(i: usize) -> Option<ChannelId> {
     match i {
@@ -673,23 +706,72 @@ mod tests {
             vb.channel_depth(ChannelId::Color.index()),
             ChannelDepth::Bit8
         );
+        assert_eq!(
+            vb.channel_default(ChannelId::Indices.index()),
+            0x3210,
+            "C++ mixel4 default indices encode slots 0,1,2,3"
+        );
+        assert_eq!(
+            vb.channel_default(ChannelId::Weights.index()),
+            0x000f,
+            "C++ mixel4 default weights encode full weight in slot 0"
+        );
+    }
+
+    #[test]
+    fn new_initializes_channel_defaults_before_create() {
+        let vb = VoxelBuffer::new(Allocator::Default);
+        assert_eq!(vb.size(), Vector3i::zero());
+        assert_eq!(
+            vb.channel_depth(ChannelId::Type.index()),
+            ChannelDepth::Bit16
+        );
+        assert_eq!(
+            vb.channel_depth(ChannelId::Sdf.index()),
+            ChannelDepth::Bit16
+        );
+        assert_eq!(
+            vb.channel_default(ChannelId::Sdf.index()),
+            funcs::snorm_to_s16(1.0) as u16 as u64
+        );
+        assert_eq!(
+            vb.channel_default(ChannelId::Indices.index()),
+            MIXEL4_DEFAULT_INDICES
+        );
+        assert_eq!(
+            vb.channel_default(ChannelId::Weights.index()),
+            MIXEL4_DEFAULT_WEIGHTS
+        );
     }
 
     #[test]
     fn uniform_get_returns_default() {
         let vb = VoxelBuffer::with_size(Vector3i::new(2, 2, 2));
-        // SDF channel is 16-bit by default; default raw value = i16::MIN (encoded).
+        // SDF channel is 16-bit by default; C++ defaults it to max positive
+        // snorm, i.e. "far outside"/air, not solid.
         assert_eq!(
             vb.channel_default(ChannelId::Sdf.index()),
-            i16::MIN as u16 as u64
+            funcs::snorm_to_s16(1.0) as u16 as u64
         );
-        // Decoded: i16::MIN clamps to -1.0 snorm (s16_to_snorm clamps), then
-        // * SCALE_INV (=1.0) = -1.0 — the "fully solid" SDF default.
+        // Decoded through C++ QUANTIZED_SDF_16_BITS_SCALE_INV (500.0).
         let f = vb.get_voxel_f(0, 0, 0, ChannelId::Sdf.index());
         assert!(
-            (f - (-1.0)).abs() < 1e-6,
-            "SDF default decoded to {f}, want ~-1.0"
+            (f - 500.0).abs() < 1e-3,
+            "SDF default decoded to {f}, want ~500.0"
         );
+    }
+
+    #[test]
+    fn sdf_quantization_constants_match_cpp_ranges() {
+        assert_eq!(QUANTIZED_SDF_8_BITS_SCALE, 0.1);
+        assert_eq!(QUANTIZED_SDF_8_BITS_SCALE_INV, 10.0);
+        assert_eq!(QUANTIZED_SDF_16_BITS_SCALE, 0.002);
+        assert!((QUANTIZED_SDF_16_BITS_SCALE_INV - 500.0).abs() < 1e-3);
+
+        assert_eq!(real_to_raw_voxel(10.0, ChannelDepth::Bit8), 127);
+        assert_eq!(real_to_raw_voxel(500.0, ChannelDepth::Bit16), 32767);
+        assert!((raw_voxel_to_real(127, ChannelDepth::Bit8) - 10.0).abs() < 1e-6);
+        assert!((raw_voxel_to_real(32767, ChannelDepth::Bit16) - 500.0).abs() < 1e-3);
     }
 
     #[test]
@@ -706,12 +788,36 @@ mod tests {
     }
 
     #[test]
+    fn set_channel_depth_resets_materialized_channel_storage() {
+        let mut vb = VoxelBuffer::with_size(Vector3i::new(2, 2, 2));
+        vb.set_voxel(42, 0, 0, 0, ChannelId::Type.index());
+        assert_eq!(
+            vb.channel_compression(ChannelId::Type.index()),
+            Compression::None
+        );
+
+        vb.set_channel_depth(ChannelId::Type.index(), ChannelDepth::Bit32);
+
+        assert_eq!(
+            vb.channel_compression(ChannelId::Type.index()),
+            Compression::Uniform
+        );
+        assert!(vb.channel_bytes(ChannelId::Type.index()).is_empty());
+        assert_eq!(
+            vb.channel_depth(ChannelId::Type.index()),
+            ChannelDepth::Bit32
+        );
+        vb.set_voxel(0x1122_3344, 1, 1, 1, ChannelId::Type.index());
+        assert_eq!(vb.get_voxel(1, 1, 1, ChannelId::Type.index()), 0x1122_3344);
+    }
+
+    #[test]
     fn sdf_float_roundtrip_16bit() {
         let mut vb = VoxelBuffer::with_size(Vector3i::new(2, 2, 2));
         // SDF channel is 16-bit by default.
         vb.set_voxel_f(0.5, 0, 0, 0, ChannelId::Sdf.index());
         let back = vb.get_voxel_f(0, 0, 0, ChannelId::Sdf.index());
-        assert!((back - 0.5).abs() < 1e-3, "got {back}");
+        assert!((back - 0.5).abs() < 0.02, "got {back}");
     }
 
     #[test]
@@ -788,6 +894,31 @@ mod tests {
     }
 
     #[test]
+    fn copy_channel_from_allocates_through_destination_pool() {
+        let mut src = VoxelBuffer::with_size(Vector3i::new(2, 2, 2));
+        src.set_voxel(11, 0, 0, 0, ChannelId::Type.index());
+        let pool = Arc::new(VoxelMemoryPool::new());
+        let mut dst = VoxelBuffer::new(Allocator::Pool).with_pool(pool.clone());
+        dst.create(src.size());
+
+        dst.copy_channel_from(&src, ChannelId::Type.index());
+
+        assert_eq!(pool.used_blocks(), 1);
+        assert_eq!(dst.get_voxel(0, 0, 0, ChannelId::Type.index()), 11);
+
+        dst.clear_channel(ChannelId::Type.index(), 0);
+        assert_eq!(pool.used_blocks(), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "requires equal buffer sizes")]
+    fn copy_channel_from_rejects_size_mismatch() {
+        let src = VoxelBuffer::with_size(Vector3i::new(2, 2, 2));
+        let mut dst = VoxelBuffer::with_size(Vector3i::new(1, 1, 1));
+        dst.copy_channel_from(&src, ChannelId::Type.index());
+    }
+
+    #[test]
     fn depth_byte_count() {
         assert_eq!(ChannelDepth::Bit8.byte_count(), 1);
         assert_eq!(ChannelDepth::Bit16.byte_count(), 2);
@@ -810,10 +941,27 @@ mod tests {
     }
 
     #[test]
+    fn create_recycles_existing_pooled_channel_data() {
+        let pool = Arc::new(VoxelMemoryPool::new());
+        let mut vb = VoxelBuffer::new(Allocator::Pool).with_pool(pool.clone());
+        vb.create(Vector3i::new(4, 4, 4));
+        vb.set_voxel(1, 0, 0, 0, ChannelId::Type.index());
+        assert_eq!(pool.used_blocks(), 1);
+
+        vb.create(Vector3i::new(2, 2, 2));
+
+        assert_eq!(
+            pool.used_blocks(),
+            0,
+            "create() must return materialized pooled channels before resetting"
+        );
+    }
+
+    #[test]
     fn channel_id_names() {
-        assert_eq!(ChannelId::Type.name(), "Type");
-        assert_eq!(ChannelId::Sdf.name(), "Sdf");
-        assert_eq!(ChannelId::Data7.name(), "Data7");
+        assert_eq!(ChannelId::Type.name(), "type");
+        assert_eq!(ChannelId::Sdf.name(), "sdf");
+        assert_eq!(ChannelId::Data7.name(), "data7");
     }
 
     #[test]

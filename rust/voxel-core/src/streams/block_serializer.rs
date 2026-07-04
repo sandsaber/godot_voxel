@@ -24,7 +24,10 @@
 //! behaviour when a buffer carries no metadata (the section is omitted entirely
 //! when `metadata_size == 0`). Reading a v4 stream that *does* contain metadata
 //! is also handled: the bytes are skipped (they cannot be reconstructed
-//! without the Variant codec), preserving forward-compatibility.
+//! without the Variant codec). Direct [`deserialize`] returns
+//! [`Error::MetadataSkipped`] after loading voxel data so callers can surface a
+//! warning. [`decompress_and_deserialize`] treats that same condition as
+//! non-fatal, matching the C++ wrapper-style load path.
 //!
 //! Legacy version-2/3 migration paths depend on the same Godot Variant codec
 //! and are therefore deferred as well.
@@ -199,9 +202,10 @@ fn read_raw_by_depth(r: &mut MemoryReader<'_>, depth: ChannelDepth) -> Option<u6
 // Deserialize
 // ---------------------------------------------------------------------------
 
-/// Deserialize `src` into `buffer`, re-creating it. Ported from
-/// `BlockSerializer::deserialize` (version 4 only; legacy v2/v3 migration is
-/// deferred — see the module docs).
+/// Deserialize `src` into `buffer`, re-creating it. If a version-4 metadata
+/// section is present, voxel data is loaded and [`Error::MetadataSkipped`] is
+/// returned so the caller can decide whether to treat it as a warning. Legacy
+/// v2/v3 migration is deferred — see the module docs.
 pub fn deserialize(src: &[u8], buffer: &mut VoxelBuffer) -> Result<(), Error> {
     // Quick corruption check: the last 4 bytes must be the trailing magic.
     if src.len() < BLOCK_TRAILING_MAGIC_SIZE {
@@ -258,15 +262,35 @@ pub fn deserialize(src: &[u8], buffer: &mut VoxelBuffer) -> Result<(), Error> {
         }
     }
 
-    // Anything between the channels and the trailing magic is a metadata
-    // section. This port can't reconstruct it (Variant codec not ported), so
-    // skip past it if present.
+    // Anything between the channels and the trailing magic must be a metadata
+    // section encoded as `[u32 size][size bytes]`. This port can't reconstruct
+    // it (Variant codec not ported), but it must still validate the envelope so
+    // trailing junk doesn't pass as a non-fatal metadata warning.
     let remaining_before_magic =
         (src.len() - BLOCK_TRAILING_MAGIC_SIZE).saturating_sub(r.position());
     if remaining_before_magic > 0 {
-        // The metadata section is `[u32 size][size bytes]`. We can't decode it,
-        // but we don't need to — the voxel data is already loaded.
-        return Err(Error::MetadataSkipped);
+        if remaining_before_magic < 4 {
+            return Err(Error::UnexpectedEof);
+        }
+        let metadata_pos = r.position();
+        let metadata_size = u32::from_le_bytes([
+            src[metadata_pos],
+            src[metadata_pos + 1],
+            src[metadata_pos + 2],
+            src[metadata_pos + 3],
+        ]) as usize;
+        let expected_metadata_section_len = 4usize
+            .checked_add(metadata_size)
+            .ok_or_else(|| Error::InvalidFormat("metadata section size overflow".to_string()))?;
+        if expected_metadata_section_len != remaining_before_magic {
+            return Err(Error::InvalidFormat(format!(
+                "metadata section length mismatch (declared {metadata_size}, remaining {})",
+                remaining_before_magic - 4
+            )));
+        }
+        if metadata_size > 0 {
+            return Err(Error::MetadataSkipped);
+        }
     }
 
     Ok(())
@@ -324,6 +348,13 @@ mod tests {
         // Uniform channel 1 (default Compression::Uniform).
         b.clear_channel(1, 42);
         b
+    }
+
+    fn append_metadata_section(bytes: &mut Vec<u8>, metadata: &[u8]) {
+        let magic = bytes.split_off(bytes.len() - BLOCK_TRAILING_MAGIC_SIZE);
+        bytes.extend_from_slice(&(metadata.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(metadata);
+        bytes.extend_from_slice(&magic);
     }
 
     #[test]
@@ -488,5 +519,66 @@ mod tests {
         let mut dst = VoxelBuffer::new(Allocator::Default);
         decompress_and_deserialize(&wrapped, &mut dst).unwrap();
         assert_eq!(dst.size(), src.size());
+    }
+
+    #[test]
+    fn direct_deserialize_reports_metadata_after_loading_voxels() {
+        let src = sample_buffer();
+        let mut bytes = Vec::new();
+        serialize(&src, &mut bytes).unwrap();
+        append_metadata_section(&mut bytes, b"metadata");
+
+        let mut dst = VoxelBuffer::new(Allocator::Default);
+        assert_eq!(deserialize(&bytes, &mut dst), Err(Error::MetadataSkipped));
+        assert_eq!(dst.size(), src.size());
+        assert_eq!(dst.get_voxel(3, 1, 2, 0), src.get_voxel(3, 1, 2, 0));
+    }
+
+    #[test]
+    fn deserialize_rejects_trailing_junk_before_magic() {
+        let mut bytes = Vec::new();
+        serialize(&sample_buffer(), &mut bytes).unwrap();
+        let magic = bytes.split_off(bytes.len() - BLOCK_TRAILING_MAGIC_SIZE);
+        bytes.push(0xff);
+        bytes.extend_from_slice(&magic);
+
+        let mut dst = VoxelBuffer::new(Allocator::Default);
+        assert_eq!(deserialize(&bytes, &mut dst), Err(Error::UnexpectedEof));
+    }
+
+    #[test]
+    fn deserialize_rejects_metadata_size_mismatch() {
+        let mut bytes = Vec::new();
+        serialize(&sample_buffer(), &mut bytes).unwrap();
+        let magic = bytes.split_off(bytes.len() - BLOCK_TRAILING_MAGIC_SIZE);
+        bytes.extend_from_slice(&4u32.to_le_bytes());
+        bytes.extend_from_slice(b"xy");
+        bytes.extend_from_slice(&magic);
+
+        let mut dst = VoxelBuffer::new(Allocator::Default);
+        match deserialize(&bytes, &mut dst) {
+            Err(Error::InvalidFormat(message)) => {
+                assert!(message.contains("metadata section length mismatch"));
+            }
+            other => panic!("expected metadata size mismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compressed_wrapper_rejects_malformed_metadata_envelope() {
+        let mut raw = Vec::new();
+        serialize(&sample_buffer(), &mut raw).unwrap();
+        let magic = raw.split_off(raw.len() - BLOCK_TRAILING_MAGIC_SIZE);
+        raw.push(0xff);
+        raw.extend_from_slice(&magic);
+
+        let mut wrapped = Vec::new();
+        compressed_data::compress(&raw, &mut wrapped, compressed_data::Compression::None).unwrap();
+
+        let mut dst = VoxelBuffer::new(Allocator::Default);
+        assert_eq!(
+            decompress_and_deserialize(&wrapped, &mut dst),
+            Err(Error::UnexpectedEof)
+        );
     }
 }

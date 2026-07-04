@@ -3,9 +3,8 @@
 //! Ported from `util/string/conv.{h,cpp}`. The C++ versions write into a
 //! caller-provided `Span<char>` buffer (mirroring `std::to_chars`/`snprintf`
 //! semantics) and return the number of bytes written. The Rust port keeps the
-//! same buffer-writing API for parity, but leans on Rust's native formatting
-//! under the hood (`write!` into the buffer) — the *observable* result (digits
-//! written, base-10) matches, the *float* precision matches `%.*g`.
+//! same buffer-writing API for parity. Float output follows the relevant
+//! `%.*g` rules used by the C++ `snprintf` path.
 //!
 //! Not ported: the `#ifndef USE_STD` hand-rolled digit loops (the C++ build
 //! always defines `USE_STD`, so the `std::to_chars` path is the reference).
@@ -95,33 +94,62 @@ pub fn float64_to_string(x: f64, out: &mut [u8]) -> usize {
     float_to_string_general(x, out, 16)
 }
 
-/// `%g`-style general formatting into a byte buffer. Rust's default `{}` for
-/// floats is *not* `%g`, so we replicate the significant-digit behaviour with
-/// `format!("{:.*e}")` isn't quite right either; instead we mimic `%g` by
-/// printing the shortest round-trippable representation when it fits, else the
-/// shortest `%g`-equivalent. For parity purposes the integer-exponent common
-/// cases (1.0, 1.5, -2.5, 100.0) are exact; exotic exponent forms may differ.
-fn float_to_string_general(
-    x: impl Copy + core::fmt::Display,
-    out: &mut [u8],
-    _precision: usize,
-) -> usize {
-    // The C++ uses snprintf("%.*g", precision, x). Rust has no direct %g, but the
-    // observable contract is "the digits of x, base 10, ASCII". We use the value's
-    // Display, which for f32/f64 yields a round-trippable shortest form. This
-    // matches %g for the values voxel-core actually formats (sizes, coords).
-    let s = format!("{}", x);
+/// `%g`-style general formatting into a byte buffer.
+fn float_to_string_general(x: impl Into<f64> + Copy, out: &mut [u8], precision: usize) -> usize {
+    let x = x.into();
+    let s = format_general_float(x, precision);
     let n = s.len();
     if n > out.len() {
+        let written = out.len();
+        out.copy_from_slice(&s.as_bytes()[..written]);
         debug_assert!(
             n <= out.len(),
             "float_to_string: buffer too small ({}, need {n})",
             out.len()
         );
-        return out.len().min(n); // mirror C++ clamping on overflow
+        return written; // mirror C++ clamping on overflow
     }
     out[..n].copy_from_slice(s.as_bytes());
     n
+}
+
+fn format_general_float(x: f64, precision: usize) -> String {
+    debug_assert!(precision > 0);
+    if x.is_nan() {
+        return "nan".to_string();
+    }
+    if x.is_infinite() {
+        return if x.is_sign_negative() { "-inf" } else { "inf" }.to_string();
+    }
+    if x == 0.0 {
+        return if x.is_sign_negative() {
+            "-0".to_string()
+        } else {
+            "0".to_string()
+        };
+    }
+
+    let sign = if x.is_sign_negative() { "-" } else { "" };
+    let abs = x.abs();
+    let exponent = abs.log10().floor() as i32;
+    if exponent < -4 || exponent >= precision as i32 {
+        let body = format!("{:.*e}", precision - 1, abs);
+        let (mantissa, exp) = body
+            .split_once('e')
+            .expect("scientific formatting contains exponent");
+        let mantissa = trim_float_suffix(mantissa);
+        let exp_value: i32 = exp.parse().expect("scientific exponent parses");
+        format!("{sign}{mantissa}e{exp_value:+03}")
+    } else {
+        let decimals = (precision as i32 - exponent - 1).max(0) as usize;
+        let body = format!("{abs:.decimals$}");
+        format!("{sign}{}", trim_float_suffix(&body))
+    }
+}
+
+fn trim_float_suffix(s: &str) -> &str {
+    let s = s.trim_end_matches('0');
+    s.strip_suffix('.').unwrap_or(s)
 }
 
 /// Parse a base-10 integer prefix of `s`. Returns the number of bytes consumed
@@ -156,7 +184,7 @@ pub fn string_base10_to_int32(s: &str) -> Option<(usize, i32)> {
     }
     if pos == start {
         // No digits consumed (empty or just a sign).
-        return if negative { None } else { Some((0, 0)) };
+        return None;
     }
     let v = if negative { -acc as i32 } else { acc as i32 };
     Some((pos, v))
@@ -226,6 +254,32 @@ mod tests {
         assert_eq!(&buf[..n], b"1.5");
         let n = float32_to_string(-2.5, &mut buf);
         assert_eq!(&buf[..n], b"-2.5");
+        let n = float32_to_string(123456789.0, &mut buf);
+        assert_eq!(&buf[..n], b"1.2345679e+08");
+        let n = float32_to_string(0.000012345678, &mut buf);
+        assert_eq!(&buf[..n], b"1.2345678e-05");
+    }
+
+    #[test]
+    fn float_to_string_tiny_buffer_gets_truncated_prefix() {
+        let mut buf = *b"xxxx";
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            float32_to_string(12345.0, &mut buf)
+        }));
+
+        #[cfg(debug_assertions)]
+        assert!(result.is_err());
+        #[cfg(not(debug_assertions))]
+        assert_eq!(result.unwrap(), 4);
+
+        assert_eq!(&buf, b"1234");
+    }
+
+    #[test]
+    fn float64_to_string_uses_16_significant_digits() {
+        let mut buf = [0u8; MAX_FLOAT64_CHARS_GENERAL];
+        let n = float64_to_string(1.2345678901234567, &mut buf);
+        assert_eq!(&buf[..n], b"1.234567890123457");
     }
 
     #[test]
@@ -236,8 +290,11 @@ mod tests {
         assert_eq!(string_base10_to_int32("123abc"), Some((3, 123)));
         // Negative.
         assert_eq!(string_base10_to_int32("-7"), Some((2, -7)));
-        // Trailing whitespace stops parsing (like from_chars).
-        assert_eq!(string_base10_to_int32(" 5"), Some((0, 0)));
+        // No digit at the start is a parse failure (like from_chars).
+        assert_eq!(string_base10_to_int32(" 5"), None);
+        assert_eq!(string_base10_to_int32("abc"), None);
+        assert_eq!(string_base10_to_int32(""), None);
+        assert_eq!(string_base10_to_int32("-"), None);
     }
 
     #[test]

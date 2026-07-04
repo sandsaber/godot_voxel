@@ -91,16 +91,23 @@ pub fn build_simple_cubes<F>(
                     };
                     let arrays = &mut out[material_index];
 
-                    // One unit quad at (fx, fy, d).
+                    // One unit quad at (fx, fy, d), expressed in unpadded
+                    // block coordinates. `d` already ranges from 0 at the
+                    // negative boundary; the other two axes are iterated in
+                    // padded voxel coordinates and must be shifted back.
+                    let fx0 = fx - PADDING;
+                    let fy0 = fy - PADDING;
+                    let fx1 = fx0 + 1;
+                    let fy1 = fy0 + 1;
                     let mut v = [Vector3f::new(0.0, 0.0, 0.0); 4];
-                    v[0][xa] = fx as f32;
-                    v[0][ya] = fy as f32;
-                    v[1][xa] = fx as f32 + 1.0;
-                    v[1][ya] = fy as f32;
-                    v[2][xa] = fx as f32;
-                    v[2][ya] = fy as f32 + 1.0;
-                    v[3][xa] = fx as f32 + 1.0;
-                    v[3][ya] = fy as f32 + 1.0;
+                    v[0][xa] = fx0 as f32;
+                    v[0][ya] = fy0 as f32;
+                    v[1][xa] = fx1 as f32;
+                    v[1][ya] = fy0 as f32;
+                    v[2][xa] = fx0 as f32;
+                    v[2][ya] = fy1 as f32;
+                    v[3][xa] = fx1 as f32;
+                    v[3][ya] = fy1 as f32;
                     for vi in &mut v {
                         vi[za] = d as f32;
                     }
@@ -120,6 +127,59 @@ pub fn build_simple_cubes<F>(
                     index_offsets[material_index] += 4;
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn color_from_u32(v: u32) -> Color8 {
+        Color8::from_u32(v)
+    }
+
+    fn build_buffer<F: FnMut(usize, usize, usize) -> u32>(
+        sx: usize,
+        sy: usize,
+        sz: usize,
+        mut f: F,
+    ) -> Vec<u32> {
+        let mut v = vec![0u32; sx * sy * sz];
+        for z in 0..sz {
+            for x in 0..sx {
+                for y in 0..sy {
+                    v[y + x * sy + z * sx * sy] = f(x, y, z);
+                }
+            }
+        }
+        v
+    }
+
+    #[test]
+    fn single_voxel_positions_are_unpadded() {
+        let mut out = [CubesArrays::new(), CubesArrays::new()];
+        let solid = Color8::new(255, 255, 255, 255).to_u32();
+        let transparent = Color8::new(0, 0, 0, 0).to_u32();
+        let voxels = build_buffer(3, 3, 3, |x, y, z| {
+            if (x, y, z) == (1, 1, 1) {
+                solid
+            } else {
+                transparent
+            }
+        });
+
+        build_simple_cubes(&mut out, &voxels, [3, 3, 3], color_from_u32);
+
+        assert_eq!(out[MATERIAL_OPAQUE].triangle_count(), 12);
+        assert_eq!(out[MATERIAL_OPAQUE].vertex_count(), 24);
+        for p in &out[MATERIAL_OPAQUE].positions {
+            assert!(
+                (0.0..=1.0).contains(&p.x)
+                    && (0.0..=1.0).contains(&p.y)
+                    && (0.0..=1.0).contains(&p.z),
+                "position should be in the unpadded 1x1x1 cube, got {p:?}"
+            );
         }
     }
 }

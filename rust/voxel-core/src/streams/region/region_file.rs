@@ -358,15 +358,16 @@ impl<F: VoxelFile> RegionFile<F> {
         let old_index = bi.sector_index();
         let old_count = bi.sector_count();
 
-        // Read all data after the freed region, shift it left, rewrite.
+        // Remove sectors from the end of this block, preserving its leading
+        // sectors, then shift all following blocks left.
         let sector_size = self.header.format.sector_size as u64;
-        let src_start = self.blocks_begin_offset + (old_index + count) as u64 * sector_size;
-        let dst_start = self.blocks_begin_offset + old_index as u64 * sector_size;
-        let move_len = (old_count - count) as u64 * sector_size;
+        let src_start = self.blocks_begin_offset + (old_index + old_count) as u64 * sector_size;
+        let dst_start = src_start - count as u64 * sector_size;
 
         // Read the tail that needs shifting.
         let file = self.file.as_mut().expect("file open");
         let total_len = file.len().map_err(io)?;
+        let move_len = total_len.saturating_sub(src_start);
         if move_len > 0 {
             let mut tail = vec![0u8; move_len as usize];
             file.seek(src_start).map_err(io)?;
@@ -396,9 +397,11 @@ impl<F: VoxelFile> RegionFile<F> {
                 other.set_sector_index(other.sector_index() - count);
             }
         }
-        // Trim the reverse map.
-        self.sectors
-            .truncate((self.sectors.len()).saturating_sub(count as usize));
+        // Erase the removed sectors from the reverse map. They are the last
+        // `count` sectors of the current block, not necessarily the file tail.
+        let remove_start = (old_index + old_count - count) as usize;
+        let remove_end = (old_index + old_count) as usize;
+        self.sectors.drain(remove_start..remove_end);
         Ok(())
     }
 
@@ -793,6 +796,52 @@ mod tests {
         loaded.create(Vector3i::new(2, 2, 2));
         rf.load_block(Vector3i::new(0, 0, 0), &mut loaded).unwrap();
         assert_eq!(loaded.get_voxel(0, 0, 0, 0), 7);
+    }
+
+    #[test]
+    fn shrinking_first_block_preserves_following_blocks() {
+        let mut format = small_format();
+        format.sector_size = 16;
+        let mut rf = open_memory(format);
+        let first_pos = Vector3i::new(0, 0, 0);
+        let second_pos = Vector3i::new(1, 0, 0);
+
+        let mut big = VoxelBuffer::with_size(Vector3i::new(2, 2, 2));
+        for x in 0..2 {
+            for y in 0..2 {
+                for z in 0..2 {
+                    big.set_voxel(((x * 4 + y * 2 + z) as u64) + 1, x, y, z, 0);
+                }
+            }
+        }
+        rf.save_block(first_pos, &big, compressed_data::Compression::None)
+            .unwrap();
+        rf.save_block(
+            second_pos,
+            &sample_block(99),
+            compressed_data::Compression::None,
+        )
+        .unwrap();
+        let second_index_before =
+            rf.header.blocks[rf.block_index(second_pos).unwrap()].sector_index();
+
+        rf.save_block(
+            first_pos,
+            &sample_block(7),
+            compressed_data::Compression::None,
+        )
+        .unwrap();
+
+        let second_index_after =
+            rf.header.blocks[rf.block_index(second_pos).unwrap()].sector_index();
+        assert!(
+            second_index_after < second_index_before,
+            "following block should shift left after first block shrinks"
+        );
+        let mut loaded = VoxelBuffer::new(Allocator::Default);
+        loaded.create(Vector3i::new(2, 2, 2));
+        rf.load_block(second_pos, &mut loaded).unwrap();
+        assert_eq!(loaded.get_voxel(0, 0, 0, 0), 99);
     }
 
     #[test]
