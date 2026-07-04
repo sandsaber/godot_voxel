@@ -14,8 +14,18 @@
 //!   (instanced grass / detail).
 //! - [`region`] — region-file archive format (`.vxr`): sector-based sparse
 //!   block storage with header LUT, built on [`block_serializer`].
+//! - [`stream_cache`] — in-memory `(position, lod)` → `VoxelBuffer` cache
+//!   (`BlockCache`), ported from `voxel_stream_cache`. Single-threaded; the
+//!   C++ per-LoD `RWLock` is omitted (Phase 4).
+//! - [`stream_memory`] — fake in-memory `VoxelStream` for tests (`MemoryStream`),
+//!   ported from `voxel_stream_memory`. Engine base-class machinery is omitted.
 
 pub mod block_serializer;
 pub mod compressed_data;
 pub mod instance_data;
 pub mod region;
+pub mod stream_cache;
+pub mod stream_memory;
+
+pub use stream_cache::BlockCache;
+pub use stream_memory::{LoadResult, MemoryStream, SaveMode};
