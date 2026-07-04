@@ -1,0 +1,22 @@
+[package]
+name = "voxel-gdext"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Godot 4 GDExtension bindings for the Rust voxel engine (thin layer over voxel-core)"
+
+[lib]
+name = "voxel_gdext"
+crate-type = ["cdylib"]   # GDExtensions must be shared libs
+
+[dependencies]
+voxel-core = { path = "../voxel-core" }
+# godot-rust (gdext). api-4-7 matches the installed Godot 4.7.
+godot = { version = "0.5", features = ["api-4-7"] }
+
+[features]
+default = []
+# Optional: route voxel-core's print/error helpers through Godot's logger once
+# the integration is wired up. Off for now.
+godot-logging = []

@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "voxel-core",
+    "voxel-gdext",
 ]
 
 [workspace.package]
