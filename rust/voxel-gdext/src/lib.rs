@@ -29,7 +29,10 @@ struct VoxelGdExt;
 unsafe impl ExtensionLibrary for VoxelGdExt {
     fn on_stage_init(stage: InitStage) {
         if stage == InitStage::Scene {
-            godot_print!("voxel-gdext: Scene stage initialized (voxel-core v{})", voxel_core::VERSION);
+            godot_print!(
+                "voxel-gdext: Scene stage initialized (voxel-core v{})",
+                voxel_core::VERSION
+            );
         }
     }
 }
@@ -53,11 +56,7 @@ impl INode for VoxelRustHello {
 
     fn ready(&mut self) {
         // Prove we can reach voxel-core from the binding layer.
-        godot_print!(
-            "VoxelRustHello ready — voxel-core v{} ({} unit tests in port)",
-            voxel_core::VERSION,
-            191
-        );
+        godot_print!("VoxelRustHello ready — voxel-core v{}", voxel_core::VERSION);
     }
 }
 

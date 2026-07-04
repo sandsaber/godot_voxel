@@ -162,7 +162,7 @@ godot_voxel (fork)
 ### Фаза 1: Чистое ядро (3-4 недели) — ✅ ЗАВЕРШЕНА
 - `util/math`, `containers`, `string`, `io`, `memory` полностью
 - `util/testing` (фреймворк для parity-тестов)
-- **GO-критерий:** ✅ все unit-тесты проходят (191 → 417 cumulative), clippy/fmt чист
+- **GO-критерий:** ✅ все unit-тесты проходят (191 → 439 cumulative), clippy/fmt чист
 
 ### Фаза 2: Мобильная валидация (2-3 недели) — ✅ desktop+mobile `.so` ЗАВЕРШЕН
 - Cargo targets: `aarch64-linux-android`, `x86_64-linux-android` ✅
@@ -177,11 +177,11 @@ godot_voxel (fork)
 - `meshers` (transvoxel, cubes greedy, **blocky полный**: bake+mesher+skirts+shadow) ✅
 - `generators` (Waves, Flat, Noise 3D, HeightmapNoise — через `fastnoise-lite` pure Rust) ✅
 - `format::vox` (MagicaVoxel), `constants::cube_tables`, `io` extensions ✅
-- **GO-критерий:** ✅ генерация + meshing работают (411 unit тестов); ⏳ end-to-end
+- **GO-критерий:** ✅ генерация + meshing работают (439 unit тестов); ⏳ end-to-end
   desktop/Android demo — нужен Phase 4 terrain node для интеграции
 
-### Фаза 4: Terrain + threading (8-10 недель) — ⬅️ СЛЕДУЮЩАЯ
-- `util/tasks`, `util/thread` (свой thread pool, замена WorkerThreadPool)
+### Фаза 4: Terrain + threading (8-10 недель) — НАЧАТА
+- `util/thread` wrappers ✅; `util/tasks` value types ✅; thread pool/runner — далее
 - `terrain` (VoxelTerrain, VoxelLodTerrain)
 - `generators/graph` (runtime, без редактора)
 - `VoxelStream` base + threaded stream tasks (`*_task.cpp`)
@@ -190,8 +190,8 @@ godot_voxel (fork)
   (проверка под ThreadSanitizer/loom)
 
   **План порта Phase 4 (порядок):**
-  1. `util/thread/{mutex,rw_lock}` — thin wrappers over `std::sync` (needed by file_locker, VoxelStream)
-  2. `util/tasks/{task_scheduler,threaded_task}` — thread pool replacing WorkerThreadPool
+  1. `util/thread/{mutex,rw_lock}` — ✅ wrappers over `std::sync` (recursive `Mutex`, `BinaryMutex`, `RwLock`)
+  2. `util/tasks/{task_priority,cancellation_token}` — ✅ value types; `task_scheduler`/`threaded_task` — next
   3. `io::file_locker` — cross-process file locking (depends on mutex)
   4. `streams::{voxel_stream base, load/save_block_data_task}` — threaded stream layer
   5. `engine/{voxel_data,voxel_lod_terrain,voxel_terrain}` — streaming terrain core
@@ -260,6 +260,7 @@ godot_voxel (fork)
 | 2026-07-04 | Фаза 3: `streams::region` + `io::voxel_file` | ✅ +24 теста, total 337. `streams/region/region_file.{h,cpp}` → `voxel-core/src/streams/region/{format,region_file,mod}.rs` + `io::voxel_file.rs` (`VoxelFile` trait + `StdVoxelFile`/`MemoryFile`). Region-file `.vxr` archive: header/LUT, sector allocator (append/compact/truncate), `load_block`/`save_block` через `block_serializer`. **Отложено**: forest wrapper (meta.vxrm/LRU), v2→v3 migration (needs `insert_bytes`), file locking |
 | 2026-07-04 | Фаза 3: blocky mesher (полный portable core) | ✅ +53 теста, total 391. `constants/cube_tables` + `meshers/blocky/{baked_library,bake,mesher,lod_skirts,shadow_occluders}`. Полный blocky meshing: side-culling bake pass (rasterization + pattern dedup + occlusion matrix), `generate_mesh` с AO + face culling, LOD skirts, shadow occluders. Godot Resource/editor слой → Фаза 5 |
 | 2026-07-04 | Фаза 3: streams cache/memory + HeightmapNoise — **ФАЗА 3 ЗАВЕРШЕНА** | ✅ +20 тестов, total 411. `streams/{stream_cache,stream_memory}` (engine-agnostic, без Mutex), `generators::simple::HeightmapNoise` (2D noise + Curve через `generate_heightmap`). Все engine-agnostic Phase 3 компоненты портированы |
+| 2026-07-05 | Фаза 1-3 audit fixes + старт Фазы 4 | ✅ total 439 unit. Исправлены parity gaps: `shift_up(pos=len)`, `is_uniform([])`, base10 parse без цифр, `%g`-style float formatting, SDF/mixel4 defaults + lower-case channel names, `VoxelFormat::configure_buffer`, region sector compaction, simple-cubes padding coords, Noise frequency, metadata envelope validation, `VoxelBuffer` depth reset/pool-safe channel copy. Фаза 4: `thread::{Mutex,BinaryMutex,RwLock}` + `tasks::{TaskPriority,TaskCancellationToken}` |
 
 ### Где остановились (для возобновления)
 
@@ -269,7 +270,7 @@ godot_voxel (fork)
 `VoxelRustHello` виден в GDScript, достигает `voxel_core::VERSION` через FFI.
 **Фаза 2 mobile-half — `.so` собран** (aarch64 + x86_64-android через NDK r29).
 **Фаза 3 (compute-слой) — ЗАВЕРШЕНА.** Все engine-agnostic компоненты
-портированы (411 unit тестов): storage (4 модуля), format::vox, streams
+портированы и повторно проверены audit pass'ом (439 unit тестов): storage (4 модуля), format::vox, streams
 (instance_data, compressed_data, block_serializer, region, stream_cache,
 stream_memory), generators (base, Waves, Flat, Noise, HeightmapNoise),
 meshers (transvoxel, cubes, blocky с полным bake+mesher+skirts+shadow),
@@ -290,10 +291,11 @@ constants::cube_tables, io extensions.
    template (нужен custom template `platform=android` + SDK + устройство/эмулятор).
    `.so` собирается локально через `rust/scripts/android-build.sh`; упаковка в APK
    и проверка на устройстве — вне данного окружения.
-3. **Фаза 4** — terrain + threading: `util/tasks`/`util/thread` (thread pool),
-   `terrain` (VoxelTerrain/VoxelLodTerrain), `generators::graph` runtime,
-   threaded stream tasks, `VoxelStream` base с Mutex, `VoxelData`/streaming.
-   Предыдущая фаза (3) закрыта.
+3. **Фаза 4** — terrain + threading: стартовый слой `util/thread` и task
+   value-types уже портированы; дальше `task_scheduler`/`threaded_task`,
+   `file_locker`, `VoxelStream` base с Mutex, threaded stream tasks,
+   `VoxelData`/streaming, `terrain` (VoxelTerrain/VoxelLodTerrain),
+   `generators::graph` runtime.
 
 ### Фаза 1 (в работе)
 
@@ -329,7 +331,7 @@ constants::cube_tables, io extensions.
 
 **Фаза 1 (util/*) ЗАВЕРШЕНА.** `util/{math,string,memory,io,testing}` — все портированы.
 **Отложено:** `expression_parser` → Фаза 3 (потребитель `generators/graph`);
-`file_locker` → Фаза 4 (зависит от `thread/{mutex,rw_lock}`, ещё не портированы).
+`file_locker` → Фаза 4 (следующий потребитель уже портированного `thread` layer).
 
 ### Фаза 3 (в работе)
 
@@ -378,14 +380,15 @@ Waves, Flat, Noise, HeightmapNoise), `meshers` (transvoxel, cubes, blocky с
 packing + `Ref<Image>`), `generators::graph` (нужен `expression_parser`),
 metadata-секция block_serializer (Godot Variant codec), v2/v3 legacy migration.
 
-### Фаза 4 (следующая) — план порта
+### Фаза 4 (в работе) — план порта
 
 Threading + terrain — самый сложный этап. Порядок по зависимостям:
 
 | # | Модуль | C++ источник | Зависимости | Заметки |
 |---|---|---|---|---|
-| 4.1 | `thread::mutex` / `thread::rw_lock` | `util/thread/{mutex,rw_lock}.h` | `std::sync` | Thin wrappers, открывает file_locker + VoxelStream |
-| 4.2 | `tasks::task_scheduler` / `tasks::threaded_task` | `util/tasks/*` | thread, `IThreadedTask` | Thread pool замена WorkerThreadPool |
+| 4.1 | `thread::mutex` / `thread::rw_lock` | `util/thread/{mutex,rw_lock}.h` | `std::sync` | ✅ recursive `Mutex`, `BinaryMutex`, `RwLock`; открывает file_locker + VoxelStream |
+| 4.2a | `tasks::task_priority` / `tasks::cancellation_token` | `util/tasks/{task_priority,cancellation_token}.h` | atomics | ✅ packed 4-band priority + shared cancel flag |
+| 4.2b | `tasks::task_scheduler` / `tasks::threaded_task` | `util/tasks/*` | thread, `IThreadedTask` | Thread pool замена WorkerThreadPool |
 | 4.3 | `io::file_locker` | `util/io/file_locker.h` | mutex | Cross-process file locking (отложен с Фазы 1) |
 | 4.4 | `streams::voxel_stream` (base trait) | `streams/voxel_stream.{h,cpp}` | RWLock, VoxelBuffer | Абстрактный stream с `save_block`/`load_block` |
 | 4.5 | `streams::{load,save}_block_data_task` | `streams/*_task.cpp` | tasks, VoxelStream, VoxelData | Threaded stream I/O |
@@ -407,7 +410,7 @@ conditions (проверка под ThreadSanitizer/loom).
 git clone https://github.com/sandsaber/godot_voxel.git
 cd godot_voxel && git checkout rust/pilot
 cd rust
-cargo test -p voxel-core       # 417 проходят (411 unit + 5 integration; +1 ignored golden-gen)
+cargo test -p voxel-core       # 439 unit + 5 integration + 1 doc-test; 1 ignored golden-gen
 cargo build -p voxel-gdext     # GDExtension .so (грузится в Godot 4.7)
 cargo clippy --workspace --all-targets  # должен быть чистый
 cargo bench                    # transvoxel benches (16³=143 / 32³=199 / 64³=249 Melem/s)

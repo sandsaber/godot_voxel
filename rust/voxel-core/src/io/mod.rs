@@ -10,8 +10,7 @@
 //! ## Deferred
 //!
 //! **Deferred to Phase 4** (terrain/threading): `file_locker.h` — per-path
-//! read/write locking; depends on `util/thread/{mutex,rw_lock}.h` which is not
-//! yet ported. Will be revisited when the thread primitives land.
+//! read/write locking built on the newly ported thread primitives.
 
 pub mod log;
 pub mod serialization;

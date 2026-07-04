@@ -1,8 +1,8 @@
 //! Voxel storage primitives ported from `storage/`.
 //!
-//! This is the minimal subset needed by the Phase 0 transvoxel pilot.
-//! Full `VoxelBuffer` (with compression, multiple allocators, format round-tripping)
-//! is migrated in Phase 3.
+//! Phase 3 includes the full engine-agnostic `VoxelBuffer` stack: dense storage,
+//! channel compression, memory-pool allocation, format configuration and storage
+//! helpers. Godot-facing resources and terrain streaming live in later phases.
 
 pub mod buffer;
 pub mod depth;
