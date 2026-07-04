@@ -11,6 +11,7 @@
 
 #![deny(unsafe_op_in_unsafe_fn)]
 
+pub mod constants;
 pub mod containers;
 pub mod format;
 pub mod generators;
