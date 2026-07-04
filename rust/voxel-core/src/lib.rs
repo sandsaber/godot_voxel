@@ -13,6 +13,7 @@
 
 pub mod containers;
 pub mod format;
+pub mod generators;
 pub mod hash;
 pub mod io;
 pub mod math;
