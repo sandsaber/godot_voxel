@@ -12,6 +12,7 @@
 
 use crate::constants::cube_tables::Side;
 use crate::math::{Color, Vector2f, Vector3f};
+use std::collections::HashMap;
 
 /// Maximum number of models in a library. Matches `MAX_MODELS`.
 pub const MAX_MODELS: usize = 65536;
@@ -227,6 +228,11 @@ pub struct BakedModel {
     pub box_collision_mask: u32,
     pub tags_mask: u32,
     pub box_collision_aabbs: Vec<Aabb>,
+    /// Pre-computed cutout side geometry: `(side, neighbor_shape_id)` → the
+    /// side surfaces to render when a neighbor of that shape partially occludes
+    /// `side`. Populated by the bake pass. Matches
+    /// `BakedModel::cutout_side_surfaces`.
+    pub cutout_side_surfaces: HashMap<(u8, u32), Vec<SideSurface>>,
 }
 
 impl Default for BakedModel {
@@ -247,6 +253,7 @@ impl Default for BakedModel {
             box_collision_mask: 0,
             tags_mask: 0,
             box_collision_aabbs: Vec::new(),
+            cutout_side_surfaces: HashMap::new(),
         }
     }
 }

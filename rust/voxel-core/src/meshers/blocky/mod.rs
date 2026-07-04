@@ -8,12 +8,12 @@
 //!
 //! ## Current
 //! - [`baked_library`] — `BakedModel`/`BakedLibrary`/`BakedFluid` plain-data
-//!   structs (no Godot dependency). The model-baking algorithm that populates
-//!   these lands next.
+//!   structs (no Godot dependency).
+//! - [`bake`] — side-culling matrix generation + cutout-surface baking
+//!   ([`bake::bake_library`]).
+//! - [`mesher`] — [`mesher::generate_mesh`] core algorithm (face culling + AO).
 //!
-//! ## Planned (Phase 3)
-//! - `bake` — side-culling matrix generation + cutout-surface baking.
-//! - `mesher` — `generate_mesh<T>` core algorithm (face culling + AO).
+//! ## Planned
 //! - `lod_skirts` — LOD seam-skirt appending.
 //! - `shadow_occluders` — shadow geometry generation.
 //!
@@ -21,10 +21,14 @@
 //! - The Godot `Resource` / `Ref<Material>` / editor layer (`VoxelMesherBlocky`,
 //!   `VoxelBlockyLibraryBase`, `VoxelBlockyModel*`).
 
+pub mod bake;
 pub mod baked_library;
+pub mod mesher;
 
+pub use bake::bake_library;
 pub use baked_library::{
     Aabb, BakedFluid, BakedLibrary, BakedModel, BakedModelMesh, DynamicBitset, FluidSurface,
     ModelSurface, SideSurface, AIR_ID, FLUID_BOTTOM_HEIGHT, FLUID_TOP_HEIGHT, MAX_FLUIDS,
     MAX_MATERIALS, MAX_MODELS, MAX_SURFACES, NULL_FLUID_INDEX,
 };
+pub use mesher::{generate_mesh, BlockyArrays};
