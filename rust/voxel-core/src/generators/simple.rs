@@ -370,6 +370,143 @@ impl VoxelGenerator for Noise {
     }
 }
 
+// ===========================================================================
+// HeightmapNoise (2D noise → heightmap)
+// ===========================================================================
+
+/// A baked 1D curve mapping noise output `[0,1]` to a height value. Ported
+/// from Godot's `Curve` resource (the subset used by `VoxelGeneratorNoise2D`):
+/// a lookup table sampled with linear interpolation.
+#[derive(Debug, Clone)]
+pub struct Curve {
+    /// Sampled values at evenly-spaced points in `[0, 1]`.
+    points: Vec<f32>,
+}
+
+impl Curve {
+    /// Build a curve from evenly-spaced sample points covering `[0, 1]`.
+    /// At least 2 points are required. Matches Godot `Curve::bake()` output
+    /// (the C++ generator calls `curve.sample_baked(t)`).
+    pub fn from_points(points: Vec<f32>) -> Self {
+        assert!(points.len() >= 2, "curve needs at least 2 points");
+        Self { points }
+    }
+
+    /// Identity curve: `sample(t) = t`. Useful as a default when no curve is
+    /// set (the generator applies the curve only if present).
+    pub fn identity(point_count: usize) -> Self {
+        let n = point_count.max(2);
+        Self::from_points((0..n).map(|i| i as f32 / (n - 1) as f32).collect())
+    }
+
+    /// `sample_baked(t)` — linear interpolation of the baked points. `t` is
+    /// clamped to `[0, 1]`. Matches Godot `Curve::sample_baked`.
+    pub fn sample(&self, t: f32) -> f32 {
+        let t = funcs::clamp(t, 0.0, 1.0);
+        let n = self.points.len();
+        let f = t * (n - 1) as f32;
+        let i = f as usize;
+        if i >= n - 1 {
+            return self.points[n - 1];
+        }
+        let frac = f - i as f32;
+        self.points[i] * (1.0 - frac) + self.points[i + 1] * frac
+    }
+}
+
+impl Default for Curve {
+    fn default() -> Self {
+        Self::identity(256)
+    }
+}
+
+/// Serializable noise configuration that can be cheaply cloned into a
+/// `FastNoiseLite` instance per `generate_block` call (the crate's
+/// `FastNoiseLite` doesn't implement `Clone`, so we store the settings and
+/// rebuild the sampler).
+#[derive(Debug, Clone, Default)]
+pub struct NoiseConfig {
+    pub seed: Option<i32>,
+    pub frequency: Option<f32>,
+    pub noise_type: Option<fastnoise_lite::NoiseType>,
+}
+
+impl NoiseConfig {
+    /// Build a configured `FastNoiseLite` from these settings.
+    pub fn build(&self) -> fastnoise_lite::FastNoiseLite {
+        let mut n = fastnoise_lite::FastNoiseLite::new();
+        n.set_seed(self.seed);
+        n.set_frequency(self.frequency);
+        n.set_noise_type(self.noise_type);
+        n
+    }
+}
+
+/// 2D-noise heightmap generator. Ported from `VoxelGeneratorNoise2D`.
+///
+/// Samples 2D noise per `(x, z)` column, optionally remaps it through a
+/// [`Curve`], then builds terrain via the shared [`generate_heightmap`] helper
+/// (the same path [`Waves`] uses). Unlike [`Noise`] (which does full 3D SDF),
+/// this one produces a heightmap surface.
+#[derive(Default)]
+pub struct HeightmapNoise {
+    /// Noise configuration (seed, frequency, type). Cloned into a sampler
+    /// per generation call.
+    pub noise_config: NoiseConfig,
+    /// Optional curve remapping noise `[0,1]` → height. When `None`, the raw
+    /// `0.5 + 0.5*noise` value is used.
+    pub curve: Option<Curve>,
+    /// Shared heightmap parameters (channel, range, iso_scale, offset).
+    pub heightmap: HeightmapParams,
+}
+
+impl HeightmapNoise {
+    /// Set the optional curve.
+    pub fn set_curve(&mut self, curve: Option<Curve>) {
+        self.curve = curve;
+    }
+}
+
+impl VoxelGenerator for HeightmapNoise {
+    fn generate_block(&mut self, input: VoxelQueryData<'_>) -> GenResult {
+        // Rebuild a fresh sampler from the config (FastNoiseLite isn't Clone).
+        let noise = self.noise_config.build();
+        let curve = self.curve.clone();
+        let hp = self.heightmap;
+
+        let result = match curve {
+            Some(c) => generate_heightmap(
+                input.buffer,
+                move |x, z| {
+                    let n = noise.get_noise_2d(x as f32, z as f32);
+                    c.sample(0.5 + 0.5 * n)
+                },
+                &hp,
+                input.origin_in_voxels,
+                input.lod,
+            ),
+            None => generate_heightmap(
+                input.buffer,
+                move |x, z| {
+                    let n = noise.get_noise_2d(x as f32, z as f32);
+                    0.5 + 0.5 * n
+                },
+                &hp,
+                input.origin_in_voxels,
+                input.lod,
+            ),
+        };
+
+        // The C++ compresses uniform channels after generation; do the same.
+        input.buffer.compress_uniform_channels();
+        result
+    }
+
+    fn used_channels_mask(&self) -> u32 {
+        1 << self.heightmap.channel.index()
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::field_reassign_with_default)]
 mod tests {
@@ -772,5 +909,107 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ---- HeightmapNoise: 2D noise → heightmap --------------------------
+
+    #[test]
+    fn curve_identity_samples_linearly() {
+        let c = Curve::identity(11);
+        for i in 0..=10 {
+            let t = i as f32 / 10.0;
+            assert!(
+                (c.sample(t) - t).abs() < 1e-4,
+                "identity curve at {t}: {}",
+                c.sample(t)
+            );
+        }
+    }
+
+    #[test]
+    fn curve_clamps_out_of_range() {
+        let c = Curve::identity(11);
+        assert!((c.sample(-1.0) - 0.0).abs() < 1e-4);
+        assert!((c.sample(2.0) - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn curve_from_points_interpolates() {
+        // Points: [0.0, 10.0] → at t=0.5 should be 5.0.
+        let c = Curve::from_points(vec![0.0, 10.0]);
+        assert!((c.sample(0.5) - 5.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn heightmap_noise_produces_surface_in_height_range() {
+        let mut gen = HeightmapNoise::default();
+        gen.heightmap.height_start = 0.0;
+        gen.heightmap.height_range = 20.0;
+        gen.noise_config.frequency = Some(0.1);
+        gen.noise_config.noise_type = Some(fastnoise_lite::NoiseType::OpenSimplex2);
+        gen.noise_config.seed = Some(42);
+
+        let mut buf = VoxelBuffer::with_size(Vector3i::new(4, 30, 4));
+        buf.set_channel_depth(ChannelId::Sdf.index(), crate::storage::ChannelDepth::Bit32);
+        gen.generate_block(VoxelQueryData {
+            buffer: &mut buf,
+            origin_in_voxels: Vector3i::new(0, 0, 0),
+            lod: 0,
+        });
+
+        // Heightmap in [0, 20] → SDF must transition from solid to air.
+        let mut found_solid = false;
+        let mut found_air = false;
+        for y in 0..30 {
+            let v = buf.get_voxel_f(2, y, 2, ChannelId::Sdf.index());
+            if v < 0.0 {
+                found_solid = true;
+            } else {
+                found_air = true;
+            }
+        }
+        assert!(found_solid, "no solid voxels from heightmap noise");
+        assert!(found_air, "no air voxels from heightmap noise");
+    }
+
+    #[test]
+    fn heightmap_noise_with_curve_remaps_height() {
+        // A curve that inverts: [0, 1] → [1, 0]. The surface should still
+        // appear (solid below, air above), just at inverted heights.
+        let mut gen = HeightmapNoise::default();
+        gen.heightmap.height_start = 0.0;
+        gen.heightmap.height_range = 20.0;
+        gen.noise_config.frequency = Some(0.1);
+        gen.noise_config.seed = Some(7);
+        gen.set_curve(Some(Curve::from_points(vec![1.0, 0.0])));
+
+        let mut buf = VoxelBuffer::with_size(Vector3i::new(2, 30, 2));
+        buf.set_channel_depth(ChannelId::Sdf.index(), crate::storage::ChannelDepth::Bit32);
+        gen.generate_block(VoxelQueryData {
+            buffer: &mut buf,
+            origin_in_voxels: Vector3i::new(0, 0, 0),
+            lod: 0,
+        });
+        let mut found_solid = false;
+        let mut found_air = false;
+        for y in 0..30 {
+            let v = buf.get_voxel_f(0, y, 0, ChannelId::Sdf.index());
+            if v < 0.0 {
+                found_solid = true;
+            } else {
+                found_air = true;
+            }
+        }
+        assert!(
+            found_solid && found_air,
+            "curve-remapped heightmap produced no surface"
+        );
+    }
+
+    #[test]
+    fn heightmap_noise_used_channels_mask_defaults_to_sdf() {
+        let gen = HeightmapNoise::default();
+        let g: &dyn VoxelGenerator = &gen;
+        assert_eq!(g.used_channels_mask(), 1 << ChannelId::Sdf.index());
     }
 }

@@ -243,6 +243,8 @@ godot_voxel (fork)
 | 2026-07-04 | Фаза 3: `generators::simple::Noise` (3D SDF) | ✅ +7 тестов, total 301. `generators/simple/voxel_generator_noise.{h,cpp}` → `generators/simple.rs::Noise`. **Вторая runtime-зависимость**: `fastnoise-lite` v1.1.1 (pure Rust, bit-совместим с Godot FNL). Свой per-voxel 3D loop `(noise_3d+bias)*noise_period` (не heightmap). Тесты: early-exit sentinels ±100, deterministic-same-seed, sign-change-in-slab, blocky 0/1 |
 | 2026-07-04 | Фаза 3: `meshers::cubes` (palette + greedy) | ✅ +12 тестов, total 313. `meshers/cubes/{voxel_color_palette,voxel_mesher_cubes}.{h,cpp}` → `voxel-core/src/meshers/cubes/{palette,arrays,greedy,simple}.rs`. Greedy cube meshing (binary face-culling + rectangle merge), `ColorPalette`, opaque/transparent material split. **Отложено**: atlased mode (UV packing), `VoxelMesher` interface |
 | 2026-07-04 | Фаза 3: `streams::region` + `io::voxel_file` | ✅ +24 теста, total 337. `streams/region/region_file.{h,cpp}` → `voxel-core/src/streams/region/{format,region_file,mod}.rs` + `io::voxel_file.rs` (`VoxelFile` trait + `StdVoxelFile`/`MemoryFile`). Region-file `.vxr` archive: header/LUT, sector allocator (append/compact/truncate), `load_block`/`save_block` через `block_serializer`. **Отложено**: forest wrapper (meta.vxrm/LRU), v2→v3 migration (needs `insert_bytes`), file locking |
+| 2026-07-04 | Фаза 3: blocky mesher (полный portable core) | ✅ +53 теста, total 391. `constants/cube_tables` + `meshers/blocky/{baked_library,bake,mesher,lod_skirts,shadow_occluders}`. Полный blocky meshing: side-culling bake pass (rasterization + pattern dedup + occlusion matrix), `generate_mesh` с AO + face culling, LOD skirts, shadow occluders. Godot Resource/editor слой → Фаза 5 |
+| 2026-07-04 | Фаза 3: streams cache/memory + HeightmapNoise — **ФАЗА 3 ЗАВЕРШЕНА** | ✅ +20 тестов, total 411. `streams/{stream_cache,stream_memory}` (engine-agnostic, без Mutex), `generators::simple::HeightmapNoise` (2D noise + Curve через `generate_heightmap`). Все engine-agnostic Phase 3 компоненты портированы |
 
 ### Где остановились (для возобновления)
 
@@ -251,6 +253,12 @@ godot_voxel (fork)
 Фаза 2 desktop-half — закрыт: `voxel-gdext` грузится в Godot 4.7, класс
 `VoxelRustHello` виден в GDScript, достигает `voxel_core::VERSION` через FFI.
 **Фаза 2 mobile-half — `.so` собран** (aarch64 + x86_64-android через NDK r29).
+**Фаза 3 (compute-слой) — ЗАВЕРШЕНА.** Все engine-agnostic компоненты
+портированы (411 unit тестов): storage (4 модуля), format::vox, streams
+(instance_data, compressed_data, block_serializer, region, stream_cache,
+stream_memory), generators (base, Waves, Flat, Noise, HeightmapNoise),
+meshers (transvoxel, cubes, blocky с полным bake+mesher+skirts+shadow),
+constants::cube_tables, io extensions.
 
 **H1 (partial):** C++ и Rust генерируют идентичные *позиции* вершин (606=606) и
 одинаковое *число* треугольников (1304), но reuse-cache даёт разное число вершин
@@ -267,7 +275,10 @@ godot_voxel (fork)
    template (нужен custom template `platform=android` + SDK + устройство/эмулятор).
    `.so` собирается локально через `rust/scripts/android-build.sh`; упаковка в APK
    и проверка на устройстве — вне данного окружения.
-3. **Фаза 3** — compute-слой (полный VoxelBuffer, blocky mesher, generators/noise).
+3. **Фаза 4** — terrain + threading: `util/tasks`/`util/thread` (thread pool),
+   `terrain` (VoxelTerrain/VoxelLodTerrain), `generators::graph` runtime,
+   threaded stream tasks, `VoxelStream` base с Mutex, `VoxelData`/streaming.
+   Предыдущая фаза (3) закрыта.
 
 ### Фаза 1 (в работе)
 
@@ -327,16 +338,37 @@ Compute-слой. Каждый модуль — отдельный коммит,
 | `meshers::cubes` | `meshers/cubes/{voxel_color_palette,voxel_mesher_cubes}.{h,cpp}` | ✅ +12 тестов (blocky mesher: `ColorPalette` `[Color8;256]` c default/serialise/u32 round-trip; greedy cube meshing — binary face-culling, ZXY indexing, face-axes+indices LUTs, alpha-class boundary detection, greedy rectangle merge along X then Y, opaque/transparent material split; `build_simple_cubes` non-greedy вариант. **Отложено**: atlased greedy mode (UV packing), `VoxelMesher` interface/Godot `Output` — завязаны на Godot `Array`/`Ref<Material>`/`Ref<Image>`) |
 | `io::voxel_file` | `util/godot/classes/file_access.h` (subset) | ✅ +3 теста (`VoxelFile` trait: seek/position/len/read/write/set_len/flush + `StdVoxelFile` over `std::fs::File` + in-memory `MemoryFile` for tests. Stand-in for Godot `FileAccess`; `set_len` добавлен для sector compaction которого C++ не имеет — region files чисто truncated вместо stale trailing bytes) |
 | `streams::region` | `streams/region/{region_file,file_utils}.{h,cpp}` | ✅ +21 тест (region-file archive format `.vxr`: `RegionFormat` (block_size_po2/region_size/channel_depths/sector_size/palette) с `validate`/`verify_block`/`header_size_v3`; `RegionBlockInfo` (24-bit sector_index + 8-bit sector_count packed u32); `RegionFile` — header save/load (VXR_ magic v3), sector allocator (append/compact/`remove_sectors_from_block`), `load_block`/`save_block` через `block_serializer` + `compressed_data`. **Отложено**: forest wrapper (`VoxelStreamRegionFiles`, meta.vxrm JSON, LRU cache, lod-dir layout), v2→v3 legacy migration (needs `insert_bytes`), file locking) |
+| `constants::cube_tables` | `constants/cube_tables.{h,cpp}` | ✅ +11 тестов (Side/Edge/Corner enums + LUTs: CORNER_POSITION, SIDE_NORMALS, SIDE_CORNERS, SIDE_EDGES, EDGE_CORNERS, OPPOSITE_SIDE, MOORE_NEIGHBORING_3D, ORDERED_MOORE_AREA_3D; `dir_to_side`. Фундамент для blocky/cubes meshers) |
+| `meshers::blocky::baked_library` | `meshers/blocky/blocky_baked_library.h` | ✅ +8 тестов (plain-data model library: `BakedModel`/`BakedModelMesh`/`ModelSurface`/`SideSurface` с geometry arrays + side masks + pattern indices; `BakedLibrary` с `DynamicBitset` occlusion matrix; `BakedFluid`/`FluidSurface`; `Aabb` stand-in для Godot AABB. Godot Resource/editor слой → Фаза 5) |
+| `meshers::blocky::bake` | `meshers/blocky/voxel_blocky_library_base.cpp` (bake pass) | ✅ +9 тестов (side-culling matrix generation: `SideBitmap` `[u64;4]` rasterization, `detect_single_quad`, `rasterize_triangle_barycentric`, `generate_side_culling_matrix` — rasterizes side geometry → deduplicates patterns → builds occlusion matrix + `full_sides_mask`/`empty_sides_mask`/`side_pattern_indices`/`contributes_to_ao`; cutout-surface baking. `bake_library` entry point) |
+| `meshers::blocky::mesher` | `meshers/blocky/voxel_mesher_blocky.{h,cpp}` (core) | ✅ +7 тестов (`generate_mesh<T>` core algorithm: neighbor-based face culling via `is_face_visible*`, baked geometry emission, 0fps-style corner ambient occlusion, cutout-surface lookup. `BlockyArrays` output struct. Godot `VoxelMesherBlocky` class/build()/`_bind_methods` → Фаза 5) |
+| `meshers::blocky::lod_skirts` | `meshers/blocky/blocky_lod_skirts.h` | ✅ +6 тестов (`append_skirts`/`append_side_skirts` — LOD seam-skirt geometry для всех 6 сторон. `TintSampler` → `skirt_depth: f32` (tint integration отложен до Фазы 5)) |
+| `meshers::blocky::shadow_occluders` | `meshers/blocky/blocky_shadow_occluders.{h,cpp}` | ✅ +12 тестов (`generate_shadow_occluders`/`generate_occluders_geometry`/`classify_chunk_occlusion_from_voxels` — shadow geometry из per-face box quads с точным winding per side; `ShadowOccluderArrays`; две bit-ordering конвенции reproduced + задокументированы) |
+| `streams::stream_cache` | `streams/voxel_stream_cache.{h,cpp}` | ✅ +8 тестов (`BlockCache` — in-memory `(Vector3i, lod) → VoxelBuffer` cache через `HashMap`. RWLock опущен — single-threaded как весь Rust-порт; threading в Фазе 4) |
+| `streams::stream_memory` | `streams/voxel_stream_memory.{h,cpp}` | ✅ +6 тестов (`MemoryStream` — "fake" in-memory stream для тестов: `save_block`/`load_block`/`SaveMode`/`LoadResult`. Godot `VoxelStream` base/Mutex → Фаза 4) |
+| `generators::simple::HeightmapNoise` | `generators/simple/voxel_generator_noise_2d.{h,cpp}` | ✅ +6 тестов (2D-noise heightmap через `generate_heightmap`: `NoiseConfig` (Clone-able seed/freq/type → rebuild FastNoiseLite per call), optional `Curve` remap `[0,1]→height` с linear interpolation, `compress_uniform_channels` post-generation. Godot `Ref<Noise>`/`Ref<Curve>`/signal handling → Фаза 5) |
 
-**Далее из Фазы 3:** generators (noise — simple/heightmap/waves), meshers
-(cubes → blocky), streams (block_serializer → region форматы; vox-формат готов).
+**Фаза 3 (compute-слой) ЗАВЕРШЕНА.** Все engine-agnostic компоненты портированы:
+`storage` (4 модуля), `format::vox`, `streams` (instance_data, compressed_data,
+block_serializer, region, stream_cache, stream_memory), `generators` (base,
+Waves, Flat, Noise, HeightmapNoise), `meshers` (transvoxel, cubes, blocky с
+полным bake+mesher+skirts+shadow), `constants::cube_tables`, `io` extensions.
+
+**Отложено в Фазу 4** (threading/terrain): threaded tasks (`*_task.cpp`),
+`VoxelStream` base с Mutex, file_locker, `VoxelData`/streaming dependency.
+
+**Отложено в Фазу 5** (Godot binding): все `Resource`/`GDCLASS`/`Ref<Material>`/
+`Ref<Mesh>`/editor слои (`VoxelMesherBlocky`, `VoxelBlockyLibraryBase`,
+`VoxelBlockyModel*`, `voxel_block_serializer_gd`), atlased cubes mode (UV
+packing + `Ref<Image>`), `generators::graph` (нужен `expression_parser`),
+metadata-секция block_serializer (Godot Variant codec), v2/v3 legacy migration.
 
 ### Команды для возобновления работы
 ```bash
 git clone https://github.com/sandsaber/godot_voxel.git
 cd godot_voxel && git checkout rust/pilot
 cd rust
-cargo test -p voxel-core       # 342 проходят (337 unit + 5 integration; +1 ignored golden-gen)
+cargo test -p voxel-core       # 416 проходят (411 unit + 5 integration; +1 ignored golden-gen)
 cargo build -p voxel-gdext     # GDExtension .so (грузится в Godot 4.7)
 cargo clippy --workspace --all-targets  # должен быть чистый
 cargo bench                    # transvoxel benches (16³=143 / 32³=199 / 64³=249 Melem/s)
