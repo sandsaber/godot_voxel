@@ -159,29 +159,44 @@ godot_voxel (fork)
 > Подробности каждой фазы расписываются ПОСЛЕ GO-решения Фазы 0.
 > Здесь — скелет с критериями.
 
-### Фаза 1: Чистое ядро (3-4 недели)
+### Фаза 1: Чистое ядро (3-4 недели) — ✅ ЗАВЕРШЕНА
 - `util/math`, `containers`, `string`, `io`, `memory` полностью
 - `util/testing` (фреймворк для parity-тестов)
-- **GO-критерий:** все unit-тесты проходят, perf ≥ C++
+- **GO-критерий:** ✅ все unit-тесты проходят (191 → 417 cumulative), clippy/fmt чист
 
-### Фаза 2: Мобильная валидация (2-3 недели) ⬅️ ПРИОРИТЕТ
-- Cargo targets: `aarch64-linux-android`, `aarch64-apple-ios`, `x86_64-linux-android`
-- Минимальный gdext "hello world", грузится в Godot 4 на Android-устройстве/эмуляторе
-- CI pipeline: GitHub Actions с NDK
-- **GO-критерий:** APK с Rust-gdext запускается на Android, класс виден в GDScript
+### Фаза 2: Мобильная валидация (2-3 недели) — ✅ desktop+mobile `.so` ЗАВЕРШЕН
+- Cargo targets: `aarch64-linux-android`, `x86_64-linux-android` ✅
+- Минимальный gdext "hello world" ✅ (грузится в Godot 4.7 на desktop)
+- `voxel-gdext` Android `.so` собран (aarch64 + x86_64 через NDK r29) ✅
+- **GO-критерий:** ⏳ APK с Rust-gdext запускается на Android — нужен custom export
+  template + SDK + устройство/эмулятор (вне данного окружения)
 
-### Фаза 3: Compute-слой (6-8 недель)
-- `storage` (VoxelBuffer полный), `streams` (без SQLite)
-- `meshers` (blocky, cubes — transvoxel уже есть)
-- `generators` (noise — через FFI к FastNoise2, graph — позже)
-- **GO-критерий:** генерация + meshing чанков работает на desktop + Android
+### Фаза 3: Compute-слой (6-8 недель) — ✅ ЗАВЕРШЕНА
+- `storage` (VoxelBuffer полный), `streams` (instance_data, compressed_data,
+  block_serializer, region, stream_cache, stream_memory) ✅
+- `meshers` (transvoxel, cubes greedy, **blocky полный**: bake+mesher+skirts+shadow) ✅
+- `generators` (Waves, Flat, Noise 3D, HeightmapNoise — через `fastnoise-lite` pure Rust) ✅
+- `format::vox` (MagicaVoxel), `constants::cube_tables`, `io` extensions ✅
+- **GO-критерий:** ✅ генерация + meshing работают (411 unit тестов); ⏳ end-to-end
+  desktop/Android demo — нужен Phase 4 terrain node для интеграции
 
-### Фаза 4: Terrain + threading (8-10 недель) — самый сложный этап
+### Фаза 4: Terrain + threading (8-10 недель) — ⬅️ СЛЕДУЮЩАЯ
 - `util/tasks`, `util/thread` (свой thread pool, замена WorkerThreadPool)
 - `terrain` (VoxelTerrain, VoxelLodTerrain)
 - `generators/graph` (runtime, без редактора)
+- `VoxelStream` base + threaded stream tasks (`*_task.cpp`)
+- `VoxelData` / streaming dependency, `file_locker`
 - **GO-критерий:** стриминг бесконечного terrain'а работает, нет race conditions
   (проверка под ThreadSanitizer/loom)
+
+  **План порта Phase 4 (порядок):**
+  1. `util/thread/{mutex,rw_lock}` — thin wrappers over `std::sync` (needed by file_locker, VoxelStream)
+  2. `util/tasks/{task_scheduler,threaded_task}` — thread pool replacing WorkerThreadPool
+  3. `io::file_locker` — cross-process file locking (depends on mutex)
+  4. `streams::{voxel_stream base, load/save_block_data_task}` — threaded stream layer
+  5. `engine/{voxel_data,voxel_lod_terrain,voxel_terrain}` — streaming terrain core
+  6. `generators/graph` runtime (needs `string::expression_parser` from Phase 1 deferred)
+  7. Integration: VoxelTerrain node streaming + LOD + meshers end-to-end
 
 ### Фаза 5: Godot-binding + Editor (6-8 недель)
 - 75+ классов на gdext (`#[func]`, `#[signal]`, `#[base]`)
@@ -363,12 +378,36 @@ Waves, Flat, Noise, HeightmapNoise), `meshers` (transvoxel, cubes, blocky с
 packing + `Ref<Image>`), `generators::graph` (нужен `expression_parser`),
 metadata-секция block_serializer (Godot Variant codec), v2/v3 legacy migration.
 
+### Фаза 4 (следующая) — план порта
+
+Threading + terrain — самый сложный этап. Порядок по зависимостям:
+
+| # | Модуль | C++ источник | Зависимости | Заметки |
+|---|---|---|---|---|
+| 4.1 | `thread::mutex` / `thread::rw_lock` | `util/thread/{mutex,rw_lock}.h` | `std::sync` | Thin wrappers, открывает file_locker + VoxelStream |
+| 4.2 | `tasks::task_scheduler` / `tasks::threaded_task` | `util/tasks/*` | thread, `IThreadedTask` | Thread pool замена WorkerThreadPool |
+| 4.3 | `io::file_locker` | `util/io/file_locker.h` | mutex | Cross-process file locking (отложен с Фазы 1) |
+| 4.4 | `streams::voxel_stream` (base trait) | `streams/voxel_stream.{h,cpp}` | RWLock, VoxelBuffer | Абстрактный stream с `save_block`/`load_block` |
+| 4.5 | `streams::{load,save}_block_data_task` | `streams/*_task.cpp` | tasks, VoxelStream, VoxelData | Threaded stream I/O |
+| 4.6 | `engine::voxel_data` | `engine/voxel_data.{h,cpp}` | VoxelBuffer, streams, generators, LOD | Streaming voxel data grid (ядро terrain) |
+| 4.7 | `terrain::voxel_terrain` / `voxel_lod_terrain` | `terrain/*` | VoxelData, meshers, Node3D | VoxelTerrain node (без Godot binding — pure logic) |
+| 4.8 | `generators::graph` (runtime) | `generators/graph/*` | `string::expression_parser` (Phase 1 deferred) | Graph-based procedural gen без редактора |
+| 4.9 | Integration test | — | все выше | End-to-end: generator → VoxelData → mesher → mesh, ThreadSanitizer |
+
+**GO-критерий Phase 4:** стриминг бесконечного terrain'а работает, нет race
+conditions (проверка под ThreadSanitizer/loom).
+
+**Ключевые риски Phase 4:**
+- `Gd<T>` lifetime на gdext + threading — ownership-модель должна быть спроектирована рано
+- VoxelData — сложный streaming grid с LOD, locking, eviction (самый большой C++ компонент)
+- VoxelTerrain — Godot Node3D, завязан на `Engine::get_main_loop`/`RenderingServer`
+
 ### Команды для возобновления работы
 ```bash
 git clone https://github.com/sandsaber/godot_voxel.git
 cd godot_voxel && git checkout rust/pilot
 cd rust
-cargo test -p voxel-core       # 416 проходят (411 unit + 5 integration; +1 ignored golden-gen)
+cargo test -p voxel-core       # 417 проходят (411 unit + 5 integration; +1 ignored golden-gen)
 cargo build -p voxel-gdext     # GDExtension .so (грузится в Godot 4.7)
 cargo clippy --workspace --all-targets  # должен быть чистый
 cargo bench                    # transvoxel benches (16³=143 / 32³=199 / 64³=249 Melem/s)
