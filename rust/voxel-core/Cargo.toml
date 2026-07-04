@@ -11,6 +11,14 @@ name = "voxel_core"
 path = "src/lib.rs"
 
 [dependencies]
+# Pure-Rust LZ4 (no C, no FFI) — keeps Android/WASM cross-compilation clean.
+# Used by `streams::compressed_data` for the LZ4/LZ4_BE block formats.
+lz4_flex = "0.11"
+
+# Optional ZSTD support. Off by default so the default build stays pure-Rust;
+# enable for parity with the C++ CompressedData::COMPRESSION_ZSTD path. The
+# `zstd` crate bundles a C library, which is why it lives behind a feature.
+zstd = { version = "0.13", optional = true, default-features = false }
 
 [dev-dependencies]
 # Used for parity tests against C++ reference outputs
@@ -24,6 +32,10 @@ default = []
 # Enable debug allocation counters (mirrors C++ StdDefaultAllocatorCounters).
 # Off by default to avoid atomic overhead in hot paths.
 alloc-counters = []
+# Enable ZSTD compression/decompression parity with the C++ CompressedData path.
+# Off by default to keep the runtime dependency tree pure-Rust (Android/WASM).
+# When disabled, ZSTD streams parse but return `Unsupported` on de/compress.
+zstd = ["dep:zstd"]
 
 # `cargo bench` entry point. `harness = false` lets criterion provide main().
 [[bench]]

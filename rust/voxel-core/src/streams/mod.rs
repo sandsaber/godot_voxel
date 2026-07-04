@@ -6,11 +6,13 @@
 //! `.vox` parser in [`crate::format::vox`].
 //!
 //! ## Current
+//! - [`compressed_data`] — LZ4/ZSTD compression envelope used by the block
+//!   serializer. LZ4 is pure-Rust (`lz4_flex`); ZSTD is behind a feature.
 //! - [`instance_data`] — lossy-compressed per-block instance transforms
 //!   (instanced grass / detail).
 //!
 //! ## Planned (Phase 3+)
-//! - `compressed_data` — LZ4/ZSTD compression envelope (needs the `lz4` crate).
 //! - `block_serializer` — `VoxelBuffer` ↔ bytes, depends on `compressed_data`.
 
+pub mod compressed_data;
 pub mod instance_data;

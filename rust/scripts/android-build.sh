@@ -106,8 +106,21 @@ esac
 if [[ "$CRATE" == "core" ]]; then
     case "$OUT_TYPE" in
         staticlib)
+            # NOTE: `cargo rustc --crate-type staticlib` does not build rlib
+            # dependencies for the target triple (rust-lang/cargo#9562), which
+            # broke once voxel-core gained lz4_flex as a dependency. The
+            # production Android artifact is the gdext `.so` (built via the
+            # default mode above); this staticlib mode is kept only for the
+            # Phase 0 H4 smoke check, so we build the rlib normally first to
+            # populate the target dep cache, then emit the `.a`.
             echo "→ $TARGET $PROFILE voxel-core staticlib (.a)"
-            cargo rustc $CARGO_PROFILE_FLAG --target "$TARGET" -p voxel-core -- --crate-type staticlib
+            cargo build $CARGO_PROFILE_FLAG --target "$TARGET" -p voxel-core
+            if ! cargo rustc $CARGO_PROFILE_FLAG --target "$TARGET" -p voxel-core -- --crate-type staticlib 2>/tmp/voxel_staticlib_err; then
+                echo "  staticlib emit failed (deps not in target cache as rlib);" >&2
+                echo "  the rlib built above is the portable artifact. See script header." >&2
+                cat /tmp/voxel_staticlib_err >&2
+                exit 1
+            fi
             ;;
         cdylib)
             echo "→ $TARGET $PROFILE voxel-core shared library (.so)"

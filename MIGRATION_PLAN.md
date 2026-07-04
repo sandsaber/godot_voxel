@@ -237,6 +237,7 @@ godot_voxel (fork)
 | 2026-07-04 | Фаза 2 mobile-half: voxel-gdext Android `.so` (NDK r29) | ✅ `libvoxel_gdext.so` собран для aarch64 (3.2 MB) **и** x86_64-android (3.2 MB, эмулятор), оба экспортируют `gdext_rust_init`. `rust/scripts/android-build.sh` расширен: дефолт — gdext `.so`, `--core` — voxel-core; `CC`/`CXX` пробрасываются в `godot-cpp`. `.gdextension.in` дополнен `android.x86_64` |
 | 2026-07-04 | Фаза 3: `format::vox` (MagicaVoxel `.vox` парсер) | ✅ +23 теста, total 244. `streams/vox/vox_data.{h,cpp}` → `voxel-core/src/format/vox/{data,parser,tests}.rs`. Чистый Rust, ноль новых зависимостей; `&[u8]` cursor вместо `FileAccess`, `Node` enum вместо C++ inheritance, rotation-byte→Basis3f decode с fallback для out-of-spec байт |
 | 2026-07-04 | Фаза 3: `streams::instance_data` + io fallible API | ✅ +13 тестов, total 257. `streams/instance_data.{h,cpp}` → `voxel-core/src/streams/instance_data.rs`. Расширение `MemoryReader`: `try_get_*`/`try_take` (Option, без panic) + `set_endianness` для v0 big-endian backcompat. `DeserializeError` enum, round-trip с quantization tolerance |
+| 2026-07-04 | Фаза 3: `streams::compressed_data` (LZ4/ZSTD) | ✅ +12 тестов, total 269. `streams/compressed_data.{h,cpp}` → `voxel-core/src/streams/compressed_data.rs`. **Первая runtime-зависимость** voxel-core: `lz4_flex` (pure Rust, без C) для LZ4/LZ4_BE, `zstd` под optional feature. Android gdext `.so` перепроверен (aarch64 + x86_64) — собирается с новой зависимостью. `cargo rustc --crate-type staticlib` упирается в cargo#9562 (задокументировано в `android-build.sh`), но production-артефакт `.so` работает |
 
 ### Где остановились (для возобновления)
 
@@ -312,6 +313,7 @@ Compute-слой. Каждый модуль — отдельный коммит,
 | `format::vox` | `streams/vox/vox_data.{h,cpp}` | ✅ +23 теста (MagicaVoxel `.vox` парсер: header SIZE/XYZI/RGBA/nTRN/nGRP/nSHP/LAYR/MATL чанки, scene-graph валидация, rotation-byte→Basis3f decode c fallback на identity для out-of-spec байт, default palette parity с C++ `g_default_palette`, `magica_to_opengl` axis swap). `Node` → идиоматичный Rust enum вместо C++ inheritance; `FileAccess` → `&[u8]` cursor с `Result<_, VoxError>`. Godot-shim `vox_loader.cpp` отложен до binding-слоя) |
 | `io::serialization` (расширение) | `util/io/serialization.h` (MemoryReader) | ✅ +fallible API: `try_get_8/16/32/float` + `try_take` возвращают `Option` (без panic на EOF) и `set_endianness` для on-the-fly переключения byte order. Нужно для `instance_data` (чтение из untrusted-источников) и legacy v0 big-endian форматов |
 | `streams::instance_data` | `streams/instance_data.{h,cpp}` | ✅ +13 тестов (lossy-compressed per-block instance transforms `FORMAT_SIMPLE_11B_V1`: position→3×u16, scale→u8, rotation→4×u8 quaternion; serialize/deserialize с v0 big-endian backcompat через `set_endianness`, trailing magic `0x900df00d`, scale-range clamp; `DeserializeError` enum вместо bool; round-trip тесты с quantization tolerance) |
+| `streams::compressed_data` | `streams/compressed_data.{h,cpp}` | ✅ +12 тестов (LZ4/ZSTD compression envelope: NONE/LZ4/LZ4_BE(legacy big-endian)/ZSTD; LZ4 через **`lz4_flex`** (pure Rust, без C — важно для Android/WASM), ZSTD через optional `zstd` feature; `Compression` enum c wire-format discriminants, `Error` enum, round-trip для compressive/incompressible/empty payloads, byte-order проверка LZ4_BE vs LZ4, error paths). **Первая runtime-зависимость** voxel-core |
 
 **Далее из Фазы 3:** generators (noise — simple/heightmap/waves), meshers
 (cubes → blocky), streams (block_serializer → region форматы; vox-формат готов).
@@ -321,7 +323,7 @@ Compute-слой. Каждый модуль — отдельный коммит,
 git clone https://github.com/sandsaber/godot_voxel.git
 cd godot_voxel && git checkout rust/pilot
 cd rust
-cargo test -p voxel-core       # 262 проходят (257 unit + 5 integration; +1 ignored golden-gen)
+cargo test -p voxel-core       # 274 проходят (269 unit + 5 integration; +1 ignored golden-gen)
 cargo build -p voxel-gdext     # GDExtension .so (грузится в Godot 4.7)
 cargo clippy --workspace --all-targets  # должен быть чистый
 cargo bench                    # transvoxel benches (16³=143 / 32³=199 / 64³=249 Melem/s)
@@ -345,6 +347,12 @@ cargo bench                    # transvoxel benches (16³=143 / 32³=199 / 64³=
 ### Решение по внешним крейтам (после исследования экосистемы)
 - `transvoxel` (Gnurfos, v2.0) — **НЕ используем напрямую**: статус experimental,
   другой формат вывода, нет parity с C++. Свой порт даёт byte-for-byte совместимость.
+- `lz4_flex` (pure Rust, v0.11) — **принято для `streams::compressed_data`** ✅: fastest
+  pure-Rust LZ4, byte-совместим с C-референсом на уровне блока, `#![no_std]`-совместим.
+  Выбран вместо `lz4` (C bindings) ради чистой Android/WASM кросс-компиляции.
+- `zstd` (v0.13, C bindings через `zstd-sys`) — **optional feature** в voxel-core: C++
+  поддерживает ZSTD всегда, но для дефолтной мобильной сборки вынесен за флаг `zstd`.
+  Без флага ZSTD-streams возвращают `Error::Unsupported`.
 - `block-mesh` — **кандидат для blocky mesher** (Фаза 3), зрелый.
 - `fastnoise-lite` (pure Rust) — **кандидат для замены FastNoise2** без C++ FFI.
 - Rapier3d — **primary для физики** (Фаза 3-4), Avian — fallback.
