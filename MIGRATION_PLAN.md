@@ -293,12 +293,26 @@ godot_voxel (fork)
 **Отложено:** `expression_parser` → Фаза 3 (потребитель `generators/graph`);
 `file_locker` → Фаза 4 (зависит от `thread/{mutex,rw_lock}`, ещё не портированы).
 
+### Фаза 3 (в работе)
+
+Compute-слой. Каждый модуль — отдельный коммит, clippy/fmt чист.
+
+| Модуль | C++ источник | Статус |
+|---|---|---|
+| `storage::voxel_memory_pool` | `storage/voxel_memory_pool.{h,cpp}` | ✅ +7 тестов (power-of-two block pool: 21 bucket до 1MiB, thread-safe recycle через Mutex<Vec> + atomics; идиоматичный Rust — owned Vec вместо raw pointers) |
+| `storage::funcs` | `storage/funcs.{h,cpp}` | ✅ +9 тестов (copy_3d_region_zxy, fill_3d_region_zxy, transform_3d_array_zxy через OrthoBasis, snorm s8/s16↔float квантизация) |
+| `storage::voxel_buffer` | `storage/voxel_buffer.{h,cpp}` | ✅ +14 тестов (полный multi-channel dense store: 8 каналов, depth 8/16/32/64-bit, UNIFORM/NONE компрессия, Default+Pool аллокаторы, get/set voxel raw+float, fill/fill_area, compress_uniform_channels, copy_channel_from, Drop возвращает пулу) |
+| `storage::voxel_format` | `storage/voxel_format.{h,cpp}` | ✅ +5 тестов (per-channel depth descriptor + supported-depth ranges + default raw values) |
+
+**Далее из Фазы 3:** generators (noise — simple/heightmap/waves), meshers
+(cubes → blocky), streams (block_serializer → region/vox форматы).
+
 ### Команды для возобновления работы
 ```bash
 git clone https://github.com/sandsaber/godot_voxel.git
 cd godot_voxel && git checkout rust/pilot
 cd rust
-cargo test -p voxel-core       # 191 проходят (186 unit + 5 integration; +1 ignored golden-gen)
+cargo test -p voxel-core       # 226 проходят (221 unit + 5 integration; +1 ignored golden-gen)
 cargo build -p voxel-gdext     # GDExtension .so (грузится в Godot 4.7)
 cargo clippy --workspace --all-targets  # должен быть чистый
 cargo bench                    # transvoxel benches (16³=143 / 32³=199 / 64³=249 Melem/s)
