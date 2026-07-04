@@ -235,6 +235,7 @@ godot_voxel (fork)
 | 2026-07-03 | 0.10: REPORT.md | ✅ Conditional GO; подробности в `REPORT.md` |
 | 2026-07-04 | 0.7 (mesh parity vs C++) + 0.8 (C++ perf baseline) | ✅ C++ harness (без godot-cpp, через stub-tree). **H1 partial**: позиции вершин совпадают (606=606), треугольников поровну (1304), но reuse-cache даёт 888 vs 840 вершин и 434/1304 треугольника расходятся в winding. **H2 PASS**: Rust 28.5µs/143Melem/s vs C++ 44.1µs/93Mvoxels/s (~1.5× быстрее). Детали в `rust/cpp-baseline/README.md` |
 | 2026-07-04 | Фаза 2 mobile-half: voxel-gdext Android `.so` (NDK r29) | ✅ `libvoxel_gdext.so` собран для aarch64 (3.2 MB) **и** x86_64-android (3.2 MB, эмулятор), оба экспортируют `gdext_rust_init`. `rust/scripts/android-build.sh` расширен: дефолт — gdext `.so`, `--core` — voxel-core; `CC`/`CXX` пробрасываются в `godot-cpp`. `.gdextension.in` дополнен `android.x86_64` |
+| 2026-07-04 | Фаза 3: `format::vox` (MagicaVoxel `.vox` парсер) | ✅ +23 теста, total 244. `streams/vox/vox_data.{h,cpp}` → `voxel-core/src/format/vox/{data,parser,tests}.rs`. Чистый Rust, ноль новых зависимостей; `&[u8]` cursor вместо `FileAccess`, `Node` enum вместо C++ inheritance, rotation-byte→Basis3f decode с fallback для out-of-spec байт |
 
 ### Где остановились (для возобновления)
 
@@ -307,16 +308,17 @@ Compute-слой. Каждый модуль — отдельный коммит,
 | `storage::funcs` | `storage/funcs.{h,cpp}` | ✅ +9 тестов (copy_3d_region_zxy, fill_3d_region_zxy, transform_3d_array_zxy через OrthoBasis, snorm s8/s16↔float квантизация) |
 | `storage::voxel_buffer` | `storage/voxel_buffer.{h,cpp}` | ✅ +14 тестов (полный multi-channel dense store: 8 каналов, depth 8/16/32/64-bit, UNIFORM/NONE компрессия, Default+Pool аллокаторы, get/set voxel raw+float, fill/fill_area, compress_uniform_channels, copy_channel_from, Drop возвращает пулу) |
 | `storage::voxel_format` | `storage/voxel_format.{h,cpp}` | ✅ +5 тестов (per-channel depth descriptor + supported-depth ranges + default raw values) |
+| `format::vox` | `streams/vox/vox_data.{h,cpp}` | ✅ +23 теста (MagicaVoxel `.vox` парсер: header SIZE/XYZI/RGBA/nTRN/nGRP/nSHP/LAYR/MATL чанки, scene-graph валидация, rotation-byte→Basis3f decode c fallback на identity для out-of-spec байт, default palette parity с C++ `g_default_palette`, `magica_to_opengl` axis swap). `Node` → идиоматичный Rust enum вместо C++ inheritance; `FileAccess` → `&[u8]` cursor с `Result<_, VoxError>`. Godot-shim `vox_loader.cpp` отложен до binding-слоя) |
 
 **Далее из Фазы 3:** generators (noise — simple/heightmap/waves), meshers
-(cubes → blocky), streams (block_serializer → region/vox форматы).
+(cubes → blocky), streams (block_serializer → region форматы; vox-формат готов).
 
 ### Команды для возобновления работы
 ```bash
 git clone https://github.com/sandsaber/godot_voxel.git
 cd godot_voxel && git checkout rust/pilot
 cd rust
-cargo test -p voxel-core       # 226 проходят (221 unit + 5 integration; +1 ignored golden-gen)
+cargo test -p voxel-core       # 249 проходят (244 unit + 5 integration; +1 ignored golden-gen)
 cargo build -p voxel-gdext     # GDExtension .so (грузится в Godot 4.7)
 cargo clippy --workspace --all-targets  # должен быть чистый
 cargo bench                    # transvoxel benches (16³=143 / 32³=199 / 64³=249 Melem/s)

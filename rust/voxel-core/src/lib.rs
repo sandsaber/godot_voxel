@@ -12,6 +12,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 pub mod containers;
+pub mod format;
 pub mod hash;
 pub mod io;
 pub mod math;
