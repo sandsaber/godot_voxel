@@ -12,18 +12,20 @@
 //! - [`bake`] — side-culling matrix generation + cutout-surface baking
 //!   ([`bake::bake_library`]).
 //! - [`mesher`] — [`mesher::generate_mesh`] core algorithm (face culling + AO).
-//!
-//! ## Planned
-//! - `lod_skirts` — LOD seam-skirt appending.
-//! - `shadow_occluders` — shadow geometry generation.
+//! - [`lod_skirts`] — [`lod_skirts::append_skirts`] LOD seam-skirt appending.
+//! - [`shadow_occluders`] — [`shadow_occluders::generate_shadow_occluders`]
+//!   shadow occluder geometry generation.
 //!
 //! ## Deferred (Phase 5)
 //! - The Godot `Resource` / `Ref<Material>` / editor layer (`VoxelMesherBlocky`,
 //!   `VoxelBlockyLibraryBase`, `VoxelBlockyModel*`).
+//! - `TintSampler` integration for `lod_skirts` (needs `VoxelBuffer` channels).
 
 pub mod bake;
 pub mod baked_library;
+pub mod lod_skirts;
 pub mod mesher;
+pub mod shadow_occluders;
 
 pub use bake::bake_library;
 pub use baked_library::{
@@ -31,4 +33,8 @@ pub use baked_library::{
     ModelSurface, SideSurface, AIR_ID, FLUID_BOTTOM_HEIGHT, FLUID_TOP_HEIGHT, MAX_FLUIDS,
     MAX_MATERIALS, MAX_MODELS, MAX_SURFACES, NULL_FLUID_INDEX,
 };
+pub use lod_skirts::append_skirts;
 pub use mesher::{generate_mesh, BlockyArrays};
+pub use shadow_occluders::{
+    generate_occluders_geometry, generate_shadow_occluders, ShadowOccluderArrays,
+};
