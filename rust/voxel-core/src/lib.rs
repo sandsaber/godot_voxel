@@ -7,7 +7,8 @@
 //!
 //! ## Status
 //! This crate is under active development as part of the Rust migration pilot
-//! (Phase 0). See `MIGRATION_PLAN.md` at the repository root for context.
+//! (Phase 4 started; Phases 1-3 audited). See `MIGRATION_PLAN.md` at the
+//! repository root for context.
 
 #![deny(unsafe_op_in_unsafe_fn)]
 
@@ -23,7 +24,9 @@ pub mod meshers;
 pub mod storage;
 pub mod streams;
 pub mod string;
+pub mod tasks;
 pub mod testing;
+pub mod thread;
 
 /// Crate version (matches `Cargo.toml`).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
