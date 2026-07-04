@@ -18,5 +18,8 @@ linux.x86_64 = "res://rust/target/debug/libvoxel_gdext.so"
 macos = "res://rust/target/release/libvoxel_gdext.dylib"
 # Windows x86_64:
 windows.x86_64 = "res://rust/target/debug/voxel_gdext.dll"
-# Android arm64 (Phase 2 — needs NDK; produced by rust/scripts/android-build.sh):
+# Android arm64 (device) + x86_64 (emulator). Built with the NDK via
+# `rust/scripts/android-build.sh` (defaults to aarch64 .so; pass
+# `--target x86_64-linux-android` for the emulator variant):
 android.arm64 = "res://rust/target/aarch64-linux-android/release/libvoxel_gdext.so"
+android.x86_64 = "res://rust/target/x86_64-linux-android/release/libvoxel_gdext.so"

@@ -56,7 +56,25 @@ proving `voxel-gdext` links `voxel-core` and reaches it through the FFI boundary
 
 ## Android
 
-The `.gdextension.in` includes an `android.arm64` entry, but producing the
-`.so` needs the Android NDK (not installed in the dev environment). Use
-`rust/scripts/android-build.sh --so` once the NDK is present — it already
-works around the rustc↔NDK LLVM skew (see `REPORT.md`).
+`voxel-gdext` cross-compiles for Android arm64 (device) and x86_64 (emulator)
+with the NDK. The build script works around the rustc↔NDK LLVM skew (NDK r29's
+`lld` can't parse rustc/LLVM-22 objects; the script forces rust's `lld` via
+`-fuse-ld=lld`) and exports `CC`/`CXX` so the `godot` crate builds `godot-cpp`
+for the same target.
+
+```sh
+cd rust
+./scripts/android-build.sh                                  # aarch64 .so (device)
+./scripts/android-build.sh --target x86_64-linux-android    # x86_64 .so (emulator)
+./scripts/android-build.sh --strip                          # strip debug symbols
+```
+
+Verified with NDK r29 (14206865), `ANDROID_API=21`, Godot `api-4-7`: produces
+`target/<triple>/release/libvoxel_gdext.so` exporting `gdext_rust_init`
+(~3.2 MB unstripped). The `.gdextension.in` carries matching `android.arm64`
+and `android.x86_64` entries.
+
+Loading the `.so` inside a Godot Android export template still requires a
+custom template compiled with `platform=android` (the stock template does not
+load GDExtensions at runtime on device) — that packaging step is tracked as
+the remaining Phase 2 mobile-half item (needs an SDK + device/emulator).
