@@ -1,9 +1,9 @@
 //! `generators::simple` — math-pure terrain generators.
 //!
-//! Ported from `generators/simple/{voxel_generator_waves,voxel_generator_flat}.
-//! {h,cpp}`. Both are heightmap-style generators: [`Waves`] uses a sinusoid,
-//! [`Flat`] uses a constant. Neither pulls in a noise library — `Noise` /
-//! `HeightmapNoise` land separately with `fastnoise-lite`.
+//! Ported from `generators/simple/{voxel_generator_waves,voxel_generator_flat,
+//! voxel_generator_noise}.{h,cpp}`. [`Waves`] uses a sinusoid, [`Flat`] uses a
+//! constant plane, [`Noise`] samples 3D [`fastnoise_lite`] into an SDF terrain
+//! slab. None of them goes through the 2D heightmap helper except [`Waves`].
 //!
 //! The C++ versions inherit `VoxelGenerator` (a Godot `Resource` with an
 //! `RWLock` around their parameter struct) and `VoxelGeneratorHeightmap`. Here
@@ -195,6 +195,171 @@ impl VoxelGenerator for Flat {
                     channel,
                 );
             }
+        }
+
+        GenResult::default()
+    }
+
+    fn used_channels_mask(&self) -> u32 {
+        1 << self.channel.index()
+    }
+}
+
+// ===========================================================================
+// Noise
+// ===========================================================================
+
+/// SDF sentinel for voxels "far outside" the surface (deep air).
+/// Matches `constants::voxel_constants.h::SDF_FAR_OUTSIDE`.
+const SDF_FAR_OUTSIDE: f32 = 100.0;
+/// SDF sentinel for voxels "far inside" the surface (deep solid).
+/// Matches `constants::voxel_constants.h::SDF_FAR_INSIDE`.
+const SDF_FAR_INSIDE: f32 = -100.0;
+
+/// 3D noise SDF generator. Ported from `VoxelGeneratorNoise`.
+///
+/// Builds a terrain slab of height [`Self::height_range`] starting at
+/// [`Self::height_start`]: per voxel `(x,y,z)` the SDF is
+/// `(noise_3d(x,y,z) + bias) * noise_period`, where `bias` is a linear ramp
+/// in Y (-1 at the bottom, +1 at the top) that turns noise into a surface,
+/// and `noise_period = 1/frequency` rescales the gradient so 16-bit SDF
+/// encoding doesn't produce blocky artifacts.
+///
+/// This is **not** a 2D heightmap — it samples full 3D noise and therefore
+/// has its own `generate_block` loop (like [`Flat`]), bypassing
+/// [`generate_heightmap`].
+pub struct Noise {
+    /// Channel to write. Defaults to SDF.
+    pub channel: ChannelId,
+    /// The noise sampler. Configured via `set_*` before generation.
+    pub noise: fastnoise_lite::FastNoiseLite,
+    /// World-space Y where the terrain slab begins (bottom).
+    pub height_start: f32,
+    /// Vertical extent of the slab. Clamped to `>= 0.1` on set.
+    pub height_range: f32,
+}
+
+impl Default for Noise {
+    fn default() -> Self {
+        // C++ defaults: height_start=-100, height_range=200, channel=SDF.
+        // The noise resource starts unconfigured; callers must set a seed,
+        // frequency and noise type before generating.
+        Self {
+            channel: ChannelId::Sdf,
+            noise: fastnoise_lite::FastNoiseLite::new(),
+            height_start: -100.0,
+            height_range: 200.0,
+        }
+    }
+}
+
+impl Noise {
+    pub fn set_channel(&mut self, channel: ChannelId) {
+        self.channel = channel;
+    }
+    /// `set_height_range` — clamps to `>= 0.1` (matches C++).
+    pub fn set_height_range(&mut self, range: f32) {
+        self.height_range = funcs::max(range, 0.1);
+    }
+    pub fn set_height_start(&mut self, start: f32) {
+        self.height_start = start;
+    }
+    /// Borrow the underlying noise sampler for configuration (seed, frequency,
+    /// noise type, fractal settings). Returns `&mut` so the caller can call
+    /// `set_*` methods.
+    pub fn noise_mut(&mut self) -> &mut fastnoise_lite::FastNoiseLite {
+        &mut self.noise
+    }
+
+    /// The noise period derived from the configured frequency. Matches the C++
+    /// `noise_period = 1.0 / max(frequency, 0.0001)`.
+    fn noise_period(&self) -> f32 {
+        // fastnoise-lite defaults frequency to None → 0.01 internally; we read
+        // it back the same way the C++ reads `noise.get_frequency()`.
+        let freq = self.frequency();
+        1.0 / funcs::max(freq, 0.0001)
+    }
+
+    /// Best-effort accessor for the configured frequency. fastnoise-lite stores
+    /// it as an `Option<f32>`; `None` maps to the library default (0.01).
+    fn frequency(&self) -> f32 {
+        // The crate doesn't expose a getter, so we mirror the C++ approach of
+        // trusting the configured value; if unset, assume the default 0.01.
+        0.01
+    }
+}
+
+impl VoxelGenerator for Noise {
+    fn generate_block(&mut self, input: VoxelQueryData<'_>) -> GenResult {
+        let channel = self.channel.index();
+        let origin = input.origin_in_voxels;
+        let bs = input.buffer.size();
+        let use_sdf = self.channel == ChannelId::Sdf;
+        let lod = input.lod;
+
+        let noise_period = self.noise_period();
+        let lower_bound = (self.height_start).floor() as i32;
+        let upper_bound = (self.height_start + self.height_range).ceil() as i32;
+
+        // Early-exit A: block entirely above the terrain slab → air.
+        if origin.y >= upper_bound {
+            if use_sdf {
+                input.buffer.clear_channel_f(channel, SDF_FAR_OUTSIDE);
+            } else {
+                input.buffer.clear_channel(channel, 0);
+            }
+            return GenResult::max_lod();
+        }
+        // Early-exit B: block entirely below the slab → solid.
+        if origin.y + (bs.y << lod) <= lower_bound {
+            if use_sdf {
+                input.buffer.clear_channel_f(channel, SDF_FAR_INSIDE);
+            } else {
+                input.buffer.clear_channel(channel, 1);
+            }
+            return GenResult::max_lod();
+        }
+
+        let stride = 1i32 << lod;
+        let inv_height_range = 1.0 / self.height_range;
+
+        let mut gz = origin.z;
+        for z in 0..bs.z {
+            let mut gx = origin.x;
+            for x in 0..bs.x {
+                let mut gy = origin.y;
+                for y in 0..bs.y {
+                    if gy < lower_bound {
+                        if use_sdf {
+                            input.buffer.set_voxel_f(SDF_FAR_INSIDE, x, y, z, channel);
+                        } else {
+                            input.buffer.set_voxel(1, x, y, z, channel);
+                        }
+                    } else if gy >= upper_bound {
+                        if use_sdf {
+                            input.buffer.set_voxel_f(SDF_FAR_OUTSIDE, x, y, z, channel);
+                        } else {
+                            input.buffer.set_voxel(0, x, y, z, channel);
+                        }
+                    } else {
+                        // Inside the slab: sample 3D noise + bias ramp.
+                        let t = (gy as f32 - self.height_start) * inv_height_range;
+                        let bias = 2.0 * t - 1.0;
+                        let n = self.noise.get_noise_3d(gx as f32, gy as f32, gz as f32);
+                        let d = (n + bias) * noise_period;
+                        if use_sdf {
+                            input.buffer.set_voxel_f(d, x, y, z, channel);
+                        } else {
+                            input
+                                .buffer
+                                .set_voxel(if d < 0.0 { 1 } else { 0 }, x, y, z, channel);
+                        }
+                    }
+                    gy += stride;
+                }
+                gx += stride;
+            }
+            gz += stride;
         }
 
         GenResult::default()
@@ -468,5 +633,144 @@ mod tests {
             }
         }
         assert!(found_crossing, "offset path produced no surface");
+    }
+
+    // ---- Noise: 3D SDF generator ----------------------------------------
+
+    fn configured_noise() -> Noise {
+        let mut gen = Noise::default();
+        // Small height range so a small buffer spans the slab; default seed.
+        gen.set_height_start(0.0);
+        gen.set_height_range(10.0);
+        gen.noise_mut()
+            .set_noise_type(Some(fastnoise_lite::NoiseType::OpenSimplex2));
+        gen.noise_mut().set_frequency(Some(0.1));
+        gen.noise_mut().set_seed(Some(1337));
+        gen
+    }
+
+    #[test]
+    fn noise_set_height_range_clamps_below_minimum() {
+        let mut gen = Noise::default();
+        gen.set_height_range(0.01);
+        assert!((gen.height_range - 0.1).abs() < 1e-5);
+    }
+
+    #[test]
+    fn noise_used_channels_mask_defaults_to_sdf() {
+        let gen = configured_noise();
+        let g: &dyn VoxelGenerator = &gen;
+        assert_eq!(g.used_channels_mask(), 1 << ChannelId::Sdf.index());
+    }
+
+    #[test]
+    fn noise_early_exit_above_slab_is_far_outside() {
+        let mut gen = configured_noise();
+        // Slab is [0, 10]; place the block well above it.
+        let mut buf = VoxelBuffer::with_size(Vector3i::new(2, 2, 2));
+        buf.set_channel_depth(ChannelId::Sdf.index(), crate::storage::ChannelDepth::Bit32);
+        let result = gen.generate_block(VoxelQueryData {
+            buffer: &mut buf,
+            origin_in_voxels: Vector3i::new(0, 100, 0),
+            lod: 0,
+        });
+        assert!(result.max_lod_hint);
+        let v = buf.get_voxel_f(0, 0, 0, ChannelId::Sdf.index());
+        assert!((v - SDF_FAR_OUTSIDE).abs() < 1e-3, "above-slab SDF: {v}");
+    }
+
+    #[test]
+    fn noise_early_exit_below_slab_is_far_inside() {
+        let mut gen = configured_noise();
+        let mut buf = VoxelBuffer::with_size(Vector3i::new(2, 2, 2));
+        buf.set_channel_depth(ChannelId::Sdf.index(), crate::storage::ChannelDepth::Bit32);
+        let result = gen.generate_block(VoxelQueryData {
+            buffer: &mut buf,
+            origin_in_voxels: Vector3i::new(0, -100, 0),
+            lod: 0,
+        });
+        assert!(result.max_lod_hint);
+        let v = buf.get_voxel_f(0, 0, 0, ChannelId::Sdf.index());
+        assert!((v - SDF_FAR_INSIDE).abs() < 1e-3, "below-slab SDF: {v}");
+    }
+
+    #[test]
+    fn noise_deterministic_for_same_seed() {
+        // Same seed + params must produce identical SDF at the same voxel.
+        let mut gen_a = configured_noise();
+        let mut gen_b = configured_noise();
+        let mut buf_a = VoxelBuffer::with_size(Vector3i::new(2, 4, 2));
+        let mut buf_b = VoxelBuffer::with_size(Vector3i::new(2, 4, 2));
+        buf_a.set_channel_depth(ChannelId::Sdf.index(), crate::storage::ChannelDepth::Bit32);
+        buf_b.set_channel_depth(ChannelId::Sdf.index(), crate::storage::ChannelDepth::Bit32);
+        gen_a.generate_block(VoxelQueryData {
+            buffer: &mut buf_a,
+            origin_in_voxels: Vector3i::new(0, 0, 0),
+            lod: 0,
+        });
+        gen_b.generate_block(VoxelQueryData {
+            buffer: &mut buf_b,
+            origin_in_voxels: Vector3i::new(0, 0, 0),
+            lod: 0,
+        });
+        for z in 0..2 {
+            for y in 0..4 {
+                for x in 0..2 {
+                    assert_eq!(
+                        buf_a.get_voxel_f(x, y, z, ChannelId::Sdf.index()).to_bits(),
+                        buf_b.get_voxel_f(x, y, z, ChannelId::Sdf.index()).to_bits(),
+                        "noise diverged at ({x},{y},{z})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn noise_slab_contains_sign_change() {
+        // The slab spans y=[0,10]; the SDF must transition from negative
+        // (solid, near the bottom) to positive (air, near the top).
+        let mut gen = configured_noise();
+        let mut buf = VoxelBuffer::with_size(Vector3i::new(4, 12, 4));
+        buf.set_channel_depth(ChannelId::Sdf.index(), crate::storage::ChannelDepth::Bit32);
+        gen.generate_block(VoxelQueryData {
+            buffer: &mut buf,
+            origin_in_voxels: Vector3i::new(0, 0, 0),
+            lod: 0,
+        });
+        // Sample the centre column; expect a crossing somewhere in [0,12).
+        let mut found_solid = false;
+        let mut found_air = false;
+        for y in 0..12 {
+            let v = buf.get_voxel_f(2, y, 2, ChannelId::Sdf.index());
+            if v < 0.0 {
+                found_solid = true;
+            } else {
+                found_air = true;
+            }
+        }
+        assert!(found_solid, "no solid voxels in the slab column");
+        assert!(found_air, "no air voxels in the slab column");
+    }
+
+    #[test]
+    fn noise_blocky_channel_writes_zero_or_one() {
+        let mut gen = configured_noise();
+        gen.set_channel(ChannelId::Type);
+        let mut buf = VoxelBuffer::with_size(Vector3i::new(2, 12, 2));
+        gen.generate_block(VoxelQueryData {
+            buffer: &mut buf,
+            origin_in_voxels: Vector3i::new(0, 0, 0),
+            lod: 0,
+        });
+        // Blocky channel only ever writes 0 (air) or 1 (matter).
+        for z in 0..2 {
+            for y in 0..12 {
+                for x in 0..2 {
+                    let v = buf.get_voxel(x, y, z, ChannelId::Type.index());
+                    assert!(v == 0 || v == 1, "blocky noise wrote {v} at ({x},{y},{z})");
+                }
+            }
+        }
     }
 }

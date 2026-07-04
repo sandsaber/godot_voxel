@@ -15,6 +15,12 @@ path = "src/lib.rs"
 # Used by `streams::compressed_data` for the LZ4/LZ4_BE block formats.
 lz4_flex = "0.11"
 
+# Pure-Rust port of FastNoiseLite (no C, no FFI) — used by
+# `generators::simple::Noise` for 3D SDF terrain. Same rationale as lz4_flex:
+# keeps Android/WASM cross-compilation clean, bit-compatible with Godot's
+# engine FastNoiseLite for the same seed/frequency/type settings.
+fastnoise-lite = "1.1"
+
 # Optional ZSTD support. Off by default so the default build stays pure-Rust;
 # enable for parity with the C++ CompressedData::COMPRESSION_ZSTD path. The
 # `zstd` crate bundles a C library, which is why it lives behind a feature.
