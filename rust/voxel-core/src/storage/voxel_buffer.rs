@@ -322,6 +322,17 @@ impl VoxelBuffer {
         self.channels[channel_index].depth
     }
 
+    /// Set the depth of a channel. Matches `set_channel_depth`. Only safe to
+    /// call on a freshly-created (uniform, unallocated) channel — changing the
+    /// depth of an allocated `Compression::None` channel would invalidate its
+    /// backing buffer size, which is the caller's responsibility to keep
+    /// consistent (this matches the C++ contract, where the serializer sets
+    /// depth before writing voxel bytes).
+    #[inline]
+    pub fn set_channel_depth(&mut self, channel_index: usize, depth: ChannelDepth) {
+        self.channels[channel_index].depth = depth;
+    }
+
     /// Compression of a channel. Matches `get_channel_compression`.
     #[inline]
     pub fn channel_compression(&self, channel_index: usize) -> Compression {

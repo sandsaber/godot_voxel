@@ -238,6 +238,7 @@ godot_voxel (fork)
 | 2026-07-04 | Фаза 3: `format::vox` (MagicaVoxel `.vox` парсер) | ✅ +23 теста, total 244. `streams/vox/vox_data.{h,cpp}` → `voxel-core/src/format/vox/{data,parser,tests}.rs`. Чистый Rust, ноль новых зависимостей; `&[u8]` cursor вместо `FileAccess`, `Node` enum вместо C++ inheritance, rotation-byte→Basis3f decode с fallback для out-of-spec байт |
 | 2026-07-04 | Фаза 3: `streams::instance_data` + io fallible API | ✅ +13 тестов, total 257. `streams/instance_data.{h,cpp}` → `voxel-core/src/streams/instance_data.rs`. Расширение `MemoryReader`: `try_get_*`/`try_take` (Option, без panic) + `set_endianness` для v0 big-endian backcompat. `DeserializeError` enum, round-trip с quantization tolerance |
 | 2026-07-04 | Фаза 3: `streams::compressed_data` (LZ4/ZSTD) | ✅ +12 тестов, total 269. `streams/compressed_data.{h,cpp}` → `voxel-core/src/streams/compressed_data.rs`. **Первая runtime-зависимость** voxel-core: `lz4_flex` (pure Rust, без C) для LZ4/LZ4_BE, `zstd` под optional feature. Android gdext `.so` перепроверен (aarch64 + x86_64) — собирается с новой зависимостью. `cargo rustc --crate-type staticlib` упирается в cargo#9562 (задокументировано в `android-build.sh`), но production-артефакт `.so` работает |
+| 2026-07-04 | Фаза 3: `streams::block_serializer` (VoxelBuffer↔bytes) | ✅ +11 тестов, total 280. `streams/voxel_block_serializer.{h,cpp}` → `voxel-core/src/streams/block_serializer.rs`. v4-формат (version+size+8 каналов+trailing magic), `serialize_and_compress`/`decompress_and_deserialize` обёртки. Расширения: `MemoryReader::try_get_64`, `VoxelBuffer::set_channel_depth`. **Metadata-секция и v2/v3 legacy-миграция отложены** — завязаны на Godot Variant/custom-metadata factory (`storage/metadata/`, не портирован). Streams-стек (instance_data→compressed_data→block_serializer) завершён |
 
 ### Где остановились (для возобновления)
 
@@ -314,6 +315,9 @@ Compute-слой. Каждый модуль — отдельный коммит,
 | `io::serialization` (расширение) | `util/io/serialization.h` (MemoryReader) | ✅ +fallible API: `try_get_8/16/32/float` + `try_take` возвращают `Option` (без panic на EOF) и `set_endianness` для on-the-fly переключения byte order. Нужно для `instance_data` (чтение из untrusted-источников) и legacy v0 big-endian форматов |
 | `streams::instance_data` | `streams/instance_data.{h,cpp}` | ✅ +13 тестов (lossy-compressed per-block instance transforms `FORMAT_SIMPLE_11B_V1`: position→3×u16, scale→u8, rotation→4×u8 quaternion; serialize/deserialize с v0 big-endian backcompat через `set_endianness`, trailing magic `0x900df00d`, scale-range clamp; `DeserializeError` enum вместо bool; round-trip тесты с quantization tolerance) |
 | `streams::compressed_data` | `streams/compressed_data.{h,cpp}` | ✅ +12 тестов (LZ4/ZSTD compression envelope: NONE/LZ4/LZ4_BE(legacy big-endian)/ZSTD; LZ4 через **`lz4_flex`** (pure Rust, без C — важно для Android/WASM), ZSTD через optional `zstd` feature; `Compression` enum c wire-format discriminants, `Error` enum, round-trip для compressive/incompressible/empty payloads, byte-order проверка LZ4_BE vs LZ4, error paths). **Первая runtime-зависимость** voxel-core |
+| `io::serialization` (расширение 2) | `util/io/serialization.h` (MemoryReader) | ✅ `try_get_64` добавлен (завершает fallible-семейство try_get_8/16/32/64/float + try_take) — нужен для `block_serializer` (UNIFORM-каналы depth 64-bit) |
+| `storage::voxel_buffer` (расширение) | `storage/voxel_buffer.h` | ✅ `set_channel_depth` — setter для depth канала (нужен десериализатору; контракт: только на свежем uniform-канале, как в C++) |
+| `streams::block_serializer` | `streams/voxel_block_serializer.{h,cpp}` | ✅ +11 тестов (`VoxelBuffer`↔bytes v4-формат: version + 3×u16 size + 8 каналов (fmt byte = compression\|depth<<4, raw/UNIFORM данные) + trailing magic `0x900df00d`; `serialize_and_compress`/`decompress_and_deserialize` обёртки над `compressed_data`; `Error` enum. **Metadata-секция отложена** — завязана на Godot Variant/custom-metadata factory (`storage/metadata/`, не портирован); v4 без metadata byte-совместим с C++ когда metadata пусто. v2/v3 legacy-миграция отложена по той же причине) |
 
 **Далее из Фазы 3:** generators (noise — simple/heightmap/waves), meshers
 (cubes → blocky), streams (block_serializer → region форматы; vox-формат готов).
@@ -323,7 +327,7 @@ Compute-слой. Каждый модуль — отдельный коммит,
 git clone https://github.com/sandsaber/godot_voxel.git
 cd godot_voxel && git checkout rust/pilot
 cd rust
-cargo test -p voxel-core       # 274 проходят (269 unit + 5 integration; +1 ignored golden-gen)
+cargo test -p voxel-core       # 285 проходят (280 unit + 5 integration; +1 ignored golden-gen)
 cargo build -p voxel-gdext     # GDExtension .so (грузится в Godot 4.7)
 cargo clippy --workspace --all-targets  # должен быть чистый
 cargo bench                    # transvoxel benches (16³=143 / 32³=199 / 64³=249 Melem/s)

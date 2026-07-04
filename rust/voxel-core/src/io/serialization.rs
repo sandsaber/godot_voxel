@@ -398,6 +398,33 @@ impl<'a> MemoryReader<'a> {
         })
     }
 
+    #[inline]
+    pub fn try_get_64(&mut self) -> Option<u64> {
+        let b = self.try_take(8)?;
+        Some(match self.endianness {
+            Endianness::BigEndian => {
+                ((b[0] as u64) << 56)
+                    | ((b[1] as u64) << 48)
+                    | ((b[2] as u64) << 40)
+                    | ((b[3] as u64) << 32)
+                    | ((b[4] as u64) << 24)
+                    | ((b[5] as u64) << 16)
+                    | ((b[6] as u64) << 8)
+                    | b[7] as u64
+            }
+            Endianness::LittleEndian => {
+                b[0] as u64
+                    | ((b[1] as u64) << 8)
+                    | ((b[2] as u64) << 16)
+                    | ((b[3] as u64) << 24)
+                    | ((b[4] as u64) << 32)
+                    | ((b[5] as u64) << 40)
+                    | ((b[6] as u64) << 48)
+                    | ((b[7] as u64) << 56)
+            }
+        })
+    }
+
     /// Reinterpret the next 4 bytes as `f32`, or `None` on truncation.
     #[inline]
     pub fn try_get_float(&mut self) -> Option<f32> {
