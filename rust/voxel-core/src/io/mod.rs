@@ -4,6 +4,8 @@
 //! - [`serialization`] — endianness-aware byte readers/writers.
 //! - [`text_writer`] — buffered character output stream.
 //! - [`log`] — verbose flag + print/error/warning helpers.
+//! - [`voxel_file`] — file-I/O trait ([`voxel_file::VoxelFile`]) standing in
+//!   for Godot `FileAccess`, used by the region-file format.
 //!
 //! ## Deferred
 //!
@@ -14,3 +16,4 @@
 pub mod log;
 pub mod serialization;
 pub mod text_writer;
+pub mod voxel_file;

@@ -12,7 +12,10 @@
 //!   serializer. LZ4 is pure-Rust (`lz4_flex`); ZSTD is behind a feature.
 //! - [`instance_data`] — lossy-compressed per-block instance transforms
 //!   (instanced grass / detail).
+//! - [`region`] — region-file archive format (`.vxr`): sector-based sparse
+//!   block storage with header LUT, built on [`block_serializer`].
 
 pub mod block_serializer;
 pub mod compressed_data;
 pub mod instance_data;
+pub mod region;
