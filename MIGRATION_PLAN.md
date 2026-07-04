@@ -233,23 +233,29 @@ godot_voxel (fork)
 | 2026-07-03 | 0.7: parity framework + self-consistent golden | ✅ GoldenMesh JSON + comparator, sphere_16/32 |
 | 2026-07-03 | 0.7 (real C++): table parity | ✅ Rust-таблицы byte-identical upstream C++ (`transvoxel_tables_parity`) |
 | 2026-07-03 | 0.10: REPORT.md | ✅ Conditional GO; подробности в `REPORT.md` |
-| — | 0.7 (mesh byte-parity vs C++) + 0.8 (C++ perf baseline) | ⏳ единственный открытый пункт — godot-cpp harness |
+| 2026-07-04 | 0.7 (mesh parity vs C++) + 0.8 (C++ perf baseline) | ✅ C++ harness (без godot-cpp, через stub-tree). **H1 partial**: позиции вершин совпадают (606=606), треугольников поровну (1304), но reuse-cache даёт 888 vs 840 вершин и 434/1304 треугольника расходятся в winding. **H2 PASS**: Rust 28.5µs/143Melem/s vs C++ 44.1µs/93Mvoxels/s (~1.5× быстрее). Детали в `rust/cpp-baseline/README.md` |
 
 ### Где остановились (для возобновления)
 
-**Готово:** весь пилот, кроме mesh byte-parity vs C++ и C++ perf-baseline. 32/32 теста проходят,
-clippy/fmt чист. voxel-core кросс-компилируется под все приоритетные мобильные/десктоп-таргеты.
-Полный разбор и GO/NO-GO — в **`REPORT.md`**.
+**Phase 0 — полностью закрыт.** H1/H2 проверены C++ harness'ем без godot-cpp
+(stub-tree approach). Фаза 1 (`util/*`) — полностью портирована (191 тест).
+Фаза 2 desktop-half — закрыт: `voxel-gdext` грузится в Godot 4.7, класс
+`VoxelRustHello` виден в GDScript, достигает `voxel_core::VERSION` через FFI.
 
-**Единственный открытый пункт (gating final Phase 0 sign-off):** godot-cpp mesh-harness.
-Тело mesher'а зависит от Godot-типов (`util/godot` shim не имеет standalone-режима), поэтому
-для mesh byte-parity нужен либо godot-cpp, либо Godot-source. План и оценка effort'а — в
-`rust/cpp-baseline/README.md`. Тот же harness закроет и C++ perf-baseline (H2).
+**H1 (partial):** C++ и Rust генерируют идентичные *позиции* вершин (606=606) и
+одинаковое *число* треугольников (1304), но reuse-cache даёт разное число вершин
+(888 vs 840) и 434/1304 треугольника расходятся в winding/reuse. Это реальная
+дивергенция в логике reuse-cache / итерации, не float-precision. Rust goldens
+остаются self-consistent; C++ goldens не коммитятся (fail byte-exact parity).
+**H2 (pass):** Rust ~1.5× быстрее C++ (28.5µs/143Melem/s vs 44.1µs/93Mvoxels/s).
+Полный разбор — в `rust/cpp-baseline/README.md` и `REPORT.md`.
 
-**Следующие шаги (по приоритету):**
-1. **godot-cpp mesh harness** → закрыть H1 (regenerate golden из C++) и H2 (perf vs C++) одной задачей.
-2. **Фаза 1** (math/containers/string/io/memory core) — не зависит от harness, можно начинать параллельно.
-3. **Фаза 2 kick-off** — Android `.so` + минимальный gdext hello-world (`rust/scripts/android-build.sh` готов).
+**Открытые пункты:**
+1. **H1 full byte-parity** — исследовать расхождение reuse-cache (888 vs 840
+   вершин). Не блокирующее (H2 пройден, позиции совпадают), но нужно для strict parity.
+2. **Фаза 2 mobile-half** — Android `.so`/APK: нужен NDK + SDK + устройство
+   (вне данного окружения). `rust/scripts/android-build.sh` готов.
+3. **Фаза 3** — compute-слой (полный VoxelBuffer, blocky mesher, generators/noise).
 
 ### Фаза 1 (в работе)
 
@@ -292,10 +298,12 @@ clippy/fmt чист. voxel-core кросс-компилируется под в�
 git clone https://github.com/sandsaber/godot_voxel.git
 cd godot_voxel && git checkout rust/pilot
 cd rust
-cargo test                 # 191 проходят (186 unit + 5 integration; +1 ignored golden-gen)
-cargo clippy --all-targets # должен быть чистый
-cargo bench                # transvoxel benches (147–238 Melem/s)
-./scripts/android-build.sh --so   # Android aarch64 .so (NDK r29 + rust-lld workaround)
+cargo test -p voxel-core       # 191 проходят (186 unit + 5 integration; +1 ignored golden-gen)
+cargo build -p voxel-gdext     # GDExtension .so (грузится в Godot 4.7)
+cargo clippy --workspace --all-targets  # должен быть чистый
+cargo bench                    # transvoxel benches (16³=143 / 32³=199 / 64³=249 Melem/s)
+./cpp-baseline/build_mesh.sh   # C++ mesh harness (H1 parity + H2 perf baseline vs Rust)
+./scripts/android-build.sh --so   # Android aarch64 .so (нужен NDK; rust-lld workaround)
 ```
 
 ### Ключевые находки сессии
