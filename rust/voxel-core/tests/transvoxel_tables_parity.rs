@@ -15,12 +15,15 @@
 #![allow(clippy::needless_range_loop)]
 
 use voxel_core::meshers::transvoxel::regular_tables::{
-    get_regular_cell_class, get_regular_cell_data, get_regular_vertex_data,
-    REGULAR_CELL_CLASS, REGULAR_CELL_DATA, REGULAR_VERTEX_DATA,
+    get_regular_cell_class, get_regular_cell_data, get_regular_vertex_data, REGULAR_CELL_CLASS,
+    REGULAR_CELL_DATA, REGULAR_VERTEX_DATA,
 };
 
 fn golden_path(name: &str) -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("golden").join(name)
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("golden")
+        .join(name)
 }
 
 /// Parse the C++ dump and compare every value to the Rust tables.

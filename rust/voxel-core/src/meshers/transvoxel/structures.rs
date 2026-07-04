@@ -25,8 +25,19 @@ pub struct LodAttrib {
 }
 
 impl LodAttrib {
-    pub fn new(secondary: Vector3f, cell_border_mask: u8, vertex_border_mask: u8, transition: u8) -> Self {
-        Self { secondary_position: secondary, cell_border_mask, vertex_border_mask, transition, _pad: 0 }
+    pub fn new(
+        secondary: Vector3f,
+        cell_border_mask: u8,
+        vertex_border_mask: u8,
+        transition: u8,
+    ) -> Self {
+        Self {
+            secondary_position: secondary,
+            cell_border_mask,
+            vertex_border_mask,
+            transition,
+            _pad: 0,
+        }
     }
 }
 
@@ -59,7 +70,12 @@ impl MeshArrays {
         let vi = self.vertices.len() as i32;
         self.vertices.push(primary);
         self.normals.push(normal);
-        self.lod_data.push(LodAttrib::new(secondary, cell_border_mask, vertex_border_mask, transition));
+        self.lod_data.push(LodAttrib::new(
+            secondary,
+            cell_border_mask,
+            vertex_border_mask,
+            transition,
+        ));
         vi
     }
 
@@ -82,7 +98,10 @@ pub struct ReuseCell {
 
 impl Default for ReuseCell {
     fn default() -> Self {
-        Self { vertices: [-1; 4], packed_texture_indices: 0 }
+        Self {
+            vertices: [-1; 4],
+            packed_texture_indices: 0,
+        }
     }
 }
 
@@ -100,7 +119,10 @@ pub struct Cache {
 
 impl Default for Cache {
     fn default() -> Self {
-        Self { decks: [Vec::new(), Vec::new()], block_size: crate::math::Vector3i::zero() }
+        Self {
+            decks: [Vec::new(), Vec::new()],
+            block_size: crate::math::Vector3i::zero(),
+        }
     }
 }
 
@@ -162,8 +184,22 @@ mod tests {
     #[test]
     fn mesh_arrays_add_vertex_returns_indices() {
         let mut m = MeshArrays::default();
-        let v0 = m.add_vertex(Vector3f::new(1.0, 0.0, 0.0), Vector3f::new(0.0, 1.0, 0.0), 0, 0, 0, Vector3f::zero());
-        let v1 = m.add_vertex(Vector3f::new(2.0, 0.0, 0.0), Vector3f::new(0.0, 1.0, 0.0), 0, 0, 0, Vector3f::zero());
+        let v0 = m.add_vertex(
+            Vector3f::new(1.0, 0.0, 0.0),
+            Vector3f::new(0.0, 1.0, 0.0),
+            0,
+            0,
+            0,
+            Vector3f::zero(),
+        );
+        let v1 = m.add_vertex(
+            Vector3f::new(2.0, 0.0, 0.0),
+            Vector3f::new(0.0, 1.0, 0.0),
+            0,
+            0,
+            0,
+            Vector3f::zero(),
+        );
         assert_eq!(v0, 0);
         assert_eq!(v1, 1);
         assert_eq!(m.vertices.len(), 2);

@@ -45,7 +45,8 @@ impl SphereInput {
                     let iy = y as f32 - MIN_PADDING as f32;
                     let iz = z as f32 - MIN_PADDING as f32;
                     // Signed distance to the sphere surface (positive outside).
-                    let d = ((ix - cx).powi(2) + (iy - cy).powi(2) + (iz - cz).powi(2)).sqrt() - radius;
+                    let d =
+                        ((ix - cx).powi(2) + (iy - cy).powi(2) + (iz - cz).powi(2)).sqrt() - radius;
                     // godot_voxel stores SDF so that POSITIVE values mean inside solid
                     // (the algorithm negates via sdf_as_float before comparison).
                     // So we store the negation of the geometric distance.
@@ -85,7 +86,10 @@ fn sphere_produces_a_closed_mesh() {
     let input = SphereInput::new(16, 6.0);
     let mut cache = Cache::default();
     let mut output = MeshArrays::default();
-    let params = BuildRegularMeshParams { lod_index: 0, edge_clamp_margin: 0.0 };
+    let params = BuildRegularMeshParams {
+        lod_index: 0,
+        edge_clamp_margin: 0.0,
+    };
 
     build_regular_mesh(&input, &params, &mut cache, &mut output);
 
@@ -112,19 +116,37 @@ fn sphere_produces_a_closed_mesh() {
 
     // All vertices should lie within the inner block bounds (0..16).
     for v in &output.vertices {
-        assert!(v.x >= -0.5 && v.x <= 16.5, "vertex x out of bounds: {}", v.x);
-        assert!(v.y >= -0.5 && v.y <= 16.5, "vertex y out of bounds: {}", v.y);
-        assert!(v.z >= -0.5 && v.z <= 16.5, "vertex z out of bounds: {}", v.z);
+        assert!(
+            v.x >= -0.5 && v.x <= 16.5,
+            "vertex x out of bounds: {}",
+            v.x
+        );
+        assert!(
+            v.y >= -0.5 && v.y <= 16.5,
+            "vertex y out of bounds: {}",
+            v.y
+        );
+        assert!(
+            v.z >= -0.5 && v.z <= 16.5,
+            "vertex z out of bounds: {}",
+            v.z
+        );
     }
 }
 
 #[test]
 fn empty_block_produces_no_geometry() {
     // A block of all-positive SDF (fully outside) must yield no mesh.
-    let input = SphereInput { buf: DenseVoxelBuffer::new(
-        Vector3i::new(4 + MIN_PADDING + MAX_PADDING, 4 + MIN_PADDING + MAX_PADDING, 4 + MIN_PADDING + MAX_PADDING),
-        ChannelDepth::Bit32,
-    ) };
+    let input = SphereInput {
+        buf: DenseVoxelBuffer::new(
+            Vector3i::new(
+                4 + MIN_PADDING + MAX_PADDING,
+                4 + MIN_PADDING + MAX_PADDING,
+                4 + MIN_PADDING + MAX_PADDING,
+            ),
+            ChannelDepth::Bit32,
+        ),
+    };
     let mut cache = Cache::default();
     let mut output = MeshArrays::default();
     build_regular_mesh(&input, &params_default(), &mut cache, &mut output);
@@ -133,5 +155,8 @@ fn empty_block_produces_no_geometry() {
 }
 
 fn params_default() -> BuildRegularMeshParams {
-    BuildRegularMeshParams { lod_index: 0, edge_clamp_margin: 0.0 }
+    BuildRegularMeshParams {
+        lod_index: 0,
+        edge_clamp_margin: 0.0,
+    }
 }

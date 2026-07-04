@@ -58,7 +58,8 @@ impl SphereInput {
                     let ix = x as f32 - MIN_PADDING as f32;
                     let iy = y as f32 - MIN_PADDING as f32;
                     let iz = z as f32 - MIN_PADDING as f32;
-                    let d = ((ix - cx).powi(2) + (iy - cy).powi(2) + (iz - cz).powi(2)).sqrt() - radius;
+                    let d =
+                        ((ix - cx).powi(2) + (iy - cy).powi(2) + (iz - cz).powi(2)).sqrt() - radius;
                     // POSITIVE = inside solid (engine SDF convention).
                     let stored = -d;
                     let i = y + sy * (x + sx * z);
@@ -215,7 +216,10 @@ impl GoldenMesh {
                 .iter()
                 .zip(&actual.indices)
                 .position(|(a, b)| a != b);
-            return Err(format!("indices differ (first differing entry: {:?})", first));
+            return Err(format!(
+                "indices differ (first differing entry: {:?})",
+                first
+            ));
         }
         if self.cell_border_masks != actual.cell_border_masks {
             return Err("cell_border_masks differ".to_string());
@@ -230,10 +234,18 @@ impl GoldenMesh {
         for (label, (g, a)) in [
             ("vertices", (&self.vertices, &actual.vertices)),
             ("normals", (&self.normals, &actual.normals)),
-            ("secondary_positions", (&self.secondary_positions, &actual.secondary_positions)),
+            (
+                "secondary_positions",
+                (&self.secondary_positions, &actual.secondary_positions),
+            ),
         ] {
             if g.len() != a.len() {
-                return Err(format!("{} length mismatch: golden={} actual={}", label, g.len(), a.len()));
+                return Err(format!(
+                    "{} length mismatch: golden={} actual={}",
+                    label,
+                    g.len(),
+                    a.len()
+                ));
             }
             let mut worst = 0.0f32;
             let mut worst_i = 0;
@@ -249,13 +261,7 @@ impl GoldenMesh {
                 return Err(format!(
                     "{} differ beyond tolerance: worst abs diff {} at flat index {} \
                      (golden={}, actual={}, abs_tol={}, rel_tol={})",
-                    label,
-                    worst,
-                    worst_i,
-                    g[worst_i],
-                    a[worst_i],
-                    abs_tol,
-                    rel_tol
+                    label, worst, worst_i, g[worst_i], a[worst_i], abs_tol, rel_tol
                 ));
             }
         }
@@ -283,7 +289,10 @@ fn load_golden(name: &str) -> String {
 /// Load a committed golden and verify the mesher still reproduces it.
 fn check_against_golden(golden_json: &str, inner: i32, radius: f32) {
     let golden: GoldenMesh = serde_json::from_str(golden_json).expect("golden JSON must parse");
-    assert_eq!(golden.schema_version, SCHEMA_VERSION, "committed golden has stale schema");
+    assert_eq!(
+        golden.schema_version, SCHEMA_VERSION,
+        "committed golden has stale schema"
+    );
     assert_eq!(golden.input.kind, "sphere");
     assert_eq!(golden.input.inner, inner, "golden inner size mismatch");
     assert_eq!(golden.input.radius, radius, "golden radius mismatch");
@@ -317,12 +326,17 @@ fn matches_golden_sphere_32() {
 #[test]
 #[ignore = "set with --ignored to regenerate golden files"]
 fn regenerate_golden() {
-    let params = BuildRegularMeshParams { lod_index: 0, edge_clamp_margin: 0.0 };
+    let params = BuildRegularMeshParams {
+        lod_index: 0,
+        edge_clamp_margin: 0.0,
+    };
     let cases: &[(i32, f32, &str)] = &[
         (16, 6.0, "transvoxel_sphere_16.json"),
         (32, 13.0, "transvoxel_sphere_32.json"),
     ];
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("golden");
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("golden");
     std::fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("create_dir_all {dir:?}: {e}"));
     for &(inner, radius, name) in cases {
         let input = SphereInput::new(inner, radius);

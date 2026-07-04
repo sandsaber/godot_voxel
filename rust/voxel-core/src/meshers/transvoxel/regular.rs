@@ -13,10 +13,10 @@
 // `is_empty`; the indexing loop in `cell_samples` is clearer than an iterator.
 #![allow(clippy::len_without_is_empty, clippy::needless_range_loop)]
 
-use crate::math::{Vector3f, Vector3i};
-use crate::math::funcs;
 use super::regular_tables;
 use super::structures::{Cache, MeshArrays};
+use crate::math::funcs;
+use crate::math::{Vector3f, Vector3i};
 
 /// Padding required around the voxel block for normal computation
 /// (matches `MIN_PADDING` / `MAX_PADDING` in transvoxel.h).
@@ -57,7 +57,10 @@ pub struct BuildRegularMeshParams {
 
 impl Default for BuildRegularMeshParams {
     fn default() -> Self {
-        Self { lod_index: 0, edge_clamp_margin: 0.0 }
+        Self {
+            lod_index: 0,
+            edge_clamp_margin: 0.0,
+        }
     }
 }
 
@@ -105,7 +108,11 @@ fn vector3_length_squared(v: Vector3f) -> f32 {
 #[inline]
 fn get_border_mask(pos: Vector3i, block_size: Vector3i) -> u8 {
     let mut mask = 0u8;
-    for (axis, (p, s)) in [pos.x, pos.y, pos.z].iter().zip([block_size.x, block_size.y, block_size.z].iter()).enumerate() {
+    for (axis, (p, s)) in [pos.x, pos.y, pos.z]
+        .iter()
+        .zip([block_size.x, block_size.y, block_size.z].iter())
+        .enumerate()
+    {
         if *p == 0 {
             mask |= 1 << (axis * 2);
         }
@@ -174,9 +181,9 @@ pub fn build_regular_mesh(
     // innermost axis, which makes the Y+1 neighbor one element away.
     let sy = block_size_with_padding.y as usize;
     let sx = block_size_with_padding.x as usize;
-    let n010 = 1usize;        // Y+1 (Y innermost)
-    let n100 = sy;            // X+1
-    let n001 = sy * sx;       // Z+1
+    let n010 = 1usize; // Y+1 (Y innermost)
+    let n100 = sy; // X+1
+    let n001 = sy * sx; // Z+1
     let n110 = n010 + n100;
     let n101 = n100 + n001;
     let n011 = n010 + n001;
@@ -197,14 +204,13 @@ pub fn build_regular_mesh(
             while pos.x < max_pos.x {
                 // ---- Early-out: skip cells that don't cross the isolevel ----
                 let s = input.sample_f32(data_index) > isolevel;
-                let all_same =
-                    (input.sample_f32(data_index + n010) > isolevel) == s &&
-                    (input.sample_f32(data_index + n100) > isolevel) == s &&
-                    (input.sample_f32(data_index + n110) > isolevel) == s &&
-                    (input.sample_f32(data_index + n001) > isolevel) == s &&
-                    (input.sample_f32(data_index + n011) > isolevel) == s &&
-                    (input.sample_f32(data_index + n101) > isolevel) == s &&
-                    (input.sample_f32(data_index + n111) > isolevel) == s;
+                let all_same = (input.sample_f32(data_index + n010) > isolevel) == s
+                    && (input.sample_f32(data_index + n100) > isolevel) == s
+                    && (input.sample_f32(data_index + n110) > isolevel) == s
+                    && (input.sample_f32(data_index + n001) > isolevel) == s
+                    && (input.sample_f32(data_index + n011) > isolevel) == s
+                    && (input.sample_f32(data_index + n101) > isolevel) == s
+                    && (input.sample_f32(data_index + n111) > isolevel) == s;
                 if all_same {
                     data_index += sy;
                     pos.x += 1;
@@ -219,14 +225,14 @@ pub fn build_regular_mesh(
                 //  |/      |/   z y
                 //  0-------1    |/  o--x
                 let corner_data_indices = [
-                    data_index,           // 0
-                    data_index + n100,    // 1
-                    data_index + n010,    // 2
-                    data_index + n110,    // 3
-                    data_index + n001,    // 4
-                    data_index + n101,    // 5
-                    data_index + n011,    // 6
-                    data_index + n111,    // 7
+                    data_index,        // 0
+                    data_index + n100, // 1
+                    data_index + n010, // 2
+                    data_index + n110, // 3
+                    data_index + n001, // 4
+                    data_index + n101, // 5
+                    data_index + n011, // 6
+                    data_index + n111, // 7
                 ];
 
                 let mut cell_samples = [0.0f32; 8];
@@ -249,14 +255,21 @@ pub fn build_regular_mesh(
                 // ---- Per-cell geometry lookup ----
                 let direction_validity_mask: u8 = {
                     let mut m = 0u8;
-                    if pos.x > min_pos.x { m |= 1; }
-                    if pos.y > min_pos.y { m |= 2; }
-                    if pos.z > min_pos.z { m |= 4; }
+                    if pos.x > min_pos.x {
+                        m |= 1;
+                    }
+                    if pos.y > min_pos.y {
+                        m |= 2;
+                    }
+                    if pos.z > min_pos.z {
+                        m |= 4;
+                    }
                     m
                 };
 
                 let regular_cell_class_index = regular_tables::get_regular_cell_class(case_code);
-                let regular_cell_data = regular_tables::get_regular_cell_data(regular_cell_class_index);
+                let regular_cell_data =
+                    regular_tables::get_regular_cell_data(regular_cell_class_index);
                 let triangle_count = regular_cell_data.triangle_count();
                 let vertex_count = regular_cell_data.vertex_count();
 
@@ -270,9 +283,36 @@ pub fn build_regular_mesh(
                 // Corner positions (un-padded, scaled by LOD).
                 let corner_positions = {
                     let mut cps = [Vector3i::zero(); 8];
-                    let px = [pos.x, pos.x + 1, pos.x, pos.x + 1, pos.x, pos.x + 1, pos.x, pos.x + 1];
-                    let py = [pos.y, pos.y, pos.y + 1, pos.y + 1, pos.y, pos.y, pos.y + 1, pos.y + 1];
-                    let pz = [pos.z, pos.z, pos.z, pos.z, pos.z + 1, pos.z + 1, pos.z + 1, pos.z + 1];
+                    let px = [
+                        pos.x,
+                        pos.x + 1,
+                        pos.x,
+                        pos.x + 1,
+                        pos.x,
+                        pos.x + 1,
+                        pos.x,
+                        pos.x + 1,
+                    ];
+                    let py = [
+                        pos.y,
+                        pos.y,
+                        pos.y + 1,
+                        pos.y + 1,
+                        pos.y,
+                        pos.y,
+                        pos.y + 1,
+                        pos.y + 1,
+                    ];
+                    let pz = [
+                        pos.z,
+                        pos.z,
+                        pos.z,
+                        pos.z,
+                        pos.z + 1,
+                        pos.z + 1,
+                        pos.z + 1,
+                        pos.z + 1,
+                    ];
                     for i in 0..8 {
                         cps[i] = Vector3i::new(
                             (px[i] - min_pos.x) << lod_index,
@@ -300,7 +340,11 @@ pub fn build_regular_mesh(
                     let p1 = corner_positions[v1];
 
                     // Interpolation parameter t along the edge.
-                    let t = funcs::clampf(sample1 / (sample1 - sample0), edge_clamp_margin, edge_clamp_margin_max);
+                    let t = funcs::clampf(
+                        sample1 / (sample1 - sample0),
+                        edge_clamp_margin,
+                        edge_clamp_margin_max,
+                    );
 
                     if t > 0.0 && t < 1.0 {
                         // Vertex is interior to the edge — try reuse, else create.
@@ -320,8 +364,8 @@ pub fn build_regular_mesh(
                             }
                         }
 
-                        let need_create = !present
-                            || cell_vertex_indices[vertex_index as usize] == -1;
+                        let need_create =
+                            !present || cell_vertex_indices[vertex_index as usize] == -1;
 
                         if need_create {
                             let t0 = t;
@@ -333,9 +377,8 @@ pub fn build_regular_mesh(
                             let normal = normalized_not_null(cg0 * t0 + cg1 * t1);
 
                             let (secondary, vertex_border_mask) = if cell_border_mask > 0 {
-                                let sec = get_secondary_position(
-                                    primaryf, normal, lod_index, block_size,
-                                );
+                                let sec =
+                                    get_secondary_position(primaryf, normal, lod_index, block_size);
                                 let vbm = get_border_mask(p0, block_size_scaled)
                                     & get_border_mask(p1, block_size_scaled);
                                 (sec, vbm)
@@ -344,7 +387,12 @@ pub fn build_regular_mesh(
                             };
 
                             let vi = output.add_vertex(
-                                primaryf, normal, cell_border_mask, vertex_border_mask, 0, secondary,
+                                primaryf,
+                                normal,
+                                cell_border_mask,
+                                vertex_border_mask,
+                                0,
+                                secondary,
                             );
                             cell_vertex_indices[vertex_index as usize] = vi;
 
@@ -360,14 +408,20 @@ pub fn build_regular_mesh(
                         let normal = normalized_not_null(cg1);
 
                         let (secondary, vertex_border_mask) = if cell_border_mask > 0 {
-                            let sec = get_secondary_position(primaryf, normal, lod_index, block_size);
+                            let sec =
+                                get_secondary_position(primaryf, normal, lod_index, block_size);
                             (sec, get_border_mask(p1, block_size_scaled))
                         } else {
                             (Vector3f::zero(), 0u8)
                         };
 
                         let vi = output.add_vertex(
-                            primaryf, normal, cell_border_mask, vertex_border_mask, 0, secondary,
+                            primaryf,
+                            normal,
+                            cell_border_mask,
+                            vertex_border_mask,
+                            0,
+                            secondary,
                         );
                         cell_vertex_indices[vertex_index as usize] = vi;
                         let cell = cache.get_reuse_cell_mut(pos);
@@ -382,14 +436,20 @@ pub fn build_regular_mesh(
                         let normal = normalized_not_null(cg);
 
                         let (secondary, vertex_border_mask) = if cell_border_mask > 0 {
-                            let sec = get_secondary_position(primaryf, normal, lod_index, block_size);
+                            let sec =
+                                get_secondary_position(primaryf, normal, lod_index, block_size);
                             (sec, get_border_mask(primary, block_size_scaled))
                         } else {
                             (Vector3f::zero(), 0u8)
                         };
 
                         let vi = output.add_vertex(
-                            primaryf, normal, cell_border_mask, vertex_border_mask, 0, secondary,
+                            primaryf,
+                            normal,
+                            cell_border_mask,
+                            vertex_border_mask,
+                            0,
+                            secondary,
                         );
                         cell_vertex_indices[vertex_index as usize] = vi;
                     }
@@ -399,8 +459,10 @@ pub fn build_regular_mesh(
                 for t in 0..triangle_count {
                     let t0 = (t as usize) * 3;
                     let i0 = cell_vertex_indices[regular_cell_data.get_vertex_index(t0) as usize];
-                    let i1 = cell_vertex_indices[regular_cell_data.get_vertex_index(t0 + 1) as usize];
-                    let i2 = cell_vertex_indices[regular_cell_data.get_vertex_index(t0 + 2) as usize];
+                    let i1 =
+                        cell_vertex_indices[regular_cell_data.get_vertex_index(t0 + 1) as usize];
+                    let i2 =
+                        cell_vertex_indices[regular_cell_data.get_vertex_index(t0 + 2) as usize];
                     output.indices.push(i0);
                     output.indices.push(i1);
                     output.indices.push(i2);
@@ -464,7 +526,11 @@ fn get_secondary_position(
 const TRANSITION_CELL_SCALE: f32 = 0.25;
 
 /// Matches `get_border_offset`.
-fn get_border_offset(pos_scaled: Vector3f, lod_index: u32, block_size_non_scaled: Vector3i) -> Vector3f {
+fn get_border_offset(
+    pos_scaled: Vector3f,
+    lod_index: u32,
+    block_size_non_scaled: Vector3i,
+) -> Vector3f {
     let mut delta = [0.0f32; 3];
     let p2k = (1u32 << lod_index) as f32;
     let p2mk = 1.0 / p2k;
@@ -492,8 +558,12 @@ fn get_border_offset(pos_scaled: Vector3f, lod_index: u32, block_size_non_scaled
 /// Matches `project_border_offset`.
 fn project_border_offset(delta: Vector3f, normal: Vector3f) -> Vector3f {
     Vector3f::new(
-        (1.0 - normal.x * normal.x) * delta.x - normal.y * normal.x * delta.y - normal.z * normal.x * delta.z,
-        -normal.x * normal.y * delta.x + (1.0 - normal.y * normal.y) * delta.y - normal.z * normal.y * delta.z,
-        -normal.x * normal.z * delta.x - normal.y * normal.z * delta.y + (1.0 - normal.z * normal.z) * delta.z,
+        (1.0 - normal.x * normal.x) * delta.x
+            - normal.y * normal.x * delta.y
+            - normal.z * normal.x * delta.z,
+        -normal.x * normal.y * delta.x + (1.0 - normal.y * normal.y) * delta.y
+            - normal.z * normal.y * delta.z,
+        -normal.x * normal.z * delta.x - normal.y * normal.z * delta.y
+            + (1.0 - normal.z * normal.z) * delta.z,
     )
 }
