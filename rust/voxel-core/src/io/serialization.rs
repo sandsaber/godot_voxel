@@ -244,6 +244,15 @@ impl<'a> MemoryReader<'a> {
         self.endianness
     }
 
+    /// Switch the byte order mid-stream. The C++ `MemoryReader` exposes
+    /// `endianness` as a public mutable field; the only in-tree use is
+    /// `instance_data` toggling to big-endian when it sees a legacy version-0
+    /// header. Mirrored here as an explicit setter.
+    #[inline]
+    pub fn set_endianness(&mut self, endianness: Endianness) {
+        self.endianness = endianness;
+    }
+
     /// Bytes consumed so far. Matches `get_position`.
     #[inline]
     pub fn position(&self) -> usize {
@@ -340,6 +349,59 @@ impl<'a> MemoryReader<'a> {
         dst[..len].copy_from_slice(&self.data[self.pos..end]);
         self.pos = end;
         len
+    }
+
+    // ---- fallible variants -------------------------------------------------
+    //
+    // The `get_*` methods above panic on a short buffer, mirroring the C++
+    // assumption that callers pre-validate lengths. Several on-disk formats
+    // (e.g. `instance_data`) come from untrusted sources and need to bail out
+    // cleanly on truncation instead of aborting. The `try_*` family returns
+    // `Option`, leaving the cursor untouched on failure.
+
+    /// Fallibly pull `n` bytes without panicking. Returns `None` if fewer than
+    /// `n` bytes remain; the cursor is not advanced in that case.
+    pub fn try_take(&mut self, n: usize) -> Option<&'a [u8]> {
+        let end = self.pos.checked_add(n)?;
+        if end > self.data.len() {
+            return None;
+        }
+        let slice = &self.data[self.pos..end];
+        self.pos = end;
+        Some(slice)
+    }
+
+    #[inline]
+    pub fn try_get_8(&mut self) -> Option<u8> {
+        self.try_take(1).map(|s| s[0])
+    }
+
+    #[inline]
+    pub fn try_get_16(&mut self) -> Option<u16> {
+        let b = self.try_take(2)?;
+        Some(match self.endianness {
+            Endianness::BigEndian => ((b[0] as u16) << 8) | b[1] as u16,
+            Endianness::LittleEndian => b[0] as u16 | ((b[1] as u16) << 8),
+        })
+    }
+
+    #[inline]
+    pub fn try_get_32(&mut self) -> Option<u32> {
+        let b = self.try_take(4)?;
+        Some(match self.endianness {
+            Endianness::BigEndian => {
+                ((b[0] as u32) << 24) | ((b[1] as u32) << 16) | ((b[2] as u32) << 8) | b[3] as u32
+            }
+            Endianness::LittleEndian => {
+                b[0] as u32 | ((b[1] as u32) << 8) | ((b[2] as u32) << 16) | ((b[3] as u32) << 24)
+            }
+        })
+    }
+
+    /// Reinterpret the next 4 bytes as `f32`, or `None` on truncation.
+    #[inline]
+    pub fn try_get_float(&mut self) -> Option<f32> {
+        self.try_get_32().map(f32::from_bits)
     }
 }
 

@@ -19,6 +19,7 @@ pub mod math;
 pub mod memory;
 pub mod meshers;
 pub mod storage;
+pub mod streams;
 pub mod string;
 pub mod testing;
 
