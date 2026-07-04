@@ -49,7 +49,12 @@ mod tests {
 
     #[test]
     fn byte_size_roundtrip() {
-        for d in [ChannelDepth::Bit8, ChannelDepth::Bit16, ChannelDepth::Bit32, ChannelDepth::Bit64] {
+        for d in [
+            ChannelDepth::Bit8,
+            ChannelDepth::Bit16,
+            ChannelDepth::Bit32,
+            ChannelDepth::Bit64,
+        ] {
             assert_eq!(ChannelDepth::from_byte_size(d.byte_size()), Some(d));
         }
         assert_eq!(ChannelDepth::from_byte_size(3), None);

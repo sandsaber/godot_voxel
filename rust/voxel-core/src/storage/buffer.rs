@@ -10,8 +10,8 @@
 //! benchmarks in Phase 0. It mirrors the uncompressed, default-allocator path
 //! of the C++ class.
 
-use crate::math::Vector3i;
 use super::depth::ChannelDepth;
+use crate::math::Vector3i;
 
 /// Read-only view of a single voxel channel: raw bytes + depth + size.
 ///
@@ -70,26 +70,42 @@ impl DenseVoxelBuffer {
     /// Create a zero-initialized buffer of `size` voxels with the given depth.
     pub fn new(size: Vector3i, depth: ChannelDepth) -> Self {
         let vol = volume_u64(size) as usize;
-        let len = vol.checked_mul(depth.byte_size()).expect("buffer too large");
-        Self { size, depth, data: vec![0; len] }
+        let len = vol
+            .checked_mul(depth.byte_size())
+            .expect("buffer too large");
+        Self {
+            size,
+            depth,
+            data: vec![0; len],
+        }
     }
 
     /// Create from a pre-filled byte vector. The length must match
     /// `volume * depth.byte_size()`.
     pub fn from_bytes(size: Vector3i, depth: ChannelDepth, data: Vec<u8>) -> Self {
         let expected = volume_u64(size) as usize * depth.byte_size();
-        assert_eq!(data.len(), expected, "DenseVoxelBuffer data length mismatch");
+        assert_eq!(
+            data.len(),
+            expected,
+            "DenseVoxelBuffer data length mismatch"
+        );
         Self { size, depth, data }
     }
 
     #[inline]
-    pub fn depth(&self) -> ChannelDepth { self.depth }
+    pub fn depth(&self) -> ChannelDepth {
+        self.depth
+    }
 
     #[inline]
-    pub fn data(&self) -> &[u8] { &self.data }
+    pub fn data(&self) -> &[u8] {
+        &self.data
+    }
 
     #[inline]
-    pub fn data_mut(&mut self) -> &mut [u8] { &mut self.data }
+    pub fn data_mut(&mut self) -> &mut [u8] {
+        &mut self.data
+    }
 
     // -- typed element access (pilot convenience) --
 
@@ -105,12 +121,8 @@ impl DenseVoxelBuffer {
                 let v = i16::from_le_bytes([bytes[0], bytes[1]]);
                 v as f32
             }
-            ChannelDepth::Bit32 => {
-                f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
-            }
-            ChannelDepth::Bit64 => {
-                f64::from_le_bytes(bytes.try_into().unwrap()) as f32
-            }
+            ChannelDepth::Bit32 => f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+            ChannelDepth::Bit64 => f64::from_le_bytes(bytes.try_into().unwrap()) as f32,
         }
     }
 
@@ -139,13 +151,19 @@ impl DenseVoxelBuffer {
 // drop-in change.
 impl VoxelBufferRead for DenseVoxelBuffer {
     #[inline]
-    fn size(&self) -> Vector3i { self.size }
+    fn size(&self) -> Vector3i {
+        self.size
+    }
 
     #[inline]
-    fn channel_depth(&self, _channel_index: u32) -> ChannelDepth { self.depth }
+    fn channel_depth(&self, _channel_index: u32) -> ChannelDepth {
+        self.depth
+    }
 
     #[inline]
-    fn channel_bytes(&self, _channel_index: u32) -> &[u8] { &self.data }
+    fn channel_bytes(&self, _channel_index: u32) -> &[u8] {
+        &self.data
+    }
 }
 
 #[cfg(test)]

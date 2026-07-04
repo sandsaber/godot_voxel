@@ -6,6 +6,13 @@
 
 pub mod buffer;
 pub mod depth;
+pub mod funcs;
+pub mod voxel_buffer;
+pub mod voxel_format;
+pub mod voxel_memory_pool;
 
 pub use buffer::{DenseVoxelBuffer, VoxelBufferRead};
 pub use depth::ChannelDepth;
+pub use voxel_buffer::{Allocator, Channel, ChannelId, Compression, VoxelBuffer};
+pub use voxel_format::{DepthRange, VoxelFormat};
+pub use voxel_memory_pool::VoxelMemoryPool;
