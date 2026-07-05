@@ -317,40 +317,74 @@ impl VoxelDataMap {
         create_new_blocks: bool,
     ) {
         let channels = channel_indices_from_mask(channels_mask);
-        for src_pos in Box3i::new(Vector3i::zero(), src_buffer.size()).iter_cells_zxy() {
-            if src_buffer.get_voxel(src_pos.x, src_pos.y, src_pos.z, src_mask_channel)
-                == src_mask_value
-            {
-                continue;
-            }
+        let src_size = src_buffer.size();
+        if src_size.x <= 0 || src_size.y <= 0 || src_size.z <= 0 {
+            return;
+        }
 
-            let dst_pos = min_pos + src_pos;
-            if create_new_blocks {
-                for &channel_index in &channels {
-                    let value =
-                        src_buffer.get_voxel(src_pos.x, src_pos.y, src_pos.z, channel_index);
-                    self.set_voxel(value, dst_pos, channel_index);
-                }
-                continue;
-            }
+        // Iterate per destination block (one hashmap lookup per block instead
+        // of per source voxel), matching the C++ `paste_masked` strategy.
+        let max_pos = min_pos + src_size;
+        let min_block_pos = self.voxel_to_block(min_pos);
+        let max_block_pos = self.voxel_to_block(max_pos - Vector3i::splat(1)) + Vector3i::splat(1);
+        let block_extent = Vector3i::splat(Self::BLOCK_SIZE as i32);
 
-            let block_pos = self.voxel_to_block(dst_pos);
-            let local_pos = self.to_local(dst_pos);
-            let Some(block) = self.get_block_mut(block_pos) else {
+        for block_pos in Box3i::from_min_max(min_block_pos, max_block_pos).iter_cells_zxy() {
+            let dst_block_origin = self.block_to_voxel(block_pos);
+            let dst_base_pos = min_pos - dst_block_origin;
+
+            let block = if create_new_blocks {
+                Some(self.get_or_create_block_at_voxel_pos(dst_block_origin))
+            } else {
+                self.get_block_mut(block_pos)
+            };
+            let Some(block) = block else {
                 continue;
             };
             if !block.has_voxels() {
                 continue;
             }
-            for &channel_index in &channels {
-                let value = src_buffer.get_voxel(src_pos.x, src_pos.y, src_pos.z, channel_index);
-                block.voxels_mut().set_voxel(
-                    value,
-                    local_pos.x,
-                    local_pos.y,
-                    local_pos.z,
-                    channel_index,
-                );
+
+            // Overlap of this block's interior with the source buffer, in dst
+            // local coordinates. VoxelBuffer handles out-of-range reads as
+            // no-ops, but clipping lets us skip empty bands entirely.
+            let local_min = Vector3i::new(
+                dst_base_pos.x.max(0),
+                dst_base_pos.y.max(0),
+                dst_base_pos.z.max(0),
+            );
+            let upper = dst_base_pos + src_size;
+            let local_max = Vector3i::new(
+                upper.x.min(block_extent.x),
+                upper.y.min(block_extent.y),
+                upper.z.min(block_extent.z),
+            );
+
+            let voxels = block.voxels_mut();
+            for lz in local_min.z..local_max.z {
+                for lx in local_min.x..local_max.x {
+                    for ly in local_min.y..local_max.y {
+                        let src_pos = Vector3i::new(lx, ly, lz) - dst_base_pos;
+                        if src_buffer.get_voxel(
+                            src_pos.x,
+                            src_pos.y,
+                            src_pos.z,
+                            src_mask_channel,
+                        ) == src_mask_value
+                        {
+                            continue;
+                        }
+                        for &channel_index in &channels {
+                            let value = src_buffer.get_voxel(
+                                src_pos.x,
+                                src_pos.y,
+                                src_pos.z,
+                                channel_index,
+                            );
+                            voxels.set_voxel(value, lx, ly, lz, channel_index);
+                        }
+                    }
+                }
             }
         }
     }
@@ -368,18 +402,29 @@ impl VoxelDataMap {
         create_new_blocks: bool,
     ) {
         let channels = channel_indices_from_mask(channels_mask);
-        for src_pos in Box3i::new(Vector3i::zero(), src_buffer.size()).iter_cells_zxy() {
-            if src_buffer.get_voxel(src_pos.x, src_pos.y, src_pos.z, src_mask_channel)
-                == src_mask_value
-            {
-                continue;
-            }
+        let src_size = src_buffer.size();
+        if src_size.x <= 0 || src_size.y <= 0 || src_size.z <= 0 || dst_writable_values.is_empty()
+        {
+            return;
+        }
 
-            let dst_pos = min_pos + src_pos;
-            let block_pos = self.voxel_to_block(dst_pos);
-            let local_pos = self.to_local(dst_pos);
+        // Build an O(1) writability lookup. C++ uses a u16-indexed DynamicBitset;
+        // we mirror that intent: if every writable value fits in u16 we can use
+        // a `Vec<bool>` indexed directly. Otherwise (pathological large values),
+        // fall back to a linear scan over the (typically tiny) input slice.
+        let writability_lookup = WritabilityLookup::new(dst_writable_values);
+
+        let max_pos = min_pos + src_size;
+        let min_block_pos = self.voxel_to_block(min_pos);
+        let max_block_pos = self.voxel_to_block(max_pos - Vector3i::splat(1)) + Vector3i::splat(1);
+        let block_extent = Vector3i::splat(Self::BLOCK_SIZE as i32);
+
+        for block_pos in Box3i::from_min_max(min_block_pos, max_block_pos).iter_cells_zxy() {
+            let dst_block_origin = self.block_to_voxel(block_pos);
+            let dst_base_pos = min_pos - dst_block_origin;
+
             let block = if create_new_blocks {
-                Some(self.get_or_create_block_at_voxel_pos(dst_pos))
+                Some(self.get_or_create_block_at_voxel_pos(dst_block_origin))
             } else {
                 self.get_block_mut(block_pos)
             };
@@ -390,23 +435,47 @@ impl VoxelDataMap {
                 continue;
             }
 
-            let dst_mask_value =
-                block
-                    .voxels()
-                    .get_voxel(local_pos.x, local_pos.y, local_pos.z, dst_mask_channel);
-            if !dst_writable_values.contains(&dst_mask_value) {
-                continue;
-            }
+            let local_min = Vector3i::new(
+                dst_base_pos.x.max(0),
+                dst_base_pos.y.max(0),
+                dst_base_pos.z.max(0),
+            );
+            let upper = dst_base_pos + src_size;
+            let local_max = Vector3i::new(
+                upper.x.min(block_extent.x),
+                upper.y.min(block_extent.y),
+                upper.z.min(block_extent.z),
+            );
 
-            for &channel_index in &channels {
-                let value = src_buffer.get_voxel(src_pos.x, src_pos.y, src_pos.z, channel_index);
-                block.voxels_mut().set_voxel(
-                    value,
-                    local_pos.x,
-                    local_pos.y,
-                    local_pos.z,
-                    channel_index,
-                );
+            let voxels = block.voxels_mut();
+            for lz in local_min.z..local_max.z {
+                for lx in local_min.x..local_max.x {
+                    for ly in local_min.y..local_max.y {
+                        let src_pos = Vector3i::new(lx, ly, lz) - dst_base_pos;
+                        if src_buffer.get_voxel(
+                            src_pos.x,
+                            src_pos.y,
+                            src_pos.z,
+                            src_mask_channel,
+                        ) == src_mask_value
+                        {
+                            continue;
+                        }
+                        let dst_mask_value = voxels.get_voxel(lx, ly, lz, dst_mask_channel);
+                        if !writability_lookup.is_writable(dst_mask_value) {
+                            continue;
+                        }
+                        for &channel_index in &channels {
+                            let value = src_buffer.get_voxel(
+                                src_pos.x,
+                                src_pos.y,
+                                src_pos.z,
+                                channel_index,
+                            );
+                            voxels.set_voxel(value, lx, ly, lz, channel_index);
+                        }
+                    }
+                }
             }
         }
     }
@@ -464,6 +533,54 @@ fn channel_indices_from_mask(channels_mask: u32) -> Vec<usize> {
     (0..MAX_CHANNELS)
         .filter(|channel_index| (channels_mask & (1u32 << channel_index)) != 0)
         .collect()
+}
+
+/// O(1) writability test for masked paste. Mirrors the C++
+/// `indices_to_bitarray_u16` fast path: when every writable value fits in a
+/// `u16`, build a dense `Vec<bool>` indexed by the destination mask value so
+/// the per-voxel probe is a single bounds-checked lookup. When the values are
+/// out of `u16` range (pathological for material/typed voxels), fall back to a
+/// linear scan over the (typically tiny) input slice — correct, just slower.
+enum WritabilityLookup {
+    /// Dense bitset indexed by mask value; valid when all values fit in `u16`.
+    Indexed(Vec<bool>),
+    /// Linear scan over the original slice; used as a fallback for large values
+    /// or when the dense table would be unreasonably large.
+    Linear(Vec<u64>),
+}
+
+impl WritabilityLookup {
+    fn new(values: &[u64]) -> Self {
+        let max_indexed = values.len().saturating_sub(1);
+        // Same ceiling as C++ `indices_to_bitarray_u16` (u16 index space), but
+        // we also cap the dense table at a sane size to avoid pathological
+        // memory growth if a single large value slips through.
+        const INDEXED_MAX_VALUE: u64 = u16::MAX as u64;
+        let all_indexable = values
+            .iter()
+            .all(|value| *value <= INDEXED_MAX_VALUE && (*value as usize) < 65_536);
+        if all_indexable && max_indexed < 65_536 {
+            let max_value = values.iter().copied().max().unwrap_or(0) as usize;
+            let mut table = vec![false; max_value.saturating_add(1).max(1)];
+            for value in values {
+                table[*value as usize] = true;
+            }
+            Self::Indexed(table)
+        } else {
+            Self::Linear(values.to_vec())
+        }
+    }
+
+    #[inline]
+    fn is_writable(&self, value: u64) -> bool {
+        match self {
+            Self::Indexed(table) => {
+                let index = value as usize;
+                index < table.len() && table[index]
+            }
+            Self::Linear(values) => values.contains(&value),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -775,5 +892,79 @@ mod tests {
             let expected = if writable { 100 } else { original_value };
             map.get_voxel(pos, channel) == expected
         }));
+    }
+
+    #[test]
+    fn paste_masked_with_destination_mask_handles_large_writable_value_fallback() {
+        // Writable value above u16 forces the linear-scan fallback path; the
+        // dense `Vec<bool>` table is not built. The paste must still match.
+        let channel = ChannelId::Type.index();
+        let channels_mask = 1u32 << channel;
+        let mut format = VoxelFormat::new();
+        format.depths[channel] = ChannelDepth::Bit32;
+        let mut map = VoxelDataMap::new(0);
+        map.set_format(format);
+        map.set_voxel(70_000, Vector3i::new(1, 1, 1), channel);
+        map.set_voxel(70_001, Vector3i::new(2, 2, 2), channel);
+
+        let mut source = VoxelBuffer::with_size(Vector3i::new(4, 4, 4));
+        source.set_channel_depth(channel, ChannelDepth::Bit32);
+        source.fill(7, channel);
+
+        map.paste_masked_with_destination_mask(
+            Vector3i::zero(),
+            &source,
+            channels_mask,
+            channel,
+            // Source mask uses a sentinel channel index that the source never
+            // populated, so every source voxel is a candidate for writing.
+            999,
+            channel,
+            &[70_000],
+            false,
+        );
+
+        assert_eq!(map.get_voxel(Vector3i::new(1, 1, 1), channel), 7);
+        assert_eq!(map.get_voxel(Vector3i::new(2, 2, 2), channel), 70_001);
+    }
+
+    #[test]
+    fn paste_masked_handles_cross_block_paste_with_create_new_blocks() {
+        // Verifies the per-block iteration writes across multiple blocks when
+        // the paste area spans more than one block, exercising the local-min
+        // / local-max clipping in the inner loop.
+        let channel = ChannelId::Type.index();
+        let channels_mask = 1u32 << channel;
+        let masked_value = 9;
+        let area = Box3i::from_min_max(Vector3i::new(8, 8, 8), Vector3i::new(40, 40, 40));
+        let mut source = VoxelBuffer::with_size(area.size);
+        source.fill(masked_value, channel);
+        let write_value = 3;
+        source.fill_area(
+            write_value,
+            Vector3i::new(1, 1, 1),
+            source.size() - Vector3i::splat(1),
+            channel,
+        );
+
+        let mut map = VoxelDataMap::new(0);
+        map.paste_masked(
+            area.position,
+            &source,
+            channels_mask,
+            channel,
+            masked_value,
+            true,
+        );
+
+        assert!(area
+            .padded(-1)
+            .all_cells_match(|pos| map.get_voxel(pos, channel) == write_value));
+        // The single-voxel outline of the area was masked out, so it remains
+        // at the block default rather than `write_value`.
+        assert_ne!(
+            map.get_voxel(area.position, channel),
+            write_value
+        );
     }
 }
