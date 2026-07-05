@@ -46,8 +46,10 @@ impl GenResult {
 /// Ported from the C++ `VoxelGenerator` virtual base. Implementations must be
 /// pure functions of their parameters and `input` — the engine may call
 /// `generate_block` from any thread (the C++ base guards its parameters with
-/// an RWLock; the Rust port defers that concern to the caller).
-pub trait VoxelGenerator {
+/// an RWLock; the Rust port requires `Send + Sync` so the generator can be
+/// shared across threads via `Arc<Mutex<Box<dyn VoxelGenerator>>>` inside
+/// [`crate::storage::VoxelData`]).
+pub trait VoxelGenerator: Send + Sync {
     /// Fill `input.buffer` for the block starting at `input.origin_in_voxels`
     /// at level-of-detail `input.lod`.
     fn generate_block(&mut self, input: VoxelQueryData<'_>) -> GenResult;

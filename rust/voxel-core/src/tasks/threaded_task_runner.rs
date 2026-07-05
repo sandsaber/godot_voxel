@@ -688,11 +688,17 @@ mod tests {
     }
 
     #[test]
-    fn priority_recompute_is_throttled_within_the_update_period() {
+    fn priority_recompute_is_throttle_within_the_update_period_single_worker() {
         // With a long priority-update period, the runner must NOT call
         // `priority()` on every worker wake: cached priorities are reused
         // across wakes until the period elapses. This mirrors the C++
         // `_priority_update_period_ms` throttle.
+        //
+        // Uses a single worker so the count is deterministic: the worker
+        // wakes, runs the initial refresh (one priority() per task), picks a
+        // task, runs it, returns to the loop. Without throttling it would
+        // re-run the refresh on every wake (16+ priority() calls across
+        // iterations); with throttling only the initial 16 happen.
         struct PriorityCountTask {
             priority_calls: Arc<AtomicUsize>,
         }
@@ -706,10 +712,8 @@ mod tests {
             }
         }
 
-        let runner = ThreadedTaskRunner::new(2);
-        // 1 second window is much longer than the test will take, so only the
-        // initial refresh (one priority() call per task) should happen.
-        runner.set_priority_update_period(Duration::from_secs(1));
+        let runner = ThreadedTaskRunner::new(1);
+        runner.set_priority_update_period(Duration::from_secs(60));
 
         let priority_calls = Arc::new(AtomicUsize::new(0));
         for _ in 0..16 {
@@ -724,19 +728,11 @@ mod tests {
         runner.wait_for_all_tasks();
         apply_all(runner.drain_completed_tasks());
 
-        // Without throttling each wake would call priority() at least once per
-        // task per worker iteration; with throttling it should be roughly one
-        // call per task (the initial refresh). Under heavy CI parallelism the
-        // workers may take longer than the 1 s window, allowing one extra
-        // refresh pass, so we assert a small upper bound rather than equality.
-        let calls = priority_calls.load(Ordering::SeqCst);
-        assert!(
-            calls <= 32,
-            "expected at most 32 priority() calls with throttling, got {calls}"
-        );
-        assert!(
-            calls >= 16,
-            "expected at least 16 priority() calls (initial refresh), got {calls}"
+        // Single worker + 60 s window ⇒ exactly one priority() per task.
+        assert_eq!(
+            priority_calls.load(Ordering::SeqCst),
+            16,
+            "throttled runner should call priority() exactly once per task"
         );
     }
 }

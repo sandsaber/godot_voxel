@@ -1,9 +1,13 @@
 //! Aggregate voxel storage over LOD maps.
 //!
-//! First-pass, engine-agnostic port of `storage/voxel_data.{h,cpp}`. This file
-//! intentionally starts with the synchronous storage contract: LOD maps, format,
-//! bounds, block insertion, direct voxel edits and modification flags. Generator
-//! and stream task integration are layered on top in later Phase 4 steps.
+//! Engine-agnostic port of `storage/voxel_data.{h,cpp}`. Owns the per-LOD
+//! sparse block maps plus an optional generator and stream, and exposes the
+//! synchronous storage contract: LOD maps, format, bounds, block insertion,
+//! direct voxel edits, modification flags, LOD cascade, copy/paste, the
+//! reference-counted view/unview API and area-loaded queries. Threaded
+//! streaming task integration is layered on top in later Phase 4 steps
+//! (the C++ `SpatialLock3D` + per-LOD `RWLock` are deferred — Rust uses
+//! `&mut self` to enforce exclusive access at the type level for now).
 
 use crate::constants::voxel_constants::MAX_LOD;
 use crate::generators::base::{VoxelGenerator, VoxelQueryData};
@@ -12,6 +16,9 @@ use crate::storage::{
     voxel_buffer::{raw_voxel_to_real, real_to_raw_voxel, SDF_FAR_OUTSIDE},
     VoxelBuffer, VoxelDataBlock, VoxelDataMap, VoxelFormat,
 };
+use crate::streams::VoxelStream;
+use std::fmt;
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug)]
 struct VoxelDataLod {
@@ -41,13 +48,37 @@ pub struct BlockLocation {
     pub lod_index: u8,
 }
 
-#[derive(Debug)]
+/// Shared, mutable generator storage. `Arc` lets worker tasks (Phase 4
+/// streaming) hold a reference; `Mutex` provides the `&mut self` access
+/// `generate_block` requires; `Box` makes the trait object sized.
+pub type SharedVoxelGenerator = Arc<Mutex<Box<dyn VoxelGenerator>>>;
+
+/// Shared stream storage. `VoxelStream` is already `Send + Sync`; the `Arc`
+/// lets multiple task instances reach the same stream.
+pub type SharedVoxelStream = Arc<dyn VoxelStream>;
+
 pub struct VoxelData {
     lods: Vec<VoxelDataLod>,
     format: VoxelFormat,
     bounds_in_voxels: Box3i,
     full_load_completed: bool,
     streaming_enabled: bool,
+    generator: Option<SharedVoxelGenerator>,
+    stream: Option<SharedVoxelStream>,
+}
+
+impl fmt::Debug for VoxelData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VoxelData")
+            .field("lod_count", &self.lods.len())
+            .field("format", &self.format)
+            .field("bounds_in_voxels", &self.bounds_in_voxels)
+            .field("streaming_enabled", &self.streaming_enabled)
+            .field("full_load_completed", &self.full_load_completed)
+            .field("has_generator", &self.generator.is_some())
+            .field("has_stream", &self.stream.is_some())
+            .finish()
+    }
 }
 
 impl Default for VoxelData {
@@ -65,6 +96,8 @@ impl VoxelData {
             bounds_in_voxels: Box3i::default(),
             full_load_completed: false,
             streaming_enabled: true,
+            generator: None,
+            stream: None,
         }
     }
 
@@ -142,6 +175,263 @@ impl VoxelData {
 
     pub const fn set_full_load_completed(&mut self, complete: bool) {
         self.full_load_completed = complete;
+    }
+
+    /// Returns a clone of the shared generator handle, if any. Cheap (one Arc
+    /// refcount bump). Matches `VoxelData::get_generator` in C++.
+    pub fn generator(&self) -> Option<SharedVoxelGenerator> {
+        self.generator.clone()
+    }
+
+    /// Installs a shared generator. Matches `VoxelData::set_generator`.
+    /// Pass `None` to detach. The handle can be safely cloned into worker
+    /// tasks later (the inner `Mutex` synchronises `generate_block` calls).
+    pub fn set_generator(&mut self, generator: Option<SharedVoxelGenerator>) {
+        self.generator = generator;
+    }
+
+    /// Runs `f` against the installed generator under its lock. Returns
+    /// `None` when no generator is set. Used by `pre_generate_box` /
+    /// `update_lods` when the caller doesn't pass an explicit generator.
+    pub fn with_generator<R>(&self, f: impl FnOnce(&mut dyn VoxelGenerator) -> R) -> Option<R> {
+        self.generator.as_ref().map(|gen| {
+            let mut guard = gen.lock().expect("generator mutex poisoned");
+            f(&mut **guard)
+        })
+    }
+
+    /// Returns a clone of the shared stream handle, if any. Matches
+    /// `VoxelData::get_stream` in C++.
+    pub fn stream(&self) -> Option<SharedVoxelStream> {
+        self.stream.clone()
+    }
+
+    /// Installs a shared stream. Matches `VoxelData::set_stream`.
+    pub fn set_stream(&mut self, stream: Option<SharedVoxelStream>) {
+        self.stream = stream;
+    }
+
+    pub const fn has_generator(&self) -> bool {
+        self.generator.is_some()
+    }
+
+    pub const fn has_stream(&self) -> bool {
+        self.stream.is_some()
+    }
+
+    /// Copies voxel data in a box from LOD0 into `dst_buffer`. Ports
+    /// `VoxelData::copy`. `channels_mask` selects which channels are read;
+    /// missing blocks produce the format default. When a generator is
+    /// installed and `generate_missing` is true, missing blocks inside
+    /// bounds are generated on the fly instead of falling back to defaults
+    /// (mirrors the C++ generator callback path).
+    pub fn copy(
+        &self,
+        min_pos: Vector3i,
+        dst_buffer: &mut VoxelBuffer,
+        channels_mask: u32,
+        generate_missing: bool,
+    ) {
+        if channels_mask == 0 {
+            return;
+        }
+        // Match C++: configure the destination buffer with our format first.
+        self.format.configure_buffer(dst_buffer);
+
+        let dst_size = dst_buffer.size();
+        if dst_size.x <= 0 || dst_size.y <= 0 || dst_size.z <= 0 {
+            return;
+        }
+
+        let block_size = self.block_size() as i32;
+        let max_pos = min_pos + dst_size;
+        let min_block_pos = VoxelDataMap::voxel_to_block_b(min_pos, self.block_size_po2());
+        let max_block_pos =
+            VoxelDataMap::voxel_to_block_b(max_pos - Vector3i::splat(1), self.block_size_po2())
+                + Vector3i::splat(1);
+
+        let channels: Vec<usize> = (0..8u32)
+            .filter(|ci| (channels_mask & (1u32 << ci)) != 0)
+            .map(|ci| ci as usize)
+            .collect();
+
+        for block_pos in Box3i::from_min_max(min_block_pos, max_block_pos).iter_cells_zxy() {
+            let src_block_origin = block_pos * block_size;
+            let dst_offset = src_block_origin - min_pos;
+
+            // Loaded edited block: copy directly from its voxel buffer.
+            if let Some(block) = self.lods[0].map.get_block(block_pos) {
+                if block.has_voxels() {
+                    for &channel_index in &channels {
+                        dst_buffer.copy_channel_from_area(
+                            block.voxels(),
+                            Vector3i::zero(),
+                            block.voxels().size(),
+                            dst_offset,
+                            channel_index,
+                        );
+                    }
+                    continue;
+                }
+            }
+
+            // Missing block: generate on the fly if a generator is available
+            // and the area is inside bounds; otherwise leave the default.
+            if generate_missing
+                && self.generator.is_some()
+                && self.bounds_in_voxels.contains_point(src_block_origin)
+            {
+                let mut scratch = self.create_block_buffer();
+                self.with_generator(|gen| {
+                    gen.generate_block(VoxelQueryData {
+                        buffer: &mut scratch,
+                        origin_in_voxels: src_block_origin,
+                        lod: 0,
+                    });
+                });
+                for &channel_index in &channels {
+                    dst_buffer.copy_channel_from_area(
+                        &scratch,
+                        Vector3i::zero(),
+                        scratch.size(),
+                        dst_offset,
+                        channel_index,
+                    );
+                }
+            }
+        }
+    }
+
+    /// Pastes `src_buffer` into LOD0 at `min_pos`. Ports `VoxelData::paste`.
+    /// `channels_mask` selects which channels are written.
+    /// `create_new_blocks` controls whether missing destination blocks are
+    /// materialised (as formatted empty buffers) before writing.
+    pub fn paste(
+        &mut self,
+        min_pos: Vector3i,
+        src_buffer: &VoxelBuffer,
+        channels_mask: u32,
+        create_new_blocks: bool,
+    ) {
+        self.lods[0].map
+            .paste(min_pos, src_buffer, channels_mask, create_new_blocks);
+    }
+
+    /// Pastes `src_buffer` into LOD0 with a source mask. Ports
+    /// `VoxelData::paste_masked`. Voxels of `src_buffer` whose
+    /// `src_mask_channel` equals `src_mask_value` are skipped.
+    pub fn paste_masked(
+        &mut self,
+        min_pos: Vector3i,
+        src_buffer: &VoxelBuffer,
+        channels_mask: u32,
+        src_mask_channel: usize,
+        src_mask_value: u64,
+        create_new_blocks: bool,
+    ) {
+        self.lods[0].map.paste_masked(
+            min_pos,
+            src_buffer,
+            channels_mask,
+            src_mask_channel,
+            src_mask_value,
+            create_new_blocks,
+        );
+    }
+
+    /// Pastes `src_buffer` into LOD0 with a source mask and a destination
+    /// writable-values list. Ports `VoxelData::paste_masked_writable_list`.
+    /// Voxels of `src_buffer` whose `src_mask_channel` equals `src_mask_value`
+    /// are skipped; voxels of the destination whose `dst_mask_channel` value
+    /// is not in `dst_writable_values` are also skipped.
+    #[allow(clippy::too_many_arguments)]
+    pub fn paste_masked_with_destination_mask(
+        &mut self,
+        min_pos: Vector3i,
+        src_buffer: &VoxelBuffer,
+        channels_mask: u32,
+        src_mask_channel: usize,
+        src_mask_value: u64,
+        dst_mask_channel: usize,
+        dst_writable_values: &[u64],
+        create_new_blocks: bool,
+    ) {
+        self.lods[0].map.paste_masked_with_destination_mask(
+            min_pos,
+            src_buffer,
+            channels_mask,
+            src_mask_channel,
+            src_mask_value,
+            dst_mask_channel,
+            dst_writable_values,
+            create_new_blocks,
+        );
+    }
+
+    /// Tests whether every block intersecting the given voxel box at LOD0 is
+    /// loaded. Ports `VoxelData::is_area_loaded`. The C++ version also
+    /// short-circuits to false when streaming is enabled and the area
+    /// extends outside the bounds (we replicate that here).
+    pub fn is_area_loaded(&self, voxel_box: Box3i) -> bool {
+        if self.streaming_enabled && !self.bounds_in_voxels.contains_box(voxel_box) {
+            return false;
+        }
+        self.lods[0].map.is_area_fully_loaded(voxel_box)
+    }
+
+    /// Tests if all blocks in the given block-coord box at `lod_index` are
+    /// loaded, accounting for data boundaries. Ports
+    /// `VoxelData::has_all_blocks_in_area`.
+    pub fn has_all_blocks_in_area(&self, blocks_box: Box3i, lod_index: usize) -> bool {
+        let Some(lod) = self.lods.get(lod_index) else {
+            return false;
+        };
+        blocks_box.all_cells_match(|pos| lod.map.has_block(pos))
+    }
+
+    /// Appends block positions inside `blocks_box` at `lod_index` that are
+    /// not loaded. Ports `VoxelData::get_missing_blocks` (the box overload).
+    pub fn get_missing_blocks(
+        &self,
+        blocks_box: Box3i,
+        lod_index: usize,
+        out_missing: &mut Vec<Vector3i>,
+    ) {
+        let Some(lod) = self.lods.get(lod_index) else {
+            out_missing.extend(blocks_box.iter_cells_zxy());
+            return;
+        };
+        for pos in blocks_box.iter_cells_zxy() {
+            if !lod.map.has_block(pos) {
+                out_missing.push(pos);
+            }
+        }
+    }
+
+    /// Returns references to the voxel buffers of every block with voxel data
+    /// in `blocks_box` at `lod_index`, indexed into a flat ZXY grid covering
+    /// the box. Missing or empty entries are left as `None`. Ports
+    /// `VoxelData::get_blocks_with_voxel_data`.
+    pub fn get_blocks_with_voxel_data(
+        &self,
+        blocks_box: Box3i,
+        lod_index: usize,
+    ) -> Vec<Option<&VoxelBuffer>> {
+        let mut out = Vec::new();
+        let Some(lod) = self.lods.get(lod_index) else {
+            return out;
+        };
+        let size = blocks_box.size;
+        out.reserve_exact((size.x as usize) * (size.y as usize) * (size.z as usize));
+        for pos in blocks_box.iter_cells_zxy() {
+            let buffer = lod
+                .map
+                .get_block(pos)
+                .filter(|block| block.has_voxels())
+                .map(|block| block.voxels());
+            out.push(buffer);
+        }
+        out
     }
 
     pub fn get_voxel(&self, pos: Vector3i, channel_index: usize, defval: u64) -> u64 {
@@ -707,10 +997,11 @@ fn clone_block(block: &VoxelDataBlock) -> VoxelDataBlock {
 
 #[cfg(test)]
 mod tests {
-    use super::{BlockLocation, VoxelData};
+    use super::{BlockLocation, SharedVoxelGenerator, VoxelData};
     use crate::generators::base::{GenResult, VoxelGenerator, VoxelQueryData};
     use crate::math::{Box3i, Vector3i};
     use crate::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelDataBlock, VoxelFormat};
+    use std::sync::{Arc, Mutex};
 
     #[derive(Default)]
     struct RecordingGenerator {
@@ -1232,5 +1523,147 @@ mod tests {
         assert!(removed.is_empty());
         assert!(data.has_block(Vector3i::zero(), 0));
         assert_eq!(data.get_block(Vector3i::zero(), 0).unwrap().viewers.get(), 1);
+    }
+
+    #[test]
+    fn set_generator_attaches_a_shared_handle_round_trippable_via_with_generator() {
+        let mut data = VoxelData::new();
+        assert!(!data.has_generator());
+
+        let generator: SharedVoxelGenerator =
+            Arc::new(Mutex::new(Box::new(RecordingGenerator::default()) as Box<dyn VoxelGenerator>));
+        data.set_generator(Some(generator.clone()));
+        assert!(data.has_generator());
+
+        let mut probed = Vec::new();
+        data.with_generator(|gen| {
+            // Touch the generator under its lock; the recorder stores nothing
+            // externally but we can confirm it runs.
+            let _ = gen.used_channels_mask();
+            probed.push(());
+        });
+        assert_eq!(probed.len(), 1);
+        assert!(Arc::ptr_eq(data.generator().as_ref().unwrap(), &generator));
+    }
+
+    #[test]
+    fn copy_round_trips_through_lod0_with_generator_filling_missing_blocks() {
+        let mut data = VoxelData::new();
+        data.set_bounds(Box3i::new(Vector3i::zero(), Vector3i::splat(32)));
+        data.set_streaming_enabled(false);
+        let channel = ChannelId::Type.index();
+        let generator: SharedVoxelGenerator =
+            Arc::new(Mutex::new(Box::new(RecordingGenerator::default()) as Box<dyn VoxelGenerator>));
+        data.set_generator(Some(generator));
+
+        // No blocks loaded yet. Copy must invoke the generator for the area.
+        let mut dst = VoxelBuffer::with_size(Vector3i::new(16, 16, 16));
+        data.copy(Vector3i::zero(), &mut dst, 1u32 << channel, true);
+
+        // RecordingGenerator writes `10 + lod + origin.x`; for block (0,0,0)
+        // and lod 0 that is 10. The generator is invoked once per block here.
+        assert_eq!(dst.get_voxel(0, 0, 0, channel), 10);
+    }
+
+    #[test]
+    fn copy_without_generator_returns_defaults_for_missing_blocks() {
+        let mut data = VoxelData::new();
+        data.set_bounds(Box3i::new(Vector3i::zero(), Vector3i::splat(32)));
+        let channel = ChannelId::Type.index();
+        let mut dst = VoxelBuffer::with_size(Vector3i::new(4, 4, 4));
+        data.copy(Vector3i::zero(), &mut dst, 1u32 << channel, true);
+
+        // No generator and no blocks: dst stays at default (0 for Type).
+        assert_eq!(dst.get_voxel(0, 0, 0, channel), 0);
+    }
+
+    #[test]
+    fn paste_and_paste_masked_route_into_lod0_map() {
+        let mut data = VoxelData::new();
+        data.set_bounds(Box3i::new(Vector3i::zero(), Vector3i::splat(32)));
+        data.set_streaming_enabled(false);
+        data.set_full_load_completed(true);
+        let channel = ChannelId::Type.index();
+        let mask = 1u32 << channel;
+
+        let mut source = VoxelBuffer::with_size(Vector3i::new(4, 4, 4));
+        source.fill(7, channel);
+        data.paste(Vector3i::zero(), &source, mask, true);
+        assert_eq!(data.get_voxel(Vector3i::new(1, 1, 1), channel, 0), 7);
+
+        // Masked paste: skip voxels equal to the mask sentinel.
+        let mut masked_source = VoxelBuffer::with_size(Vector3i::new(2, 2, 2));
+        masked_source.fill(9, channel);
+        data.paste_masked(
+            Vector3i::zero(),
+            &masked_source,
+            mask,
+            channel,
+            9, // skip everything → no writes
+            true,
+        );
+        // Unchanged because every source voxel matched the mask sentinel.
+        assert_eq!(data.get_voxel(Vector3i::zero(), channel, 0), 7);
+    }
+
+    #[test]
+    fn is_area_loaded_reflects_block_residency_and_streaming_bounds() {
+        let mut data = VoxelData::new();
+        data.set_bounds(Box3i::new(Vector3i::zero(), Vector3i::splat(32)));
+        data.set_streaming_enabled(false);
+        data.set_full_load_completed(true);
+
+        let area = Box3i::new(Vector3i::zero(), Vector3i::splat(16));
+        assert!(!data.is_area_loaded(area));
+
+        assert!(data.try_set_voxel(1, Vector3i::new(1, 1, 1), ChannelId::Type.index()));
+        assert!(data.is_area_loaded(area));
+
+        // Streaming-mode short-circuit: area outside bounds returns false.
+        data.set_streaming_enabled(true);
+        assert!(!data.is_area_loaded(Box3i::new(
+            Vector3i::new(100, 0, 0),
+            Vector3i::splat(16),
+        )));
+    }
+
+    #[test]
+    fn has_all_blocks_and_get_missing_blocks_agree() {
+        let mut data = VoxelData::new();
+        data.set_bounds(Box3i::new(Vector3i::zero(), Vector3i::splat(64)));
+        data.set_streaming_enabled(false);
+        data.set_full_load_completed(true);
+        assert!(data.try_set_voxel(1, Vector3i::new(1, 1, 1), ChannelId::Type.index()));
+        // Block (1,0,0) is intentionally left empty.
+
+        let area = Box3i::new(Vector3i::zero(), Vector3i::new(2, 1, 1));
+        assert!(!data.has_all_blocks_in_area(area, 0));
+
+        let mut missing = Vec::new();
+        data.get_missing_blocks(area, 0, &mut missing);
+        assert_eq!(missing, vec![Vector3i::new(1, 0, 0)]);
+
+        assert!(data.try_set_voxel(2, Vector3i::new(20, 1, 1), ChannelId::Type.index()));
+        assert!(data.has_all_blocks_in_area(area, 0));
+    }
+
+    #[test]
+    fn get_blocks_with_voxel_data_returns_grid_with_empty_slots_for_missing() {
+        let mut data = VoxelData::new();
+        data.set_bounds(Box3i::new(Vector3i::zero(), Vector3i::splat(64)));
+        data.set_streaming_enabled(false);
+        data.set_full_load_completed(true);
+        assert!(data.try_set_voxel(1, Vector3i::new(1, 1, 1), ChannelId::Type.index()));
+        // Add an empty (no-voxels) block alongside.
+        assert!(data.try_set_block(Vector3i::new(1, 0, 0), VoxelDataBlock::empty(0)));
+
+        let blocks = data.get_blocks_with_voxel_data(
+            Box3i::new(Vector3i::zero(), Vector3i::new(2, 1, 1)),
+            0,
+        );
+        // ZXY layout: (0,0,0) is index 0, (1,0,0) is index 1.
+        assert_eq!(blocks.len(), 2);
+        assert!(blocks[0].is_some());
+        assert!(blocks[1].is_none()); // empty block has no voxel data
     }
 }
