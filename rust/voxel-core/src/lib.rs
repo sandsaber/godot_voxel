@@ -26,6 +26,7 @@ pub mod storage;
 pub mod streams;
 pub mod string;
 pub mod tasks;
+pub mod terrain;
 pub mod testing;
 pub mod thread;
 
