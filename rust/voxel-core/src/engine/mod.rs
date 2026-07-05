@@ -1,7 +1,9 @@
 //! Engine-level helpers shared by terrain streaming systems.
 
+pub mod meshing_dependency;
 pub mod priority_dependency;
 pub mod streaming_dependency;
 
+pub use meshing_dependency::MeshingDependency;
 pub use priority_dependency::{PriorityDependency, PriorityEvaluation, PriorityViewersData};
 pub use streaming_dependency::StreamingDependency;
