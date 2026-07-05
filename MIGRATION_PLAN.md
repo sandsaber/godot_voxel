@@ -181,8 +181,8 @@ godot_voxel (fork)
   desktop/Android demo — нужен Phase 4 terrain node для интеграции
 
 ### Фаза 4: Terrain + threading (8-10 недель) — НАЧАТА
-- `util/thread` wrappers ✅; `util/tasks` value types ✅; `io::file_locker` ✅; `VoxelStream` base ✅
-- thread pool/runner + threaded stream tasks — далее
+- `util/thread` wrappers ✅; `util/tasks` value types + thread runner ✅; `io::file_locker` ✅; `VoxelStream` base ✅
+- threaded stream tasks — далее
 - `terrain` (VoxelTerrain, VoxelLodTerrain)
 - `generators/graph` (runtime, без редактора)
 - `VoxelStream` base ✅; threaded stream tasks (`*_task.cpp`) — далее
@@ -192,7 +192,7 @@ godot_voxel (fork)
 
   **План порта Phase 4 (порядок):**
   1. `util/thread/{mutex,rw_lock}` — ✅ wrappers over `std::sync` (recursive `Mutex`, `BinaryMutex`, `RwLock`)
-  2. `util/tasks/{task_priority,cancellation_token}` — ✅ value types; `task_scheduler`/`threaded_task` — pending
+  2. `util/tasks/{task_priority,cancellation_token,threaded_task,threaded_task_runner}` — ✅ value types + minimal owned runner
   3. `io::file_locker` — ✅ per-path read/write coordination (depends on mutex)
   4. `streams::{voxel_stream base, load/save_block_data_task}` — ✅ base trait; threaded load/save tasks pending
   5. `engine/{voxel_data,voxel_lod_terrain,voxel_terrain}` — streaming terrain core
@@ -389,10 +389,10 @@ Threading + terrain — самый сложный этап. Порядок по 
 |---|---|---|---|---|
 | 4.1 | `thread::mutex` / `thread::rw_lock` | `util/thread/{mutex,rw_lock}.h` | `std::sync` | ✅ recursive `Mutex`, `BinaryMutex`, `RwLock`; открывает file_locker + VoxelStream |
 | 4.2a | `tasks::task_priority` / `tasks::cancellation_token` | `util/tasks/{task_priority,cancellation_token}.h` | atomics | ✅ packed 4-band priority + shared cancel flag |
-| 4.2b | `tasks::task_scheduler` / `tasks::threaded_task` | `util/tasks/*` | thread, `IThreadedTask` | ⏳ Thread pool замена WorkerThreadPool |
+| 4.2b | `tasks::threaded_task` / `tasks::threaded_task_runner` | `util/tasks/*` | thread, `IThreadedTask` | ✅ Owned `Box<dyn ThreadedTask>` runner: priority polling, serial gate, postponed queue, cancellation skip, completed drain, shutdown |
 | 4.3 | `io::file_locker` | `util/io/file_locker.h` | mutex | ✅ RAII per-path read/write guards; entries persist like C++ map |
 | 4.4 | `streams::voxel_stream` (base trait) | `streams/voxel_stream.{h,cpp}` | RWLock, VoxelBuffer | ✅ `VoxelStream: Send + Sync`, `LoadResult`/`SaveMode`, batch defaults; `MemoryStream` impl |
-| 4.5 | `streams::{load,save}_block_data_task` | `streams/*_task.cpp` | tasks, VoxelStream, VoxelData | Threaded stream I/O |
+| 4.5 | `streams::{load,save}_block_data_task` | `streams/*_task.cpp` | tasks, VoxelStream, VoxelData | Threaded stream I/O; next needs `PriorityDependency`/`StreamingDependency`/`AsyncDependencyTracker` shims |
 | 4.6 | `engine::voxel_data` | `engine/voxel_data.{h,cpp}` | VoxelBuffer, streams, generators, LOD | Streaming voxel data grid (ядро terrain) |
 | 4.7 | `terrain::voxel_terrain` / `voxel_lod_terrain` | `terrain/*` | VoxelData, meshers, Node3D | VoxelTerrain node (без Godot binding — pure logic) |
 | 4.8 | `generators::graph` (runtime) | `generators/graph/*` | `string::expression_parser` (Phase 1 deferred) | Graph-based procedural gen без редактора |
