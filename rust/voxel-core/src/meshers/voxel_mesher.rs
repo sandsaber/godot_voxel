@@ -1,0 +1,407 @@
+//! The [`VoxelMesher`] trait + shared input/output types.
+//!
+//! Ported from `meshers/voxel_mesher.h` (the abstract base class). This is
+//! the engine-agnostic seam every mesher plugs into so the terrain meshing
+//! pipeline can drive transvoxel / cubes / blocky uniformly. The C++ base is
+//! a Godot `Resource` carrying material/`Ref<Mesh>`/`Ref<Image>` state —
+//! those live in `voxel-gdext` later; only the algorithmic contract is here.
+//!
+//! ## Output shape
+//! [`MesherOutput`] carries a list of [`Surface`]s, each wrapping one of the
+//! existing per-mesher array structs ([`MeshArrays`] for transvoxel,
+//! [`CubesArrays`] / [`BlockyArrays`] for the blocky family) behind the
+//! [`SurfaceArrays`] enum. This keeps the trait object-safe while letting
+//! each mesher emit its native attribute layout.
+
+use crate::generators::base::VoxelGenerator;
+use crate::math::Vector3i;
+use crate::meshers::blocky::mesher::BlockyArrays;
+use crate::meshers::cubes::arrays::CubesArrays;
+use crate::meshers::transvoxel::structures::MeshArrays;
+use crate::storage::VoxelBuffer;
+
+/// Input handed to [`VoxelMesher::build`]. Mirrors `VoxelMesher::Input`.
+// Manual `Debug` because `&mut dyn VoxelGenerator` is not `Debug`.
+pub struct MesherInput<'a> {
+    /// Voxels to be used as the primary source of data.
+    pub voxels: &'a VoxelBuffer,
+    /// When using LOD, some meshers can use the generator and edited voxels
+    /// to refine results. If `None`, the mesher only uses `voxels`.
+    pub generator: Option<&'a mut dyn VoxelGenerator>,
+    /// Origin of the block, required when doing deep sampling.
+    pub origin_in_voxels: Vector3i,
+    /// LOD index. 0 means highest detail; 1 means half detail, etc.
+    pub lod_index: u8,
+    /// If `true`, collision information is required. Some meshers return a
+    /// separate collision surface; others reuse the render mesh.
+    pub collision_hint: bool,
+    /// If `true`, the mesh will be used in a variable-LOD context (e.g.
+    /// transition meshes may or may not be generated).
+    pub lod_hint: bool,
+}
+
+impl<'a> std::fmt::Debug for MesherInput<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MesherInput")
+            .field("voxels", &self.voxels)
+            .field("generator", &self.generator.as_ref().map(|_| "<dyn VoxelGenerator>"))
+            .field("origin_in_voxels", &self.origin_in_voxels)
+            .field("lod_index", &self.lod_index)
+            .field("collision_hint", &self.collision_hint)
+            .field("lod_hint", &self.lod_hint)
+            .finish()
+    }
+}
+
+impl<'a> MesherInput<'a> {
+    /// Convenience constructor matching the most common call sites.
+    pub fn new(voxels: &'a VoxelBuffer, origin_in_voxels: Vector3i, lod_index: u8) -> Self {
+        Self {
+            voxels,
+            generator: None,
+            origin_in_voxels,
+            lod_index,
+            collision_hint: false,
+            lod_hint: false,
+        }
+    }
+}
+
+/// Per-mesher mesh attribute layout. Each variant wraps the existing array
+/// struct the mesher already produces, so converting a mesher to the trait
+/// is a thin adapter rather than a rewrite.
+#[derive(Debug, Default)]
+pub enum SurfaceArrays {
+    /// Transvoxel output (positions/normals/LOD attribs/indices).
+    Transvoxel(MeshArrays),
+    /// Cubes greedy/simple output (positions/normals/colors/uvs/indices).
+    Cubes(CubesArrays),
+    /// Blocky output (positions/normals/uvs/colors/indices/tangents).
+    Blocky(BlockyArrays),
+    /// Empty default — used by [`MesherOutput::default`] and cleared surfaces.
+    #[default]
+    Empty,
+}
+
+impl SurfaceArrays {
+    /// Vertex count regardless of the active variant.
+    pub fn vertex_count(&self) -> usize {
+        match self {
+            Self::Transvoxel(a) => a.vertices.len(),
+            Self::Cubes(a) => a.positions.len(),
+            Self::Blocky(a) => a.vertex_count(),
+            Self::Empty => 0,
+        }
+    }
+
+    /// Triangle count regardless of the active variant.
+    pub fn triangle_count(&self) -> usize {
+        let indices = match self {
+            Self::Transvoxel(a) => &a.indices,
+            Self::Cubes(a) => &a.indices,
+            Self::Blocky(a) => &a.indices,
+            Self::Empty => return 0,
+        };
+        indices.len() / 3
+    }
+
+    /// Resets to [`SurfaceArrays::Empty`], dropping any allocated buffers.
+    pub fn clear(&mut self) {
+        *self = Self::Empty;
+    }
+}
+
+/// One material-grouped surface of a mesher's output. Mirrors
+/// `VoxelMesher::Output::Surface` minus the Godot `Array` (we keep the
+/// strongly-typed Rust array struct instead).
+#[derive(Debug, Default)]
+pub struct Surface {
+    /// The mesh attribute arrays for this surface.
+    pub arrays: SurfaceArrays,
+    /// Material slot the mesher picked for this surface (transvoxel always 0;
+    /// cubes/blocky split opaque vs transparent).
+    pub material_index: u16,
+}
+
+impl Surface {
+    /// Convenience constructor.
+    pub fn new(arrays: SurfaceArrays, material_index: u16) -> Self {
+        Self {
+            arrays,
+            material_index,
+        }
+    }
+
+    /// `true` when the surface carries no geometry.
+    pub fn is_empty(&self) -> bool {
+        self.arrays.triangle_count() == 0
+    }
+}
+
+/// Collision geometry a mesher may produce separate from the render mesh.
+/// Mirrors `VoxelMesher::Output::CollisionSurface`.
+#[derive(Debug)]
+pub struct CollisionSurface {
+    pub positions: Vec<crate::math::Vector3f>,
+    pub indices: Vec<i32>,
+    /// If `>= 0`, the collision surface may actually be a sub-section of the
+    /// first render surface (vertex/index range). Defaults to `-1`
+    /// (sentinel meaning "no sub-section"), matching the C++ initialiser.
+    pub submesh_vertex_end: i32,
+    pub submesh_index_end: i32,
+}
+
+impl Default for CollisionSurface {
+    fn default() -> Self {
+        Self {
+            positions: Vec::new(),
+            indices: Vec::new(),
+            submesh_vertex_end: -1,
+            submesh_index_end: -1,
+        }
+    }
+}
+
+/// Output of [`VoxelMesher::build`]. Mirrors `VoxelMesher::Output` minus
+/// Godot-specific fields (`Array shadow_occluder`, `Ref<Image> atlas_image`).
+#[derive(Debug, Default)]
+pub struct MesherOutput {
+    /// Material-grouped render surfaces.
+    pub surfaces: Vec<Surface>,
+    /// Optional collision surface (only populated when `collision_hint` is
+    /// set and the mesher produces one).
+    pub collision_surface: CollisionSurface,
+}
+
+impl MesherOutput {
+    /// `true` when no render surface carries any geometry.
+    pub fn is_empty(&self) -> bool {
+        self.surfaces.iter().all(Surface::is_empty)
+    }
+
+    /// Total triangle count across every surface.
+    pub fn total_triangle_count(&self) -> usize {
+        self.surfaces
+            .iter()
+            .map(|s| s.arrays.triangle_count())
+            .sum()
+    }
+
+    /// Total vertex count across every surface.
+    pub fn total_vertex_count(&self) -> usize {
+        self.surfaces
+            .iter()
+            .map(|s| s.arrays.vertex_count())
+            .sum()
+    }
+
+    /// Reset to a fresh state, reusing allocations.
+    pub fn clear(&mut self) {
+        for surface in &mut self.surfaces {
+            surface.arrays.clear();
+        }
+        self.surfaces.clear();
+        self.collision_surface.positions.clear();
+        self.collision_surface.indices.clear();
+        self.collision_surface.submesh_vertex_end = -1;
+        self.collision_surface.submesh_index_end = -1;
+    }
+}
+
+/// A voxel mesher: converts a [`VoxelBuffer`] into triangle-mesh surfaces.
+///
+/// Ported from the C++ `VoxelMesher` virtual base. Implementations may be
+/// invoked from worker threads, hence the `Send + Sync` bound. `build`
+/// appends surfaces into the provided [`MesherOutput`] (the C++ contract is
+/// the same — the output is reused across invocations and callers `clear()`
+/// it themselves when appropriate).
+pub trait VoxelMesher: Send + Sync {
+    /// Build mesh surfaces from `input.voxels`, appending to `output`.
+    fn build(&mut self, output: &mut MesherOutput, input: &MesherInput<'_>);
+
+    /// How many neighbor voxels the mesher needs to access toward the
+    /// negative axes. If callers don't provide this much padding, the mesher
+    /// may produce seams at block edges.
+    fn minimum_padding(&self) -> u32 {
+        0
+    }
+
+    /// How many neighbor voxels the mesher needs to access toward the
+    /// positive axes.
+    fn maximum_padding(&self) -> u32 {
+        0
+    }
+
+    /// Bitmask of channels this mesher uses (1 << channel_index). The terrain
+    /// uses this to decide which channels to load/materialize before meshing.
+    fn used_channels_mask(&self) -> u32 {
+        0
+    }
+
+    /// `true` if this mesher supports LOD-aware meshing.
+    fn supports_lod(&self) -> bool {
+        true
+    }
+
+    /// `true` if the mesher emits a separate collision surface in
+    /// [`MesherOutput::collision_surface`]. If `false`, the render mesh may
+    /// be reused as a collider.
+    fn is_generating_collision_surface(&self) -> bool {
+        false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        CollisionSurface, MesherInput, MesherOutput, Surface, SurfaceArrays, VoxelMesher,
+    };
+    use crate::generators::base::{GenResult, VoxelGenerator, VoxelQueryData};
+    use crate::math::{Vector3f, Vector3i};
+    use crate::meshers::transvoxel::structures::MeshArrays;
+    use crate::storage::{ChannelId, VoxelBuffer};
+
+    /// A mesher that emits a fixed single-triangle transvoxel surface, used
+    /// to exercise the trait plumbing without depending on real meshing math.
+    struct StubMesher;
+    impl VoxelMesher for StubMesher {
+        fn build(&mut self, output: &mut MesherOutput, _input: &MesherInput<'_>) {
+            let mut arrays = MeshArrays::default();
+            let a = arrays.add_vertex(
+                Vector3f::new(0.0, 0.0, 0.0),
+                Vector3f::new(0.0, 1.0, 0.0),
+                0,
+                0,
+                0,
+                Vector3f::zero(),
+            );
+            let b = arrays.add_vertex(
+                Vector3f::new(1.0, 0.0, 0.0),
+                Vector3f::new(0.0, 1.0, 0.0),
+                0,
+                0,
+                0,
+                Vector3f::zero(),
+            );
+            let c = arrays.add_vertex(
+                Vector3f::new(0.0, 0.0, 1.0),
+                Vector3f::new(0.0, 1.0, 0.0),
+                0,
+                0,
+                0,
+                Vector3f::zero(),
+            );
+            arrays.indices.extend_from_slice(&[a, b, c]);
+            output.surfaces.push(Surface::new(SurfaceArrays::Transvoxel(arrays), 0));
+        }
+
+        fn used_channels_mask(&self) -> u32 {
+            1 << ChannelId::Sdf.index()
+        }
+    }
+
+    #[test]
+    fn build_appends_a_surface_with_geometry() {
+        let mut mesher = StubMesher;
+        let voxels = VoxelBuffer::with_size(Vector3i::splat(2));
+        let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+
+        let mut output = MesherOutput::default();
+        mesher.build(&mut output, &input);
+
+        assert!(!output.is_empty());
+        assert_eq!(output.total_vertex_count(), 3);
+        assert_eq!(output.total_triangle_count(), 1);
+        assert_eq!(output.surfaces.len(), 1);
+        assert_eq!(output.surfaces[0].material_index, 0);
+    }
+
+    #[test]
+    fn clear_resets_output_for_reuse() {
+        let mut mesher = StubMesher;
+        let voxels = VoxelBuffer::with_size(Vector3i::splat(2));
+        let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+
+        let mut output = MesherOutput::default();
+        mesher.build(&mut output, &input);
+        assert!(!output.is_empty());
+
+        output.clear();
+        assert!(output.is_empty());
+        assert!(output.surfaces.is_empty());
+        // Reusing the same output for another build works.
+        mesher.build(&mut output, &input);
+        assert_eq!(output.total_triangle_count(), 1);
+    }
+
+    #[test]
+    fn surface_arrays_variant_counts_agree_with_native_struct() {
+        let mut arrays = MeshArrays::default();
+        arrays.add_vertex(
+            Vector3f::zero(),
+            Vector3f::new(0.0, 1.0, 0.0),
+            0,
+            0,
+            0,
+            Vector3f::zero(),
+        );
+        arrays.indices.push(0);
+        let wrapped = SurfaceArrays::Transvoxel(arrays);
+        assert_eq!(wrapped.vertex_count(), 1);
+        // One index is not a full triangle (3), so triangle_count is 0.
+        assert_eq!(wrapped.triangle_count(), 0);
+    }
+
+    #[test]
+    fn collision_surface_defaults_match_cpp_sentinels() {
+        let cs = CollisionSurface::default();
+        assert!(cs.positions.is_empty());
+        assert!(cs.indices.is_empty());
+        assert_eq!(cs.submesh_vertex_end, -1);
+        assert_eq!(cs.submesh_index_end, -1);
+    }
+
+    /// Sanity: the trait object can be boxed and dispatched dynamically,
+    /// which is how the mesh block task will hold a `Box<dyn VoxelMesher>`.
+    #[test]
+    fn boxed_dyn_dispatch_works() {
+        let mut mesher: Box<dyn VoxelMesher> = Box::new(StubMesher);
+        let voxels = VoxelBuffer::with_size(Vector3i::splat(2));
+        let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+        let mut output = MesherOutput::default();
+        mesher.build(&mut output, &input);
+        assert_eq!(output.total_triangle_count(), 1);
+        assert_eq!(mesher.used_channels_mask(), 1 << ChannelId::Sdf.index());
+    }
+
+    /// Some meshers consult the generator during build (LOD-affined sampling).
+    /// Verify the input's generator slot round-trips through the build call.
+    #[test]
+    fn input_generator_is_reachable_inside_build() {
+        struct ProbingMesher {
+            saw_generator: bool,
+        }
+        impl VoxelMesher for ProbingMesher {
+            fn build(&mut self, _output: &mut MesherOutput, input: &MesherInput<'_>) {
+                self.saw_generator = input.generator.is_some();
+            }
+        }
+        struct DummyGen;
+        impl VoxelGenerator for DummyGen {
+            fn generate_block(&mut self, _input: VoxelQueryData<'_>) -> GenResult {
+                GenResult::default()
+            }
+        }
+
+        let mut mesher = ProbingMesher { saw_generator: false };
+        let voxels = VoxelBuffer::with_size(Vector3i::splat(2));
+        let mut gen = DummyGen;
+        let input = MesherInput {
+            generator: Some(&mut gen),
+            ..MesherInput::new(&voxels, Vector3i::zero(), 0)
+        };
+        let mut output = MesherOutput::default();
+        mesher.build(&mut output, &input);
+        assert!(mesher.saw_generator);
+    }
+}
