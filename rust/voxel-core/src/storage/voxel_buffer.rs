@@ -623,6 +623,76 @@ impl VoxelBuffer {
         self.fill_area(src.defval, dst_min, dst_min + area_size, channel_index);
     }
 
+    /// Nearest-neighbor 2:1 downscale of all channels from a region of `self`
+    /// into a region of `dst`. Matches `VoxelBuffer::downscale_to`.
+    ///
+    /// For each destination voxel `dst_pos`, the source voxel sampled is
+    /// `src_min + ((dst_pos - dst_min) << 1)`. Channels that are uniform on
+    /// both ends with equal defaults are skipped (no allocation, no writes).
+    /// This is the mip-map kernel used by [`crate::storage::VoxelData`] to
+    /// cascade edits up the LOD chain.
+    pub fn downscale_to(
+        &self,
+        dst: &mut VoxelBuffer,
+        mut src_min: Vector3i,
+        mut src_max: Vector3i,
+        mut dst_min: Vector3i,
+    ) {
+        // Clamp source region into this buffer.
+        src_min = src_min.clamp(Vector3i::zero(), self.size - Vector3i::splat(1));
+        src_max = src_max.clamp(Vector3i::zero(), self.size);
+
+        let dst_max_raw = dst_min + ((src_max - src_min) >> 1);
+
+        // Clamp destination region into `dst`.
+        dst_min = dst_min.clamp(Vector3i::zero(), dst.size - Vector3i::splat(1));
+        let dst_max = dst_max_raw.clamp(Vector3i::zero(), dst.size);
+
+        for channel_index in 0..MAX_CHANNELS {
+            let src_compression = self.channel_compression(channel_index);
+            let dst_compression = dst.channel_compression(channel_index);
+            let src_defval = self.channel_default(channel_index);
+            let dst_defval = dst.channel_default(channel_index);
+
+            // If both channels carry the same uniform default there is nothing
+            // to do — the destination already matches. Matches the C++ fast path.
+            if src_compression == Compression::Uniform
+                && dst_compression == Compression::Uniform
+                && src_defval == dst_defval
+            {
+                continue;
+            }
+
+            // ZXY iteration matches the C++ loop order so downscaled buffers
+            // remain byte-comparable with the reference implementation.
+            let mut dst_pos = dst_min;
+            while dst_pos.z < dst_max.z {
+                dst_pos.x = dst_min.x;
+                while dst_pos.x < dst_max.x {
+                    dst_pos.y = dst_min.y;
+                    while dst_pos.y < dst_max.y {
+                        let src_pos = src_min + ((dst_pos - dst_min) << 1);
+                        // Source bounds were clamped above; verify defensively.
+                        debug_assert!(src_pos.x >= 0 && src_pos.y >= 0 && src_pos.z >= 0);
+                        debug_assert!(src_pos.x < self.size.x);
+                        debug_assert!(src_pos.y < self.size.y);
+                        debug_assert!(src_pos.z < self.size.z);
+
+                        let value = if src_compression == Compression::Uniform {
+                            src_defval
+                        } else {
+                            self.get_voxel(src_pos.x, src_pos.y, src_pos.z, channel_index)
+                        };
+                        dst.set_voxel(value, dst_pos.x, dst_pos.y, dst_pos.z, channel_index);
+                        dst_pos.y += 1;
+                    }
+                    dst_pos.x += 1;
+                }
+                dst_pos.z += 1;
+            }
+        }
+    }
+
     /// Copy all channels from `other`. Matches `copy_channels_from`.
     pub fn copy_channels_from(&mut self, other: &VoxelBuffer) {
         for ci in 0..MAX_CHANNELS {
@@ -1106,5 +1176,112 @@ mod tests {
             raw_voxel_to_real(f32::to_bits(1.5) as u64, ChannelDepth::Bit32),
             1.5
         );
+    }
+
+    #[test]
+    fn downscale_to_samples_nearest_neighbor_2_to_1() {
+        // Build a 4×4×4 source where each voxel carries its ZXY index in the
+        // Type channel, so we can verify exactly which source voxel each dst
+        // cell sampled.
+        let channel = ChannelId::Type.index();
+        let mut src = VoxelBuffer::with_size(Vector3i::splat(4));
+        for z in 0..4 {
+            for x in 0..4 {
+                for y in 0..4 {
+                    let v = (z * 16 + x * 4 + y) as u64;
+                    src.set_voxel(v, x, y, z, channel);
+                }
+            }
+        }
+
+        let mut dst = VoxelBuffer::with_size(Vector3i::splat(2));
+        src.downscale_to(
+            &mut dst,
+            Vector3i::zero(),
+            Vector3i::splat(4),
+            Vector3i::zero(),
+        );
+
+        for z in 0..2 {
+            for x in 0..2 {
+                for y in 0..2 {
+                    let expected = ((z * 2) * 16 + (x * 2) * 4 + (y * 2)) as u64;
+                    assert_eq!(dst.get_voxel(x, y, z, channel), expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn downscale_to_skips_uniform_channels_with_matching_default() {
+        let channel = ChannelId::Type.index();
+        let mut src = VoxelBuffer::with_size(Vector3i::splat(4));
+        src.fill(7, channel);
+        // SDF stays at its default far-outside sentinel on both ends.
+
+        let mut dst = VoxelBuffer::with_size(Vector3i::splat(2));
+        src.downscale_to(
+            &mut dst,
+            Vector3i::zero(),
+            Vector3i::splat(4),
+            Vector3i::zero(),
+        );
+
+        // Type channel was uniform-7, dst was uniform-0 → materialized to 7.
+        assert_eq!(dst.get_voxel(0, 0, 0, channel), 7);
+        // SDF channel was uniform on both ends with equal defaults → untouched,
+        // stays uniform (no allocation).
+        assert_eq!(dst.channel_compression(ChannelId::Sdf.index()), Compression::Uniform);
+    }
+
+    #[test]
+    fn downscale_to_clamps_oversized_source_region_into_dst_bounds() {
+        // Source region extends past the source buffer; the implementation
+        // clamps it to the available 4³ region before sampling. The dst min
+        // stays at the origin so the whole dst buffer is filled.
+        let channel = ChannelId::Type.index();
+        let mut src = VoxelBuffer::with_size(Vector3i::splat(4));
+        src.fill(3, channel);
+        let mut dst = VoxelBuffer::with_size(Vector3i::splat(2));
+
+        src.downscale_to(
+            &mut dst,
+            Vector3i::zero(),
+            Vector3i::splat(99),
+            Vector3i::zero(),
+        );
+
+        for z in 0..2 {
+            for x in 0..2 {
+                for y in 0..2 {
+                    assert_eq!(dst.get_voxel(x, y, z, channel), 3);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn downscale_to_into_destination_subregion_uses_offset_mapping() {
+        // Writing into a non-zero dst_min still maps back to the correct
+        // source voxel via `src_min + ((dst_pos - dst_min) << 1)`.
+        let channel = ChannelId::Type.index();
+        let mut src = VoxelBuffer::with_size(Vector3i::splat(4));
+        src.fill(5, channel);
+        // Materialize a single marker voxel.
+        src.set_voxel(42, 2, 0, 0, channel);
+
+        let mut dst = VoxelBuffer::with_size(Vector3i::splat(4));
+        // Downscale the 4³ source into the (1..3)³ region of an 4³ dst buffer.
+        src.downscale_to(
+            &mut dst,
+            Vector3i::zero(),
+            Vector3i::splat(4),
+            Vector3i::new(1, 1, 1),
+        );
+
+        // dst(1,1,1) samples src(0,0,0) = 5; dst(2,*,*) samples src(2,*,*) so
+        // dst(2,1,1) = src(2,0,0) = 42.
+        assert_eq!(dst.get_voxel(1, 1, 1, channel), 5);
+        assert_eq!(dst.get_voxel(2, 1, 1, channel), 42);
     }
 }
