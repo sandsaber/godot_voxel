@@ -38,7 +38,10 @@ pub mod stream_memory;
 pub mod voxel_stream;
 
 pub use block_data_output::{BlockDataOutput, BlockDataOutputKind};
-pub use load_block_data_task::{LoadBlockDataParams, LoadBlockDataTask};
+pub use load_block_data_task::{
+    BlockGenerationRequest, BlockGenerationTaskFactory, BlockGenerationTaskResult,
+    LoadBlockDataParams, LoadBlockDataTask,
+};
 pub use save_block_data_task::SaveBlockDataTask;
 pub use stream_cache::BlockCache;
 pub use stream_memory::MemoryStream;

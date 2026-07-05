@@ -90,6 +90,21 @@ impl ThreadedTaskRunner {
         std::mem::take(&mut state.completed_tasks)
     }
 
+    pub fn drain_completed_tasks_and_enqueue_followups(
+        &self,
+        followups_are_serial: bool,
+    ) -> Vec<Box<dyn ThreadedTask>> {
+        let mut completed_tasks = self.drain_completed_tasks();
+        let mut followup_tasks = Vec::new();
+        for task in &mut completed_tasks {
+            followup_tasks.extend(task.take_follow_up_tasks());
+        }
+        if !followup_tasks.is_empty() {
+            self.enqueue_many(followup_tasks, followups_are_serial);
+        }
+        completed_tasks
+    }
+
     /// Queued, postponed or running tasks. Completed-but-undrained tasks are
     /// not counted, matching the C++ debug remaining counter.
     pub fn remaining_task_count(&self) -> usize {
@@ -432,6 +447,34 @@ mod tests {
         }
     }
 
+    struct FollowUpParentTask {
+        order: Arc<Mutex<Vec<&'static str>>>,
+        follow_up_tasks: Vec<Box<dyn ThreadedTask>>,
+    }
+
+    impl ThreadedTask for FollowUpParentTask {
+        fn run(self: Box<Self>, _ctx: ThreadedTaskContext) -> TaskRunOutcome {
+            self.order.lock().unwrap().push("parent");
+            TaskRunOutcome::Complete(self)
+        }
+
+        fn take_follow_up_tasks(&mut self) -> Vec<Box<dyn ThreadedTask>> {
+            std::mem::take(&mut self.follow_up_tasks)
+        }
+    }
+
+    struct OrderedTask {
+        name: &'static str,
+        order: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl ThreadedTask for OrderedTask {
+        fn run(self: Box<Self>, _ctx: ThreadedTaskContext) -> TaskRunOutcome {
+            self.order.lock().unwrap().push(self.name);
+            TaskRunOutcome::Complete(self)
+        }
+    }
+
     fn apply_all(tasks: Vec<Box<dyn ThreadedTask>>) {
         for task in tasks {
             task.apply_result();
@@ -559,6 +602,30 @@ mod tests {
 
         assert!(runner.drain_completed_tasks().is_empty());
         assert_eq!(runner.remaining_task_count(), 0);
+    }
+
+    #[test]
+    fn follow_up_tasks_are_enqueued_when_completed_tasks_are_drained() {
+        let runner = ThreadedTaskRunner::new(1);
+        let order = Arc::new(Mutex::new(Vec::new()));
+
+        runner.enqueue(
+            Box::new(FollowUpParentTask {
+                order: order.clone(),
+                follow_up_tasks: vec![Box::new(OrderedTask {
+                    name: "child",
+                    order: order.clone(),
+                })],
+            }),
+            false,
+        );
+        runner.wait_for_all_tasks();
+
+        apply_all(runner.drain_completed_tasks_and_enqueue_followups(false));
+        runner.wait_for_all_tasks();
+        apply_all(runner.drain_completed_tasks_and_enqueue_followups(false));
+
+        assert_eq!(*order.lock().unwrap(), vec!["parent", "child"]);
     }
 
     #[test]

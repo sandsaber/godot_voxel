@@ -389,13 +389,13 @@ Threading + terrain — самый сложный этап. Порядок по 
 |---|---|---|---|---|
 | 4.1 | `thread::mutex` / `thread::rw_lock` | `util/thread/{mutex,rw_lock}.h` | `std::sync` | ✅ recursive `Mutex`, `BinaryMutex`, `RwLock`; открывает file_locker + VoxelStream |
 | 4.2a | `tasks::task_priority` / `tasks::cancellation_token` | `util/tasks/{task_priority,cancellation_token}.h` | atomics | ✅ packed 4-band priority + shared cancel flag |
-| 4.2b | `tasks::threaded_task` / `tasks::threaded_task_runner` | `util/tasks/*` | thread, `IThreadedTask` | ✅ Owned `Box<dyn ThreadedTask>` runner: priority polling, serial gate, postponed queue, cancellation skip, completed drain, shutdown |
+| 4.2b | `tasks::threaded_task` / `tasks::threaded_task_runner` | `util/tasks/*` | thread, `IThreadedTask` | ✅ Owned `Box<dyn ThreadedTask>` runner: priority polling, serial gate, postponed queue, cancellation skip, completed drain + follow-up enqueue helper, shutdown |
 | 4.3 | `io::file_locker` | `util/io/file_locker.h` | mutex | ✅ RAII per-path read/write guards; entries persist like C++ map |
 | 4.4 | `streams::voxel_stream` (base trait) | `streams/voxel_stream.{h,cpp}` | RWLock, VoxelBuffer | ✅ `VoxelStream: Send + Sync`, `LoadResult`/`SaveMode`, batch defaults; `MemoryStream` impl |
 | 4.4a | `engine::{priority_dependency,streaming_dependency}` / `tasks::async_dependency_tracker` | `engine/*dependency*`, `util/tasks/async_dependency_tracker.*` | tasks, VoxelStream, atomics/locks | ✅ mutable viewer priority/drop-distance evaluation, stream invalidation handle, race-free async countdown with next-task handoff |
 | 4.5a | `streams::save_block_data_task` | `streams/save_block_data_task.{h,cpp}` | tasks, VoxelStream, VoxelBuffer | ✅ voxel-only save task: priority, tracker abort/complete, last-task flush, follow-up task handoff |
-| 4.5b | `streams::{block_data_output,load_block_data_task}` | `streams/load_block_data_task.{h,cpp}`, `VoxelEngine::BlockDataOutput` | tasks, VoxelStream, VoxelFormat | ✅ stream I/O half with explicit format/block size, output kinds for loaded/not found/needs generation; generator fallback and VoxelData callbacks later |
-| 4.5c | `streams` generator handoff | `GenerateBlockTask`, `VoxelGenerator` | load task, generators | Pending: schedule generator fallback after `NeedsGeneration` |
+| 4.5b | `streams::{block_data_output,load_block_data_task}` | `streams/load_block_data_task.{h,cpp}`, `VoxelEngine::BlockDataOutput` | tasks, VoxelStream, VoxelFormat | ✅ stream I/O half with explicit format/block size, output kinds for loaded/not found/needs generation; VoxelData callbacks later |
+| 4.5c | `streams` generator handoff | `GenerateBlockTask`, `VoxelGenerator` | load task, generators | ✅ Minimal handoff hook: cache miss can create a generator follow-up task through `BlockGenerationTaskFactory`; concrete `GenerateBlockTask` + `VoxelData` integration continues in 4.6 |
 | 4.6 | `engine::voxel_data` | `engine/voxel_data.{h,cpp}` | VoxelBuffer, streams, generators, LOD | Streaming voxel data grid (ядро terrain) |
 | 4.7 | `terrain::voxel_terrain` / `voxel_lod_terrain` | `terrain/*` | VoxelData, meshers, Node3D | VoxelTerrain node (без Godot binding — pure logic) |
 | 4.8 | `generators::graph` (runtime) | `generators/graph/*` | `string::expression_parser` (Phase 1 deferred) | Graph-based procedural gen без редактора |
