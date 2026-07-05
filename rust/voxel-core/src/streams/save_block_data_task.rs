@@ -83,9 +83,18 @@ impl SaveBlockDataTask {
     fn run_save(&mut self) {
         self.output = None;
         let Some(voxels) = self.voxels.take() else {
+            // Mirror the C++ apply_result contract: an aborted save (no voxels
+            // to write) still emits a `Saved` output with `dropped = true` so
+            // the caller knows the block was not persisted. `_has_run` stays
+            // false in C++; here we surface that via the dropped flag.
             if let Some(tracker) = &self.tracker {
                 tracker.abort();
             }
+            self.output = Some(BlockDataOutput::saved_dropped(
+                self.position_in_blocks,
+                self.lod_index,
+                self.had_voxels,
+            ));
             return;
         };
 
@@ -316,18 +325,22 @@ mod tests {
         let stream = Arc::new(CountingStream::default());
         let dependency = StreamingDependency::new(stream.clone());
         let tracker = Arc::new(AsyncDependencyTracker::with_count(1));
-        let task = Box::new(SaveBlockDataTask::new_voxels(
+        let mut task = SaveBlockDataTask::new_voxels(
             Vector3i::default(),
             0,
             None,
             dependency,
             Some(tracker.clone()),
             true,
-        ));
+        );
 
-        let outcome = task.run(ThreadedTaskContext::new(0, TaskPriority::min()));
+        task.run_save();
+        let output = task.take_output().unwrap();
 
-        assert!(matches!(outcome, TaskRunOutcome::Complete(_)));
+        assert_eq!(output.kind, BlockDataOutputKind::Saved);
+        assert!(output.dropped);
+        assert!(!output.had_voxels);
+        assert!(!task.has_run());
         assert!(tracker.is_aborted());
         assert_eq!(tracker.remaining_count(), 1);
         assert_eq!(stream.saves(), 0);

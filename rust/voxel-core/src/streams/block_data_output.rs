@@ -72,6 +72,40 @@ impl BlockDataOutput {
         }
     }
 
+    /// Output produced when a load task encountered a stream error or was
+    /// cancelled. Matches the C++ `apply_result` path where `dropped = !_has_run`
+    /// still emits a `TYPE_LOADED` output with a null buffer, so the terrain
+    /// can re-request or log the failure rather than silently dropping it.
+    pub fn loaded_dropped(position_in_blocks: Vector3i, lod_index: u8) -> Self {
+        Self {
+            kind: BlockDataOutputKind::Loaded,
+            voxels: None,
+            position_in_blocks,
+            lod_index,
+            dropped: true,
+            max_lod_hint: false,
+            initial_load: false,
+            had_voxels: false,
+        }
+    }
+
+    /// Output produced when a save task was aborted before running (e.g. its
+    /// voxels were never set or it was cancelled). Matches the C++ path where
+    /// `apply_result` emits `TYPE_SAVED` with `dropped = !_has_run`, so the
+    /// caller is informed that the block was not persisted.
+    pub fn saved_dropped(position_in_blocks: Vector3i, lod_index: u8, had_voxels: bool) -> Self {
+        Self {
+            kind: BlockDataOutputKind::Saved,
+            voxels: None,
+            position_in_blocks,
+            lod_index,
+            dropped: true,
+            max_lod_hint: false,
+            initial_load: false,
+            had_voxels,
+        }
+    }
+
     pub fn saved(position_in_blocks: Vector3i, lod_index: u8, had_voxels: bool) -> Self {
         Self {
             kind: BlockDataOutputKind::Saved,

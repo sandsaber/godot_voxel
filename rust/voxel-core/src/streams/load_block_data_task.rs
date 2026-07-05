@@ -20,10 +20,16 @@ pub struct BlockGenerationRequest {
 
 pub enum BlockGenerationTaskResult {
     Scheduled(Box<dyn ThreadedTask>),
-    NotScheduled(BlockGenerationRequest),
+    // Boxed: `BlockGenerationRequest` carries a full `VoxelBuffer` (~348 B),
+    // which would balloon the enum to ~360 B and starve the `Scheduled` arm.
+    // Both arms are now pointer-sized; the extra indirection is negligible
+    // next to the heap allocations `VoxelBuffer` already performs.
+    NotScheduled(Box<BlockGenerationRequest>),
 }
 
 pub trait BlockGenerationTaskFactory: Send + Sync {
+    // Takes the request by value; implementations that don't schedule a task
+    // return it boxed inside `NotScheduled` so the caller can recover the voxels.
     fn create_task(&self, request: BlockGenerationRequest) -> BlockGenerationTaskResult;
 }
 
@@ -131,7 +137,15 @@ impl LoadBlockDataTask {
                 }
             }
             Err(error) => {
+                // Mirror the C++ apply_result contract: a stream error still
+                // delivers a `Loaded` output with no voxels (the C++ side sets
+                // `_has_run = true` and emits `TYPE_LOADED` with a null buffer).
+                // The terrain treats it as a loadable miss and may re-request.
                 self.stream_error = Some(error);
+                self.output = Some(BlockDataOutput::loaded_dropped(
+                    self.position_in_blocks,
+                    self.lod_index,
+                ));
             }
         }
 
@@ -160,6 +174,7 @@ impl LoadBlockDataTask {
                 self.follow_up_tasks.push(task);
             }
             BlockGenerationTaskResult::NotScheduled(request) => {
+                let request = *request;
                 self.output = Some(BlockDataOutput::needs_generation(
                     request.position_in_blocks,
                     request.lod_index,
@@ -272,6 +287,15 @@ mod tests {
                 block_size: request.block_size,
                 ran: self.task_ran.clone(),
             }))
+        }
+    }
+
+    struct NotScheduledFactory;
+
+    impl BlockGenerationTaskFactory for NotScheduledFactory {
+        fn create_task(&self, request: BlockGenerationRequest) -> BlockGenerationTaskResult {
+            // Returning the request boxed lets the load task recover the voxels.
+            BlockGenerationTaskResult::NotScheduled(Box::new(request))
         }
     }
 
@@ -390,17 +414,40 @@ mod tests {
     }
 
     #[test]
-    fn load_stream_error_is_exposed_without_output() {
+    fn load_stream_error_emits_dropped_output_and_exposes_error() {
         let stream: Arc<dyn VoxelStream> = Arc::new(ErrorLoadStream);
         let mut task = LoadBlockDataTask::new(params(stream, Vector3i::default(), true));
 
         task.run_load();
 
-        assert!(task.take_output().is_none());
+        let output = task.take_output().unwrap();
+        assert_eq!(output.kind, BlockDataOutputKind::Loaded);
+        assert!(output.dropped);
+        assert!(output.voxels.is_none());
+        assert_eq!(output.position_in_blocks, Vector3i::default());
+        assert!(task.has_run());
         assert!(matches!(
             task.stream_error(),
             Some(VoxelStreamError::Io(message)) if message == "load failed"
         ));
+    }
+
+    #[test]
+    fn load_not_found_with_factory_returning_not_scheduled_outputs_needs_generation() {
+        let stream: Arc<dyn VoxelStream> = Arc::new(MemoryStream::new());
+        let position = Vector3i::new(7, 8, 9);
+        let mut task_params = params(stream, position, true);
+        task_params.generation_task_factory = Some(Arc::new(NotScheduledFactory));
+        let mut task = LoadBlockDataTask::new(task_params);
+
+        task.run_load();
+        let output = task.take_output().unwrap();
+
+        assert_eq!(output.kind, BlockDataOutputKind::NeedsGeneration);
+        assert_eq!(output.position_in_blocks, position);
+        let voxels = output.voxels.as_ref().unwrap();
+        assert_eq!(voxels.size(), Vector3i::new(4, 4, 4));
+        assert!(task.take_follow_up_tasks().is_empty());
     }
 
     #[test]
