@@ -300,6 +300,62 @@ impl VoxelDataMap {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn paste_masked_with_destination_mask(
+        &mut self,
+        min_pos: Vector3i,
+        src_buffer: &VoxelBuffer,
+        channels_mask: u32,
+        src_mask_channel: usize,
+        src_mask_value: u64,
+        dst_mask_channel: usize,
+        dst_writable_values: &[u64],
+        create_new_blocks: bool,
+    ) {
+        let channels = channel_indices_from_mask(channels_mask);
+        for src_pos in Box3i::new(Vector3i::zero(), src_buffer.size()).iter_cells_zxy() {
+            if src_buffer.get_voxel(src_pos.x, src_pos.y, src_pos.z, src_mask_channel)
+                == src_mask_value
+            {
+                continue;
+            }
+
+            let dst_pos = min_pos + src_pos;
+            let block_pos = self.voxel_to_block(dst_pos);
+            let local_pos = self.to_local(dst_pos);
+            let block = if create_new_blocks {
+                Some(self.get_or_create_block_at_voxel_pos(dst_pos))
+            } else {
+                self.get_block_mut(block_pos)
+            };
+            let Some(block) = block else {
+                continue;
+            };
+            if !block.has_voxels() {
+                continue;
+            }
+
+            let dst_mask_value =
+                block
+                    .voxels()
+                    .get_voxel(local_pos.x, local_pos.y, local_pos.z, dst_mask_channel);
+            if !dst_writable_values.contains(&dst_mask_value) {
+                continue;
+            }
+
+            for &channel_index in &channels {
+                let value = src_buffer.get_voxel(src_pos.x, src_pos.y, src_pos.z, channel_index);
+                block.voxels_mut().set_voxel(
+                    value,
+                    local_pos.x,
+                    local_pos.y,
+                    local_pos.z,
+                    channel_index,
+                );
+            }
+        }
+    }
+
     fn get_or_create_block_at_voxel_pos(&mut self, pos: Vector3i) -> &mut VoxelDataBlock {
         let block_pos = self.voxel_to_block(pos);
         if !self.blocks.contains_key(&block_pos) {
@@ -601,5 +657,40 @@ mod tests {
             }
         });
         assert!(outline_is_default);
+    }
+
+    #[test]
+    fn paste_masked_with_destination_mask_only_writes_writable_values() {
+        let channel = ChannelId::Type.index();
+        let channels_mask = 1u32 << channel;
+        let box_in_voxels =
+            Box3i::from_min_max(Vector3i::new(-10, -5, -10), Vector3i::new(10, 5, 10));
+        let mut map = VoxelDataMap::new(0);
+        for pos in box_in_voxels.iter_cells() {
+            let value = (pos.y - box_in_voxels.position.y) as u64;
+            map.set_voxel(value, pos, channel);
+        }
+
+        let mut source = VoxelBuffer::with_size(box_in_voxels.size);
+        source.fill(100, channel);
+        let writable_values = [0, 2, 5, 6];
+
+        map.paste_masked_with_destination_mask(
+            box_in_voxels.position,
+            &source,
+            channels_mask,
+            channel,
+            999,
+            channel,
+            &writable_values,
+            false,
+        );
+
+        assert!(box_in_voxels.all_cells_match(|pos| {
+            let original_value = (pos.y - box_in_voxels.position.y) as u64;
+            let writable = writable_values.contains(&original_value);
+            let expected = if writable { 100 } else { original_value };
+            map.get_voxel(pos, channel) == expected
+        }));
     }
 }
