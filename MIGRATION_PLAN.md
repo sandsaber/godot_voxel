@@ -4,6 +4,9 @@
 > **Upstream:** https://github.com/Zylann/godot_voxel
 > **Дата оценки:** 2026-07-03
 > **Модель работы:** AI 24/7 + человек-архитектор
+>
+> **Snapshot статуса:** см. [`rust/STATUS.md`](rust/STATUS.md) — краткая
+> сводка фаз + список того, что уже работает headlessly без Godot.
 
 ---
 
