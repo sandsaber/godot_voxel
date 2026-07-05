@@ -194,9 +194,11 @@ godot_voxel (fork)
 - **`TransvoxelMesher` real adapter ✅ (обёртка над build_regular_mesh)**
 - **End-to-end test: generator → VoxelData → MeshBlockTask → TransvoxelMesher → mesh ✅**
 - **`VoxelTerrainCore` single-LOD paging orchestrator ✅** (viewers → loads → meshing → outputs → unload; full lifecycle работает headlessly)
+- **`string::expression_parser` ✅** (closure Фазы 1, открывает generators::graph compilation)
+- **`generators::graph` runtime minimal ✅** (AST-walker: InputX/Y/Z, Constant, Add/Sub/Mul/Div, Sin/Cos/Abs/Sqrt, Min/Max, Remap, OutputSdf + GraphGenerator impl VoxelGenerator)
 - Multi-LOD paging (VoxelLodTerrain) — далее (clipbox/octree стратегии)
 - `VoxelEngine` subset (volume/viewer registry, multi-volume) — далее
-- `generators/graph` runtime (нужен `string::expression_parser`) — далее
+- generators::graph extensions: Curve/Image/Noise/SDF nodes, FastNoise2, range analysis, Expression node, bytecode VM — далее
 - Cubes/Blocky mesher adapters, `VoxelDataGrid`, real `SpatialLock3D` — далее
 - **GO-критерий:** стриминг бесконечного terrain'а работает, нет race conditions
   (проверка под ThreadSanitizer/loom)
@@ -277,6 +279,7 @@ godot_voxel (fork)
 | 2026-07-05 | Фаза 4 meshing pipeline + end-to-end | ✅ total 560 unit + 5 e2e. Meshing pipeline полностью работает headlessly: `generate_single`/`get_voxel` fallback, `Semaphore` + `SpatialLock3D` no-op stub (Option b из аудита), `VoxelMesher` trait + `MesherInput`/`MesherOutput`/`SurfaceArrays` enum (transvoxel/cubes/blocky variants), `MeshingDependency`, `MeshBlockTask` (CPU gather+build алгоритм), `TransvoxelMesher` real adapter. End-to-end тест: generator → VoxelData → MeshBlockTask → mesher → MesherOutput — SDF-сфера даёт non-empty mesh, мирный блок далеко от сферы даёт empty mesh, dependency invalidation даёт dropped output. 7 коммитов, clippy чист |
 | 2026-07-05 | Фаза 4 single-LOD paging terrain | ✅ total 564 unit + 5 e2e. Engine-agnostic port of `terrain/fixed_lod/voxel_terrain.cpp` paging loop: `VoxelTerrainCore` orchestrator со paired viewers, data/mesh box computation с +1 padding для meshing neighbours, view/unview refcount-tracked mesh blocks, `try_schedule_mesh_update` (has_all_blocks_in_area gate), `LoadBlockForTerrainTask` (stream + generator fallback), full `process()` tick — viewers → loads → meshing → outputs. Тест доказывает полный lifecycle: viewer появляется → блоки грузятся и мешаются → viewer уходит → блоки выгружаются. `Box3i::difference` (slab decomposition для box diffs). Без Godot (Node3D/RenderingServer — Phase 5), без instancer/multiplayer/GPU. Multi-LOD (VoxelLodTerrain) — отдельный orchestrator далее |
 | 2026-07-05 | Фаза 1 closure: `string::expression_parser` | ✅ total 578 unit + 5 e2e. Закрыт последний отложенный пункт Фазы 1 — `util/string/expression_parser.{h,cpp}` (~980 LOC C++) → Rust. Recursive-descent parser с operator-precedence stack, AST `enum Node { Number/Variable/Operator/Function }` с `Box<Node>` children (idiomatic Rust, без `Box<dyn>`), `precompute_constants` constant-folding, `find_variables`, `tree_to_string`, `is_tree_equal`. Открывает `generators::graph` runtime (graph compiler lowering). 14 тестов покрывают parsing + folding + error paths + variable extraction + structural compare |
+| 2026-07-05 | Фаза 4: `generators::graph` runtime | ✅ total 593 unit + 5 e2e. Engine-agnostic runtime для procedural graph generator: AST-walker интерпретатор (`Graph` topology + `NodeKind` enum с InputX/Y/Z, Constant, Add/Sub/Mul/Div, Sin/Cos/Abs/Sqrt, Min/Max, Remap, OutputSdf), topological sort с cycle detection, `GraphGenerator` impl `VoxelGenerator` (Y-slice loop, SDF output). 15 тестов покрывают topology, evaluation, cycle detection, defaults, generator adapter. Подход проще C++ bytecode VM (быстрее в реализации, та же публичная API). Curve/Image/Noise/SDF nodes, range analysis, FastNoise2, Expression node, bytecode VM — отложены |
 
 ### Где остановились (для возобновления)
 
@@ -313,8 +316,11 @@ Paging: VoxelTerrainCore orchestrates viewers → loads → meshing → outputs 
    - **`VoxelEngine` subset** — volume/viewer registry (`SlotMap`) + `process()`
      dequeue loop + `sync_viewers_task_priority_data`. Нужен для multi-volume
      и centralized viewer tracking.
-   - **`generators::graph` runtime** (нужен `string::expression_parser` из Фазы 1) —
-     ~600 LOC port для parser + runtime execution уже есть pieces.
+   - **`generators::graph` runtime** — минимальный AST-walker готов
+     (InputX/Y/Z, Constant, Add/Sub/Mul/Div, Sin/Cos/Abs/Sqrt, Min/Max,
+     Remap, OutputSdf + GraphGenerator impl VoxelGenerator). Curve/Image/
+     Noise/SDF nodes, FastNoise2, range analysis, Expression node, bytecode
+     VM — отложены.
    - **Cubes/Blocky mesher adapters** — TransvoxelMesher готов; Cubes/Blocky
      wrappers требуют порт colour callbacks из free-function API.
    - **`VoxelDataGrid`** — terrain meshing query helper (оптимизация; текущий
@@ -455,7 +461,7 @@ conditions (проверка под ThreadSanitizer/loom).
 git clone https://github.com/sandsaber/godot_voxel.git
 cd godot_voxel && git checkout rust/pilot
 cd rust
-cargo test -p voxel-core       # 578 unit + 10 integration + 1 doc-test; 1 ignored golden-gen
+cargo test -p voxel-core       # 593 unit + 10 integration + 1 doc-test; 1 ignored golden-gen
 cargo build -p voxel-gdext     # GDExtension .so (грузится в Godot 4.7)
 cargo clippy --workspace --all-targets  # должен быть чистый
 cargo bench                    # transvoxel benches (16³=143 / 32³=199 / 64³=249 Melem/s)
