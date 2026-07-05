@@ -43,6 +43,14 @@ pub trait ThreadedTask: Send + 'static {
     /// Runs on the caller/main side after draining completed tasks.
     fn apply_result(self: Box<Self>) {}
 
+    /// Follow-up tasks produced by this task while running.
+    ///
+    /// Callers should drain this before [`ThreadedTask::apply_result`] if they
+    /// need to enqueue dependent work.
+    fn take_follow_up_tasks(&mut self) -> Vec<Box<dyn ThreadedTask>> {
+        Vec::new()
+    }
+
     /// Dynamic priority. Higher packed values run first.
     fn priority(&mut self) -> TaskPriority {
         TaskPriority::max()

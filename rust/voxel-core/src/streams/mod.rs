@@ -26,10 +26,12 @@ pub mod block_serializer;
 pub mod compressed_data;
 pub mod instance_data;
 pub mod region;
+pub mod save_block_data_task;
 pub mod stream_cache;
 pub mod stream_memory;
 pub mod voxel_stream;
 
+pub use save_block_data_task::SaveBlockDataTask;
 pub use stream_cache::BlockCache;
 pub use stream_memory::MemoryStream;
 pub use voxel_stream::{
