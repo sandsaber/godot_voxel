@@ -231,9 +231,103 @@ impl VoxelMesher for CubesMesher {
     }
 }
 
+/// Voxel-model blocky mesher wrapping the existing `blocky::mesher::generate_mesh`
+/// free function. Reads the `Type` channel as 16-bit voxel ids, looks up each
+/// id in a [`BakedLibrary`] (voxel model library + side-culling matrix), and
+/// emits one surface per material the library uses.
+///
+/// The library is shared via `Arc` so multiple terrain instances can use the
+/// same baked data without re-baking. A library built with
+/// [`BakedLibrary::default`] is empty (no models); callers must populate it
+/// and run [`blocky::bake_library`] before passing it in.
+pub struct BlockyMesher {
+    type_channel: usize,
+    library: std::sync::Arc<crate::meshers::blocky::baked_library::BakedLibrary>,
+    /// 0fps-style corner ambient occlusion toggle (C++ default `true`).
+    bake_occlusion: bool,
+    /// AO strength (C++ default `0.8`).
+    baked_occlusion_darkness: f32,
+}
+
+impl BlockyMesher {
+    /// Build a mesher around a pre-baked library. The library must already
+    /// have run `blocky::bake_library` so its side-culling matrix is valid.
+    pub fn new(library: std::sync::Arc<crate::meshers::blocky::baked_library::BakedLibrary>) -> Self {
+        Self {
+            type_channel: ChannelId::Type.index(),
+            library,
+            bake_occlusion: true,
+            baked_occlusion_darkness: 0.8,
+        }
+    }
+
+    pub fn with_type_channel(mut self, channel: usize) -> Self {
+        self.type_channel = channel;
+        self
+    }
+
+    pub fn with_occlusion(mut self, enabled: bool, darkness: f32) -> Self {
+        self.bake_occlusion = enabled;
+        self.baked_occlusion_darkness = darkness;
+        self
+    }
+
+    /// Extract the typed-channel slice the blocky mesher expects (`&[u16]`).
+    /// Voxels are read as `u64` then narrowed, matching the C++ runtime.
+    fn extract_voxel_slice(buffer: &VoxelBuffer, channel: usize) -> Vec<u16> {
+        let size = buffer.size();
+        let mut out = Vec::with_capacity((size.x as usize) * (size.y as usize) * (size.z as usize));
+        for z in 0..size.z {
+            for x in 0..size.x {
+                for y in 0..size.y {
+                    out.push(buffer.get_voxel(x, y, z, channel) as u16);
+                }
+            }
+        }
+        out
+    }
+}
+
+impl VoxelMesher for BlockyMesher {
+    fn build(&mut self, output: &mut MesherOutput, input: &MesherInput<'_>) {
+        use crate::meshers::blocky::mesher::generate_mesh;
+        let voxels = Self::extract_voxel_slice(input.voxels, self.type_channel);
+        let size = input.voxels.size();
+        let material_count = self.library.indexed_materials_count.max(1) as usize;
+        let mut arrays: Vec<crate::meshers::blocky::mesher::BlockyArrays> =
+            (0..material_count).map(|_| Default::default()).collect();
+        generate_mesh(
+            &mut arrays,
+            &voxels,
+            size,
+            &self.library,
+            self.bake_occlusion,
+            self.baked_occlusion_darkness,
+        );
+        for (material_index, arrays) in arrays.into_iter().enumerate() {
+            output.surfaces.push(Surface::new(
+                SurfaceArrays::Blocky(arrays),
+                material_index as u16,
+            ));
+        }
+    }
+
+    fn minimum_padding(&self) -> u32 {
+        crate::meshers::blocky::mesher::PADDING as u32
+    }
+
+    fn maximum_padding(&self) -> u32 {
+        crate::meshers::blocky::mesher::PADDING as u32
+    }
+
+    fn used_channels_mask(&self) -> u32 {
+        1u32 << self.type_channel
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{CubesMesher, TransvoxelMesher};
+    use super::{BlockyMesher, CubesMesher, TransvoxelMesher};
     use crate::math::{Vector3f, Vector3i};
     use crate::meshers::transvoxel::{MAX_PADDING, MIN_PADDING};
     use crate::meshers::{MesherInput, MesherOutput, SurfaceArrays, VoxelMesher};
@@ -425,5 +519,47 @@ mod tests {
     fn cubes_mesher_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<CubesMesher>();
+    }
+
+    fn empty_blocky_library() -> std::sync::Arc<crate::meshers::blocky::baked_library::BakedLibrary> {
+        // Default-constructed library is empty (no models), so the mesher
+        // emits no geometry regardless of input. Useful for testing the
+        // adapter wiring without pulling in the full bake pass.
+        std::sync::Arc::new(crate::meshers::blocky::baked_library::BakedLibrary::default())
+    }
+
+    #[test]
+    fn blocky_mesher_with_empty_library_emits_no_geometry() {
+        let mut mesher = BlockyMesher::new(empty_blocky_library());
+        // Solid block of voxel id 1 — but the library has no model for it,
+        // so nothing gets emitted.
+        let mut voxels = VoxelBuffer::with_size(Vector3i::splat(4));
+        for z in 1..3 {
+            for x in 1..3 {
+                for y in 1..3 {
+                    voxels.set_voxel(1, x, y, z, ChannelId::Type.index());
+                }
+            }
+        }
+        let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+
+        let mut output = MesherOutput::default();
+        mesher.build(&mut output, &input);
+
+        assert_eq!(output.total_triangle_count(), 0);
+    }
+
+    #[test]
+    fn blocky_mesher_padding_and_channels_match_constants() {
+        let mesher = BlockyMesher::new(empty_blocky_library());
+        assert_eq!(mesher.minimum_padding(), 1);
+        assert_eq!(mesher.maximum_padding(), 1);
+        assert_eq!(mesher.used_channels_mask(), 1u32 << ChannelId::Type.index());
+    }
+
+    #[test]
+    fn blocky_mesher_is_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<BlockyMesher>();
     }
 }
