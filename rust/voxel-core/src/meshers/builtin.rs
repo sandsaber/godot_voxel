@@ -127,9 +127,113 @@ impl VoxelMesher for TransvoxelMesher {
     }
 }
 
+/// Blocky colored-cube mesher wrapping the existing greedy-cubes free
+/// function. Reads the `Type` channel as 32-bit voxel ids, looks up each
+/// id in a [`ColorPalette`], and emits two surfaces (opaque + transparent)
+/// matching the C++ `VoxelMesherCubes` output.
+pub struct CubesMesher {
+    type_channel: usize,
+    palette: crate::meshers::cubes::palette::ColorPalette,
+    /// When `true`, uses the greedy rectangle-merging path. When `false`,
+    /// emits one quad per face (the simpler reference path). Greedy is the
+    /// C++ default.
+    greedy: bool,
+}
+
+impl Default for CubesMesher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CubesMesher {
+    pub fn new() -> Self {
+        Self {
+            type_channel: ChannelId::Type.index(),
+            palette: crate::meshers::cubes::palette::ColorPalette::default(),
+            greedy: true,
+        }
+    }
+
+    pub fn with_palette(mut self, palette: crate::meshers::cubes::palette::ColorPalette) -> Self {
+        self.palette = palette;
+        self
+    }
+
+    pub fn with_greedy(mut self, greedy: bool) -> Self {
+        self.greedy = greedy;
+        self
+    }
+
+    pub fn with_type_channel(mut self, channel: usize) -> Self {
+        self.type_channel = channel;
+        self
+    }
+
+    /// Extract the typed-channel slice the cubes mesher expects. The C++
+    /// runtime packs voxels as `u32` regardless of the on-disk depth; we do
+    /// the same by reading each voxel via `get_voxel` (returns `u64`).
+    fn extract_voxel_slice(buffer: &VoxelBuffer, channel: usize) -> Vec<u32> {
+        let size = buffer.size();
+        let mut out = Vec::with_capacity((size.x as usize) * (size.y as usize) * (size.z as usize));
+        // ZXY order matches the cubes free function's `index = y + sy*(x + sx*z)`.
+        for z in 0..size.z {
+            for x in 0..size.x {
+                for y in 0..size.y {
+                    out.push(buffer.get_voxel(x, y, z, channel) as u32);
+                }
+            }
+        }
+        out
+    }
+}
+
+impl VoxelMesher for CubesMesher {
+    fn build(&mut self, output: &mut MesherOutput, input: &MesherInput<'_>) {
+        use crate::meshers::cubes::greedy::MATERIAL_COUNT;
+        let voxels = Self::extract_voxel_slice(input.voxels, self.type_channel);
+        let size = input.voxels.size();
+        let block_size = [size.x, size.y, size.z];
+        let palette = self.palette.clone();
+        let color_func = move |raw: u32| palette.get_color8(raw as u8);
+
+        let mut arrays: [crate::meshers::cubes::arrays::CubesArrays; MATERIAL_COUNT] =
+            Default::default();
+        if self.greedy {
+            crate::meshers::cubes::greedy::build_greedy_cubes(&mut arrays, &voxels, block_size, color_func);
+        } else {
+            crate::meshers::cubes::simple::build_simple_cubes(&mut arrays, &voxels, block_size, color_func);
+        }
+
+        // Two surfaces: opaque (index 0) and transparent (index 1). Both are
+        // always emitted to match the C++ `Output::surfaces` shape; the
+        // terrain layer can drop empty ones.
+        output.surfaces.push(Surface::new(
+            SurfaceArrays::Cubes(std::mem::take(&mut arrays[0])),
+            0,
+        ));
+        output.surfaces.push(Surface::new(
+            SurfaceArrays::Cubes(std::mem::take(&mut arrays[1])),
+            1,
+        ));
+    }
+
+    fn minimum_padding(&self) -> u32 {
+        crate::meshers::cubes::greedy::PADDING as u32
+    }
+
+    fn maximum_padding(&self) -> u32 {
+        crate::meshers::cubes::greedy::PADDING as u32
+    }
+
+    fn used_channels_mask(&self) -> u32 {
+        1u32 << self.type_channel
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::TransvoxelMesher;
+    use super::{CubesMesher, TransvoxelMesher};
     use crate::math::{Vector3f, Vector3i};
     use crate::meshers::transvoxel::{MAX_PADDING, MIN_PADDING};
     use crate::meshers::{MesherInput, MesherOutput, SurfaceArrays, VoxelMesher};
@@ -240,5 +344,86 @@ mod tests {
             let Vector3f { x, y, z } = *p;
             x >= 0.0 && y >= 0.0 && z >= 0.0 && x < padded_extent && y < padded_extent && z < padded_extent
         }));
+    }
+
+    /// Build a small VoxelBuffer filled with a single solid voxel type in the
+    /// interior and air (0) on the padding halo — the typical input
+    /// `CubesMesher` sees after the gather step.
+    fn cubes_input_buffer() -> VoxelBuffer {
+        // Padded block: PADDING(1) interior 2³ + PADDING(1) on each side.
+        let mut voxels = VoxelBuffer::with_size(Vector3i::splat(2 + 2));
+        let channel = ChannelId::Type.index();
+        // Fill the interior (1..3)³ with voxel id 1.
+        for z in 1..3 {
+            for x in 1..3 {
+                for y in 1..3 {
+                    voxels.set_voxel(1, x, y, z, channel);
+                }
+            }
+        }
+        voxels
+    }
+
+    #[test]
+    fn cubes_mesher_produces_two_surfaces_for_a_solid_block() {
+        let mut mesher = CubesMesher::new();
+        let voxels = cubes_input_buffer();
+        let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+
+        let mut output = MesherOutput::default();
+        mesher.build(&mut output, &input);
+
+        // Two surfaces emitted (opaque material 0, transparent material 1).
+        assert_eq!(output.surfaces.len(), 2);
+        // The opaque surface should have geometry for a solid 2³ block.
+        let opaque_vertices = output.surfaces[0].arrays.vertex_count();
+        assert!(
+            opaque_vertices > 0,
+            "expected opaque geometry for a solid block, got {opaque_vertices}"
+        );
+        // Material indices are 0 and 1 in order.
+        assert_eq!(output.surfaces[0].material_index, 0);
+        assert_eq!(output.surfaces[1].material_index, 1);
+    }
+
+    #[test]
+    fn cubes_mesher_emits_empty_surfaces_for_air_block() {
+        let mut mesher = CubesMesher::new();
+        // All-zero Type channel → no solid voxels → no faces.
+        let voxels = VoxelBuffer::with_size(Vector3i::splat(4));
+        let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+
+        let mut output = MesherOutput::default();
+        mesher.build(&mut output, &input);
+
+        assert_eq!(output.total_triangle_count(), 0);
+    }
+
+    #[test]
+    fn cubes_mesher_padding_and_channels_match_constants() {
+        let mesher = CubesMesher::new();
+        assert_eq!(mesher.minimum_padding(), 1);
+        assert_eq!(mesher.maximum_padding(), 1);
+        assert_eq!(mesher.used_channels_mask(), 1u32 << ChannelId::Type.index());
+    }
+
+    #[test]
+    fn cubes_mesher_supports_non_greedy_simple_path() {
+        let mut mesher = CubesMesher::new().with_greedy(false);
+        let voxels = cubes_input_buffer();
+        let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+
+        let mut output = MesherOutput::default();
+        mesher.build(&mut output, &input);
+
+        // Simple path emits one quad per face — more vertices than greedy,
+        // but still non-empty for a solid block.
+        assert!(output.total_triangle_count() > 0);
+    }
+
+    #[test]
+    fn cubes_mesher_is_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<CubesMesher>();
     }
 }
