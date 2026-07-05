@@ -276,6 +276,7 @@ godot_voxel (fork)
 | 2026-07-05 | Фаза 4 audit + fixes + оптимизации + миграция | ✅ total 533 unit. Audit выявил 2 бага (stream-error/abort paths теряли output, clippy large_enum_variant) и 2 оптимизации (paste O(N·k)→O(N), ThreadedTaskRunner priority throttle 32ms). Миграция критических блокеров: `VoxelBuffer::downscale_to` (mip-map kernel), `VoxelData::update_lods` LOD cascade, `VoxelDataBlock::viewers` + `view_area`/`unview_area` (refcount pinning API для mesh tasks), `VoxelData` generator/stream ownership (`SharedVoxelGenerator`/`SharedVoxelStream`, `with_generator` helper), `VoxelData` copy/paste/paste_masked + area queries (`is_area_loaded`, `has_all_blocks_in_area`, `get_missing_blocks`, `get_blocks_with_voxel_data`). VoxelGenerator trait → `Send + Sync`. 8 коммитов, clippy чист |
 | 2026-07-05 | Фаза 4 meshing pipeline + end-to-end | ✅ total 560 unit + 5 e2e. Meshing pipeline полностью работает headlessly: `generate_single`/`get_voxel` fallback, `Semaphore` + `SpatialLock3D` no-op stub (Option b из аудита), `VoxelMesher` trait + `MesherInput`/`MesherOutput`/`SurfaceArrays` enum (transvoxel/cubes/blocky variants), `MeshingDependency`, `MeshBlockTask` (CPU gather+build алгоритм), `TransvoxelMesher` real adapter. End-to-end тест: generator → VoxelData → MeshBlockTask → mesher → MesherOutput — SDF-сфера даёт non-empty mesh, мирный блок далеко от сферы даёт empty mesh, dependency invalidation даёт dropped output. 7 коммитов, clippy чист |
 | 2026-07-05 | Фаза 4 single-LOD paging terrain | ✅ total 564 unit + 5 e2e. Engine-agnostic port of `terrain/fixed_lod/voxel_terrain.cpp` paging loop: `VoxelTerrainCore` orchestrator со paired viewers, data/mesh box computation с +1 padding для meshing neighbours, view/unview refcount-tracked mesh blocks, `try_schedule_mesh_update` (has_all_blocks_in_area gate), `LoadBlockForTerrainTask` (stream + generator fallback), full `process()` tick — viewers → loads → meshing → outputs. Тест доказывает полный lifecycle: viewer появляется → блоки грузятся и мешаются → viewer уходит → блоки выгружаются. `Box3i::difference` (slab decomposition для box diffs). Без Godot (Node3D/RenderingServer — Phase 5), без instancer/multiplayer/GPU. Multi-LOD (VoxelLodTerrain) — отдельный orchestrator далее |
+| 2026-07-05 | Фаза 1 closure: `string::expression_parser` | ✅ total 578 unit + 5 e2e. Закрыт последний отложенный пункт Фазы 1 — `util/string/expression_parser.{h,cpp}` (~980 LOC C++) → Rust. Recursive-descent parser с operator-precedence stack, AST `enum Node { Number/Variable/Operator/Function }` с `Box<Node>` children (idiomatic Rust, без `Box<dyn>`), `precompute_constants` constant-folding, `find_variables`, `tree_to_string`, `is_tree_equal`. Открывает `generators::graph` runtime (graph compiler lowering). 14 тестов покрывают parsing + folding + error paths + variable extraction + structural compare |
 
 ### Где остановились (для возобновления)
 
@@ -357,7 +358,7 @@ Paging: VoxelTerrainCore orchestrates viewers → loads → meshing → outputs 
 | `testing` | `util/testing/{test_directory,test_options}.h` | ✅ +7 тестов (`TestDirectory`: RAII temp-dir с recursive-drop-on-drop + `leak()`; `TestOptions`: include/exclude фильтры имён тестов `can_run`/`can_run_print`). `test_macros.h` → нативные `assert!`/`panic!` (документировано) |
 
 **Фаза 1 (util/*) ЗАВЕРШЕНА.** `util/{math,string,memory,io,testing}` — все портированы.
-**Отложено:** `expression_parser` → Фаза 3 (потребитель `generators/graph`);
+**Отложено:** ~~`expression_parser` → Фаза 3~~ (теперь портирован — `string::expression_parser`, закрытие Фазы 1);
 `file_locker` → Фаза 4 (следующий потребитель уже портированного `thread` layer).
 
 ### Фаза 3 (в работе)
@@ -454,7 +455,7 @@ conditions (проверка под ThreadSanitizer/loom).
 git clone https://github.com/sandsaber/godot_voxel.git
 cd godot_voxel && git checkout rust/pilot
 cd rust
-cargo test -p voxel-core       # 564 unit + 10 integration + 1 doc-test; 1 ignored golden-gen
+cargo test -p voxel-core       # 578 unit + 10 integration + 1 doc-test; 1 ignored golden-gen
 cargo build -p voxel-gdext     # GDExtension .so (грузится в Godot 4.7)
 cargo clippy --workspace --all-targets  # должен быть чистый
 cargo bench                    # transvoxel benches (16³=143 / 32³=199 / 64³=249 Melem/s)
