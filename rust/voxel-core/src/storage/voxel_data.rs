@@ -441,17 +441,45 @@ impl VoxelData {
         if !self.streaming_enabled && !self.full_load_completed {
             return defval;
         }
-        let block_pos = self.voxel_to_block(pos);
-        let Some(block) = self.lods[0].map.get_block(block_pos) else {
-            return defval;
-        };
-        if !block.has_voxels() {
-            return defval;
+
+        if !self.streaming_enabled {
+            // Non-streaming: every block is expected to be loaded. If a block
+            // or its voxels are missing, fall back to the generator (single
+            // voxel query) — mirrors the C++ branch at voxel_data.cpp:182-200.
+            let block_pos = self.voxel_to_block(pos);
+            if let Some(block) = self.lods[0].map.get_block(block_pos) {
+                if block.has_voxels() {
+                    let local_pos = self.lods[0].map.to_local(pos);
+                    return block
+                        .voxels()
+                        .get_voxel(local_pos.x, local_pos.y, local_pos.z, channel_index);
+                }
+            }
+            return self
+                .with_generator(|gen| gen.generate_single(pos, channel_index).as_raw())
+                .unwrap_or(defval);
         }
-        let local_pos = self.lods[0].map.to_local(pos);
-        block
-            .voxels()
-            .get_voxel(local_pos.x, local_pos.y, local_pos.z, channel_index)
+
+        // Streaming mode: probe LODs from finest to coarsest, falling back to
+        // a lower LOD when the finer one isn't resident. If none is resident
+        // and a generator is available, query it directly (matches the C++
+        // behaviour at voxel_data.cpp:209-254).
+        let mut block_pos = self.voxel_to_block(pos);
+        let mut voxel_pos = pos;
+        for lod_index in 0..self.lods.len() {
+            if let Some(block) = self.lods[lod_index].map.get_block(block_pos) {
+                if block.has_voxels() {
+                    let local_pos = self.lods[lod_index].map.to_local(voxel_pos);
+                    return block
+                        .voxels()
+                        .get_voxel(local_pos.x, local_pos.y, local_pos.z, channel_index);
+                }
+            }
+            block_pos = block_pos >> 1;
+            voxel_pos = voxel_pos >> 1;
+        }
+        self.with_generator(|gen| gen.generate_single(pos, channel_index).as_raw())
+            .unwrap_or(defval)
     }
 
     pub fn get_voxel_f(&self, pos: Vector3i, channel_index: usize) -> f32 {
@@ -1665,5 +1693,38 @@ mod tests {
         assert_eq!(blocks.len(), 2);
         assert!(blocks[0].is_some());
         assert!(blocks[1].is_none()); // empty block has no voxel data
+    }
+
+    #[test]
+    fn get_voxel_falls_back_to_generator_when_block_is_missing_non_streaming() {
+        let mut data = VoxelData::new();
+        data.set_bounds(Box3i::new(Vector3i::zero(), Vector3i::splat(64)));
+        data.set_streaming_enabled(false);
+        data.set_full_load_completed(true);
+        let channel = ChannelId::Type.index();
+
+        // RecordingGenerator writes `10 + lod + origin.x`. The default
+        // `generate_single` impl passes the queried voxel position as the
+        // 1×1×1 block's origin, so for voxel (20,5,5) the result is 10+0+20=30.
+        let generator: SharedVoxelGenerator =
+            Arc::new(Mutex::new(Box::new(RecordingGenerator::default()) as Box<dyn VoxelGenerator>));
+        data.set_generator(Some(generator));
+
+        let value = data.get_voxel(Vector3i::new(20, 5, 5), channel, 0);
+        assert_eq!(value, 30);
+    }
+
+    #[test]
+    fn get_voxel_returns_defval_when_no_generator_and_block_missing_non_streaming() {
+        let mut data = VoxelData::new();
+        data.set_bounds(Box3i::new(Vector3i::zero(), Vector3i::splat(64)));
+        data.set_streaming_enabled(false);
+        data.set_full_load_completed(true);
+
+        // No generator: the fallback returns the caller-provided default.
+        assert_eq!(
+            data.get_voxel(Vector3i::new(20, 5, 5), ChannelId::Type.index(), 99),
+            99
+        );
     }
 }

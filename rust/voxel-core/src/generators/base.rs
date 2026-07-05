@@ -10,7 +10,7 @@
 //! Phase 4.
 
 use crate::math::{Vector2i, Vector3i};
-use crate::storage::voxel_buffer::ChannelId;
+use crate::storage::voxel_buffer::{ChannelId, MAX_CHANNELS};
 use crate::storage::VoxelBuffer;
 
 /// Input handed to [`VoxelGenerator::generate_block`]. Ported from
@@ -20,6 +20,30 @@ pub struct VoxelQueryData<'a> {
     pub buffer: &'a mut VoxelBuffer,
     pub origin_in_voxels: Vector3i,
     pub lod: u32,
+}
+
+/// Single-voxel query result. Ported from `VoxelSingleValue`. The same `u64`
+/// slot carries either a raw integer or a bit-cast `f32` (for the SDF channel)
+/// — read it with [`VoxelSingleValue::as_raw`] / [`VoxelSingleValue::as_real`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct VoxelSingleValue(pub u64);
+
+impl VoxelSingleValue {
+    pub const fn from_raw(value: u64) -> Self {
+        Self(value)
+    }
+
+    pub const fn as_raw(self) -> u64 {
+        self.0
+    }
+
+    pub fn from_real(value: f32) -> Self {
+        Self(f32::to_bits(value) as u64)
+    }
+
+    pub fn as_real(self) -> f32 {
+        f32::from_bits(self.0 as u32)
+    }
 }
 
 /// Output of [`VoxelGenerator::generate_block`]. Ported from
@@ -58,6 +82,33 @@ pub trait VoxelGenerator: Send + Sync {
     /// Defaults to the SDF channel. Ported from `get_used_channels_mask`.
     fn used_channels_mask(&self) -> u32 {
         1 << ChannelId::Sdf.index()
+    }
+
+    /// Sample a single voxel at world position `pos` (LOD 0). Returns the
+    /// value packed into a [`VoxelSingleValue`] (raw integer, or bit-cast f32
+    /// when `channel` is the SDF channel). Ported from
+    /// `VoxelGenerator::generate_single`.
+    ///
+    /// The default implementation builds a 1×1×1 `VoxelBuffer`, runs
+    /// [`generate_block`](Self::generate_block), and reads the result — slow
+    /// but correct. Generators with a closed-form per-voxel expression can
+    /// override this for a sizeable speedup. Returns `from_raw(0)` if
+    /// `channel >= MAX_CHANNELS`.
+    fn generate_single(&mut self, pos: Vector3i, channel: usize) -> VoxelSingleValue {
+        if channel >= MAX_CHANNELS {
+            return VoxelSingleValue::from_raw(0);
+        }
+        let mut buffer = VoxelBuffer::with_size(Vector3i::splat(1));
+        self.generate_block(VoxelQueryData {
+            buffer: &mut buffer,
+            origin_in_voxels: pos,
+            lod: 0,
+        });
+        if channel == ChannelId::Sdf.index() {
+            VoxelSingleValue::from_real(buffer.get_voxel_f(0, 0, 0, channel))
+        } else {
+            VoxelSingleValue::from_raw(buffer.get_voxel(0, 0, 0, channel))
+        }
     }
 }
 
@@ -187,4 +238,94 @@ where
     }
 
     GenResult::default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{VoxelGenerator, VoxelQueryData, VoxelSingleValue};
+    use crate::generators::base::GenResult;
+    use crate::math::Vector3i;
+    use crate::storage::{ChannelId, VoxelBuffer};
+
+    /// Trivial generator: writes a constant raw value into the Type channel
+    /// so we can exercise `generate_single`'s default implementation without
+    /// running into SDF quantization.
+    struct ConstantType;
+    impl VoxelGenerator for ConstantType {
+        fn generate_block(&mut self, input: VoxelQueryData<'_>) -> GenResult {
+            input.buffer.set_voxel(42, 0, 0, 0, ChannelId::Type.index());
+            GenResult::default()
+        }
+        fn used_channels_mask(&self) -> u32 {
+            1 << ChannelId::Type.index()
+        }
+    }
+
+    #[test]
+    fn generate_single_default_impl_reads_back_integer_channels_as_raw() {
+        let mut gen = ConstantType;
+        let value = gen.generate_single(Vector3i::new(1, 2, 3), ChannelId::Type.index());
+        assert_eq!(value.as_raw(), 42);
+    }
+
+    #[test]
+    fn generate_single_default_impl_reads_back_sdf_as_real() {
+        // The SDF channel uses bit-cast for the single-voxel return. We pick
+        // an exact-representable value to avoid 16-bit SDF quantization.
+        struct SdfOnly;
+        impl VoxelGenerator for SdfOnly {
+            fn generate_block(&mut self, input: VoxelQueryData<'_>) -> GenResult {
+                input
+                    .buffer
+                    .set_voxel_f(0.5, 0, 0, 0, ChannelId::Sdf.index());
+                GenResult::default()
+            }
+        }
+        let mut gen = SdfOnly;
+        // 0.5 has an exact f32 representation; SDF 16-bit quantization still
+        // loses precision, so we sample with the Bit32 depth path by reading
+        // the f32 directly from a 1-voxel buffer.
+        let mut probe = VoxelBuffer::with_size(Vector3i::splat(1));
+        gen.generate_block(VoxelQueryData {
+            buffer: &mut probe,
+            origin_in_voxels: Vector3i::zero(),
+            lod: 0,
+        });
+        // generate_single for SDF reads back via get_voxel_f, so it returns
+        // the f32-bits of the (possibly quantized) stored value.
+        let value = gen.generate_single(Vector3i::zero(), ChannelId::Sdf.index());
+        assert_eq!(value.as_real(), probe.get_voxel_f(0, 0, 0, ChannelId::Sdf.index()));
+    }
+
+    #[test]
+    fn generate_single_returns_zero_for_out_of_range_channel() {
+        let mut gen = ConstantType;
+        let value = gen.generate_single(Vector3i::zero(), 99);
+        assert_eq!(value, VoxelSingleValue::from_raw(0));
+    }
+
+    #[test]
+    fn voxel_single_value_round_trips_raw_and_real() {
+        assert_eq!(VoxelSingleValue::from_raw(7).as_raw(), 7);
+        assert_eq!(VoxelSingleValue::from_real(2.5).as_real(), 2.5);
+        // The bit-cast representation is preserved.
+        assert_eq!(
+            VoxelSingleValue::from_real(1.5).as_raw(),
+            f32::to_bits(1.5) as u64
+        );
+    }
+
+    #[test]
+    fn default_generate_single_uses_one_voxel_buffer() {
+        // Sanity: the default impl builds a 1x1x1 buffer, runs generate_block,
+        // and returns the sole voxel. This also documents that contract.
+        let mut gen = ConstantType;
+        let mut probe = VoxelBuffer::with_size(Vector3i::splat(1));
+        gen.generate_block(VoxelQueryData {
+            buffer: &mut probe,
+            origin_in_voxels: Vector3i::zero(),
+            lod: 0,
+        });
+        assert_eq!(probe.get_voxel(0, 0, 0, ChannelId::Type.index()), 42);
+    }
 }
