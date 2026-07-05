@@ -33,6 +33,14 @@ pub struct BlockToSave {
     pub lod_index: u8,
 }
 
+/// Position of a block affected by a LOD update pass.
+/// Matches `VoxelData::BlockLocation` in C++.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockLocation {
+    pub position: Vector3i,
+    pub lod_index: u8,
+}
+
 #[derive(Debug)]
 pub struct VoxelData {
     lods: Vec<VoxelDataLod>,
@@ -266,6 +274,177 @@ impl VoxelData {
         newly_needing_lod
     }
 
+    /// Propagates LOD0 edits to higher LODs by 2:1 downscaling.
+    ///
+    /// Ports `VoxelData::update_lods`. The caller passes the LOD0 blocks that
+    /// were marked as needing LOD updates (typically the result of
+    /// [`mark_area_modified`]). The function walks up the LOD chain in pairs:
+    /// for each source (lower-LOD) block it finds or generates the destination
+    /// (higher-LOD) block, marks it modified, and downscales the source
+    /// voxels into the matching sub-region of the destination.
+    ///
+    /// When `generator` is `Some`, missing or empty destination blocks in
+    /// non-streaming mode are filled by the generator before downscaling
+    /// (matching the C++ `L::generate_voxels` path). In streaming mode the
+    /// destination is expected to already be resident; if not, the function
+    /// logs the discrepancy and skips that pair (the C++ branch prints an
+    /// error and continues).
+    ///
+    /// If `out_updated_blocks` is `Some`, every block touched at every LOD is
+    /// appended (LOD0 first, then progressively higher LODs). This mirrors
+    /// the C++ `StdVector<BlockLocation> *out_updated_blocks` parameter.
+    pub fn update_lods(
+        &mut self,
+        modified_lod0_blocks: &[Vector3i],
+        mut generator: Option<&mut dyn VoxelGenerator>,
+        mut out_updated_blocks: Option<&mut Vec<BlockLocation>>,
+    ) {
+        let lod_count = self.lods.len();
+        if lod_count < 2 && modified_lod0_blocks.is_empty() {
+            // Single-LOD case still needs to clear the needs_lodding flag so
+            // the caller doesn't see stale state; handled below.
+        }
+
+        // Per-LOD worklists. Index 0 is seeded from the caller's input; each
+        // successive LOD is filled by the cascade. Using a small fixed-size
+        // `Vec<Vec<_>>` mirrors the C++ `thread_local FixedArray<...,MAX_LOD>`.
+        let mut blocks_to_process_per_lod: Vec<Vec<Vector3i>> =
+            (0..lod_count).map(|i| if i == 0 { modified_lod0_blocks.to_vec() } else { Vec::new() }).collect();
+
+        // LOD0 phase: clear needs_lodding and record updates.
+        for &block_pos in &blocks_to_process_per_lod[0] {
+            let Some(block) = self.lods[0].map.get_block_mut(block_pos) else {
+                // C++ uses ERR_CONTINUE; we just skip the missing block.
+                continue;
+            };
+            block.set_needs_lodding(false);
+            if let Some(out) = out_updated_blocks.as_deref_mut() {
+                out.push(BlockLocation { position: block_pos, lod_index: 0 });
+            }
+        }
+
+        let half_bs = (self.block_size() as i32) >> 1;
+        let last_lod_index = lod_count - 1;
+
+        // Cascade upwards in pairs of consecutive LODs.
+        for dst_lod_index in 1..lod_count {
+            let src_lod_index = dst_lod_index - 1;
+            // Snapshot the src worklist so we can borrow `self` mutably inside
+            // the loop without holding the borrow across iterations.
+            let src_worklist = std::mem::take(&mut blocks_to_process_per_lod[src_lod_index]);
+
+            for src_bpos in src_worklist {
+                let dst_bpos = src_bpos >> 1;
+
+                // Resolve the source block. C++ asserts non-null; the input
+                // contract guarantees the block exists (it came from a
+                // `needs_lodding` flag set by mark_area_modified).
+                let src_has_voxels = self.lods[src_lod_index]
+                    .map
+                    .get_block(src_bpos)
+                    .is_some_and(|block| block.has_voxels());
+                if !src_has_voxels {
+                    // Source block missing or empty — nothing to downscale.
+                    continue;
+                }
+
+                // Resolve (or generate) the destination block.
+                let dst_exists = self.lods[dst_lod_index].map.has_block(dst_bpos);
+                if !dst_exists {
+                    if !self.streaming_enabled {
+                        // Generate an empty destination block and fill it via
+                        // the generator before downscaling. Matches C++.
+                        let mut voxels = self.create_block_buffer();
+                        if let Some(generator) = generator.as_deref_mut() {
+                            let lod_block_size = (self.block_size() as i32) << dst_lod_index;
+                            generator.generate_block(VoxelQueryData {
+                                buffer: &mut voxels,
+                                origin_in_voxels: dst_bpos * lod_block_size,
+                                lod: dst_lod_index as u32,
+                            });
+                        }
+                        self.lods[dst_lod_index]
+                            .map
+                            .set_block_buffer(dst_bpos, voxels, true);
+                    } else {
+                        // Streaming mode expects parents to be resident. The
+                        // C++ branch prints an error and `continue`s.
+                        // TODO: route via the project logger once integrated.
+                        continue;
+                    }
+                }
+
+                // The destination may still have no voxel buffer (loaded but
+                // uncached). Generate on the fly like C++.
+                let dst_has_voxels = self.lods[dst_lod_index]
+                    .map
+                    .get_block(dst_bpos)
+                    .is_some_and(|block| block.has_voxels());
+                if !dst_has_voxels {
+                    let mut voxels = self.create_block_buffer();
+                    if let Some(generator) = generator.as_deref_mut() {
+                        let lod_block_size = (self.block_size() as i32) << dst_lod_index;
+                        generator.generate_block(VoxelQueryData {
+                            buffer: &mut voxels,
+                            origin_in_voxels: dst_bpos * lod_block_size,
+                            lod: dst_lod_index as u32,
+                        });
+                    }
+                    if let Some(block) = self.lods[dst_lod_index].map.get_block_mut(dst_bpos) {
+                        block.set_voxels(voxels);
+                    }
+                }
+
+                // Mark modified and enqueue for the next LOD pass if needed.
+                let mut enqueue_next = false;
+                if let Some(block) = self.lods[dst_lod_index].map.get_block_mut(dst_bpos) {
+                    block.set_modified(true);
+                    if dst_lod_index != last_lod_index && !block.needs_lodding() {
+                        block.set_needs_lodding(true);
+                        enqueue_next = true;
+                    }
+                }
+                if enqueue_next {
+                    blocks_to_process_per_lod[dst_lod_index].push(dst_bpos);
+                }
+
+                if let Some(out) = out_updated_blocks.as_deref_mut() {
+                    out.push(BlockLocation {
+                        position: dst_bpos,
+                        lod_index: dst_lod_index as u8,
+                    });
+                }
+
+                // Downscale source into the matching sub-region of the dst.
+                // `rel = src_bpos - (dst_bpos << 1)` selects one of the 2×2×2
+                // octants of the destination block; scaled by `half_bs` it
+                // gives the destination-local offset of that octant.
+                let rel = src_bpos - (dst_bpos << 1);
+                let dst_offset = rel * half_bs;
+
+                // Borrow src and dst blocks independently. `src_lod_index` is
+                // always less than `dst_lod_index`, so we split the LOD slice
+                // to convince the borrow checker the two borrows are disjoint.
+                let (src_lods, dst_lods) = self.lods.split_at_mut(dst_lod_index);
+                let Some(src_block) = src_lods[src_lod_index].map.get_block(src_bpos) else {
+                    continue;
+                };
+                let Some(dst_block) = dst_lods[0].map.get_block_mut(dst_bpos) else {
+                    continue;
+                };
+
+                // Copy the source voxels into a temporary so we don't hold a
+                // borrow of `src_block` while mutating `dst_block` (the two
+                // live in different LOD maps but share the same `&mut self`).
+                // `downscale_to` takes `&self` and `&mut dst`, and our two
+                // references come from disjoint LOD slices, so this is sound.
+                let src_size = src_block.voxels().size();
+                let dst_voxels = dst_block.voxels_mut();
+                src_block.voxels().downscale_to(dst_voxels, Vector3i::zero(), src_size, dst_offset);
+            }
+        }
+    }
+
     pub fn pre_generate_box(
         &mut self,
         voxel_box: Box3i,
@@ -385,7 +564,7 @@ impl VoxelData {
 
 #[cfg(test)]
 mod tests {
-    use super::VoxelData;
+    use super::{BlockLocation, VoxelData};
     use crate::generators::base::{GenResult, VoxelGenerator, VoxelQueryData};
     use crate::math::{Box3i, Vector3i};
     use crate::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelDataBlock, VoxelFormat};
@@ -684,5 +863,112 @@ mod tests {
         assert!(saves[0].voxels.is_some());
         assert!(!data.has_block(Vector3i::zero(), 0));
         assert!(!data.has_block(Vector3i::new(1, 0, 0), 0));
+    }
+
+    #[test]
+    fn update_lods_clears_needs_lodding_and_reports_touched_blocks() {
+        let mut data = VoxelData::new();
+        data.set_lod_count(2);
+        data.set_bounds(Box3i::new(Vector3i::zero(), Vector3i::splat(32)));
+        data.set_streaming_enabled(false);
+        data.set_full_load_completed(true);
+
+        // Two LOD0 blocks need LOD updates.
+        let channel = ChannelId::Type.index();
+        assert!(data.try_set_voxel(1, Vector3i::new(1, 1, 1), channel));
+        assert!(data.try_set_voxel(2, Vector3i::new(20, 1, 1), channel));
+        let modified = data.mark_area_modified(
+            Box3i::new(Vector3i::zero(), Vector3i::new(32, 16, 16)),
+            true,
+        );
+        assert_eq!(modified.len(), 2);
+
+        let mut updated = Vec::new();
+        data.update_lods(&modified, None, Some(&mut updated));
+
+        // LOD0 blocks: needs_lodding cleared and reported.
+        for &lod0_pos in &modified {
+            assert!(!data.get_block(lod0_pos, 0).unwrap().needs_lodding());
+        }
+        // Both LOD0 positions map to the same LOD1 block (0,0,0).
+        assert!(updated.contains(&BlockLocation {
+            position: Vector3i::zero(),
+            lod_index: 0,
+        }));
+        assert!(updated.contains(&BlockLocation {
+            position: Vector3i::new(1, 0, 0),
+            lod_index: 0,
+        }));
+        assert!(updated.contains(&BlockLocation {
+            position: Vector3i::zero(),
+            lod_index: 1,
+        }));
+        // The destination LOD1 block is now modified.
+        assert!(data.get_block(Vector3i::zero(), 1).unwrap().is_modified());
+    }
+
+    #[test]
+    fn update_lods_downscales_lod0_edits_into_lod1_octants() {
+        let mut data = VoxelData::new();
+        data.set_lod_count(2);
+        data.set_bounds(Box3i::new(Vector3i::zero(), Vector3i::splat(32)));
+        data.set_streaming_enabled(false);
+        data.set_full_load_completed(true);
+        let channel = ChannelId::Type.index();
+
+        // Edit a single LOD0 voxel inside block (1,0,0). This block maps to
+        // the +X octant of LOD1 block (0,0,0). Local coords (4,4,6) are chosen
+        // so the 2:1 nearest-neighbor sample lands at LOD1 (10,2,3).
+        let edited_pos = Vector3i::new(20, 4, 6);
+        assert!(data.try_set_voxel(7, edited_pos, channel));
+        let modified = data.mark_area_modified(
+            Box3i::new(edited_pos, edited_pos + Vector3i::splat(1)),
+            true,
+        );
+        assert_eq!(modified, vec![Vector3i::new(1, 0, 0)]);
+
+        // Pre-create the destination LOD1 block so downscaling lands in it
+        // (matches the streaming-pyramid invariant that parents are resident).
+        let lod1_voxels = VoxelBuffer::with_size(Vector3i::splat(data.block_size() as i32));
+        assert!(data.try_set_block(
+            Vector3i::zero(),
+            VoxelDataBlock::with_voxels(lod1_voxels, 1),
+        ));
+
+        data.update_lods(&modified, None, None);
+
+        // The edited LOD0 voxel (20,4,6) maps to LOD1 (10,2,3) via 2:1 nearest.
+        // In LOD1 block-local coords (block_size 16) that is (10,2,3).
+        let lod1_block = data.get_block(Vector3i::zero(), 1).unwrap();
+        assert_eq!(lod1_block.voxels().get_voxel(10, 2, 3, channel), 7);
+        // A voxel outside the downscaled octant stays at the default.
+        assert_eq!(lod1_block.voxels().get_voxel(0, 0, 0, channel), 0);
+    }
+
+    #[test]
+    fn update_lods_generates_missing_destination_in_non_streaming_mode() {
+        let mut data = VoxelData::new();
+        data.set_lod_count(2);
+        data.set_bounds(Box3i::new(Vector3i::zero(), Vector3i::splat(32)));
+        data.set_streaming_enabled(false);
+        data.set_full_load_completed(true);
+        let channel = ChannelId::Type.index();
+
+        assert!(data.try_set_voxel(11, Vector3i::new(1, 1, 1), channel));
+        let modified = data.mark_area_modified(
+            Box3i::new(Vector3i::zero(), Vector3i::new(16, 16, 16)),
+            true,
+        );
+
+        // The destination LOD1 block doesn't exist; the generator must fill it
+        // before the downscale runs. The recorder lets us observe the call.
+        let mut generator = RecordingGenerator::default();
+        data.update_lods(&modified, Some(&mut generator), None);
+
+        // LOD1 block (0,0,0) was generated on demand and is now present.
+        assert!(data.has_block(Vector3i::zero(), 1));
+        assert!(generator.calls.iter().any(|(origin, lod)| {
+            *lod == 1 && origin.x == 0 && origin.y == 0 && origin.z == 0
+        }));
     }
 }

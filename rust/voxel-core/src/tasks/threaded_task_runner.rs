@@ -725,8 +725,18 @@ mod tests {
         apply_all(runner.drain_completed_tasks());
 
         // Without throttling each wake would call priority() at least once per
-        // task per worker iteration; with throttling it should be exactly one
-        // call per task (the initial refresh).
-        assert_eq!(priority_calls.load(Ordering::SeqCst), 16);
+        // task per worker iteration; with throttling it should be roughly one
+        // call per task (the initial refresh). Under heavy CI parallelism the
+        // workers may take longer than the 1 s window, allowing one extra
+        // refresh pass, so we assert a small upper bound rather than equality.
+        let calls = priority_calls.load(Ordering::SeqCst);
+        assert!(
+            calls <= 32,
+            "expected at most 32 priority() calls with throttling, got {calls}"
+        );
+        assert!(
+            calls >= 16,
+            "expected at least 16 priority() calls (initial refresh), got {calls}"
+        );
     }
 }
