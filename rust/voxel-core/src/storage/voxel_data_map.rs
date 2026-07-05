@@ -3,7 +3,8 @@
 use crate::constants::voxel_constants::{DEFAULT_BLOCK_SIZE_PO2, MAX_LOD};
 use crate::math::{Box3i, Vector3i};
 use crate::storage::{
-    voxel_buffer::SDF_FAR_OUTSIDE, ChannelId, VoxelBuffer, VoxelDataBlock, VoxelFormat,
+    voxel_buffer::{MAX_CHANNELS, SDF_FAR_OUTSIDE},
+    ChannelId, VoxelBuffer, VoxelDataBlock, VoxelFormat,
 };
 use std::collections::HashMap;
 
@@ -196,6 +197,61 @@ impl VoxelDataMap {
         block_box.all_cells_match(|pos| self.has_block(pos))
     }
 
+    pub fn copy(&self, min_pos: Vector3i, dst_buffer: &mut VoxelBuffer, channels_mask: u32) {
+        let channels = channel_indices_from_mask(channels_mask);
+        for &channel_index in &channels {
+            dst_buffer.set_channel_depth(channel_index, self.format.depths[channel_index]);
+        }
+
+        for dst_pos in Box3i::new(Vector3i::zero(), dst_buffer.size()).iter_cells_zxy() {
+            let src_pos = min_pos + dst_pos;
+            for &channel_index in &channels {
+                let value = self.get_voxel(src_pos, channel_index);
+                dst_buffer.set_voxel(value, dst_pos.x, dst_pos.y, dst_pos.z, channel_index);
+            }
+        }
+    }
+
+    pub fn paste(
+        &mut self,
+        min_pos: Vector3i,
+        src_buffer: &VoxelBuffer,
+        channels_mask: u32,
+        create_new_blocks: bool,
+    ) {
+        let channels = channel_indices_from_mask(channels_mask);
+        for src_pos in Box3i::new(Vector3i::zero(), src_buffer.size()).iter_cells_zxy() {
+            let dst_pos = min_pos + src_pos;
+            if create_new_blocks {
+                for &channel_index in &channels {
+                    let value =
+                        src_buffer.get_voxel(src_pos.x, src_pos.y, src_pos.z, channel_index);
+                    self.set_voxel(value, dst_pos, channel_index);
+                }
+                continue;
+            }
+
+            let block_pos = self.voxel_to_block(dst_pos);
+            let local_pos = self.to_local(dst_pos);
+            let Some(block) = self.get_block_mut(block_pos) else {
+                continue;
+            };
+            if !block.has_voxels() {
+                continue;
+            }
+            for &channel_index in &channels {
+                let value = src_buffer.get_voxel(src_pos.x, src_pos.y, src_pos.z, channel_index);
+                block.voxels_mut().set_voxel(
+                    value,
+                    local_pos.x,
+                    local_pos.y,
+                    local_pos.z,
+                    channel_index,
+                );
+            }
+        }
+    }
+
     fn get_or_create_block_at_voxel_pos(&mut self, pos: Vector3i) -> &mut VoxelDataBlock {
         let block_pos = self.voxel_to_block(pos);
         if !self.blocks.contains_key(&block_pos) {
@@ -243,6 +299,12 @@ fn channel_id_from_index(channel_index: usize) -> ChannelId {
         7 => ChannelId::Data7,
         _ => panic!("channel index is outside the supported range"),
     }
+}
+
+fn channel_indices_from_mask(channels_mask: u32) -> Vec<usize> {
+    (0..MAX_CHANNELS)
+        .filter(|channel_index| (channels_mask & (1u32 << channel_index)) != 0)
+        .collect()
 }
 
 #[cfg(test)]
@@ -376,5 +438,81 @@ mod tests {
 
         map.set_empty_block(Vector3i::new(1, 0, 0), true);
         assert!(map.is_area_fully_loaded(area));
+    }
+
+    #[test]
+    fn paste_fill_writes_across_blocks_and_leaves_neighbors_default() {
+        let channel = ChannelId::Type.index();
+        let channels_mask = 1u32 << channel;
+        let mut source = VoxelBuffer::with_size(Vector3i::new(32, 16, 32));
+        source.fill(1, channel);
+        let mut map = VoxelDataMap::new(0);
+        let area = Box3i::new(Vector3i::new(10, 10, 10), source.size());
+
+        map.paste(area.position, &source, channels_mask, true);
+
+        assert!(area.all_cells_match(|pos| map.get_voxel(pos, channel) == 1));
+
+        let mut outside_is_default = true;
+        area.padded(1).for_inner_outline(|pos| {
+            if map.get_voxel(pos, channel) != 0 {
+                outside_is_default = false;
+            }
+        });
+        assert!(outside_is_default);
+    }
+
+    #[test]
+    fn paste_without_create_skips_missing_and_empty_blocks() {
+        let channel = ChannelId::Type.index();
+        let mut source = VoxelBuffer::with_size(Vector3i::new(2, 2, 2));
+        source.fill(5, channel);
+        let mut map = VoxelDataMap::new(0);
+
+        map.paste(Vector3i::zero(), &source, 1u32 << channel, false);
+
+        assert_eq!(map.block_count(), 0);
+        assert_eq!(map.get_voxel(Vector3i::zero(), channel), 0);
+
+        map.set_empty_block(Vector3i::zero(), true);
+        map.paste(Vector3i::zero(), &source, 1u32 << channel, false);
+
+        assert_eq!(map.block_count(), 1);
+        assert!(!map.get_block(Vector3i::zero()).unwrap().has_voxels());
+        assert_eq!(map.get_voxel(Vector3i::zero(), channel), 0);
+    }
+
+    #[test]
+    fn copy_round_trips_pasted_voxels_across_blocks() {
+        let channel = ChannelId::Type.index();
+        let channels_mask = 1u32 << channel;
+        let area = Box3i::new(Vector3i::new(10, 10, 10), Vector3i::new(32, 16, 32));
+        let mut source = VoxelBuffer::with_size(area.size);
+        for pos in Box3i::new(Vector3i::zero(), source.size()).iter_cells_zxy() {
+            let value = if pos.x > 0
+                && pos.y > 0
+                && pos.z > 0
+                && pos.x < source.size().x - 1
+                && pos.y < source.size().y - 1
+                && pos.z < source.size().z - 1
+            {
+                9
+            } else {
+                0
+            };
+            source.set_voxel(value, pos.x, pos.y, pos.z, channel);
+        }
+        let mut map = VoxelDataMap::new(0);
+        map.paste(area.position, &source, channels_mask, true);
+        let mut copied = VoxelBuffer::with_size(area.size);
+
+        map.copy(area.position, &mut copied, channels_mask);
+
+        assert!(
+            Box3i::new(Vector3i::zero(), area.size).all_cells_match(|pos| {
+                copied.get_voxel(pos.x, pos.y, pos.z, channel)
+                    == source.get_voxel(pos.x, pos.y, pos.z, channel)
+            })
+        );
     }
 }
