@@ -17,7 +17,7 @@ pub mod voxel_memory_pool;
 pub use buffer::{DenseVoxelBuffer, VoxelBufferRead};
 pub use depth::ChannelDepth;
 pub use voxel_buffer::{Allocator, Channel, ChannelId, Compression, VoxelBuffer};
-pub use voxel_data::VoxelData;
+pub use voxel_data::{BlockToSave, VoxelData};
 pub use voxel_data_block::VoxelDataBlock;
 pub use voxel_data_map::VoxelDataMap;
 pub use voxel_format::{DepthRange, VoxelFormat};

@@ -6,6 +6,7 @@
 //! and stream task integration are layered on top in later Phase 4 steps.
 
 use crate::constants::voxel_constants::MAX_LOD;
+use crate::generators::base::{VoxelGenerator, VoxelQueryData};
 use crate::math::{Box3i, Vector3i};
 use crate::storage::{
     voxel_buffer::{raw_voxel_to_real, real_to_raw_voxel, SDF_FAR_OUTSIDE},
@@ -23,6 +24,13 @@ impl VoxelDataLod {
         map.set_format(format);
         Self { map }
     }
+}
+
+#[derive(Debug)]
+pub struct BlockToSave {
+    pub voxels: Option<VoxelBuffer>,
+    pub position: Vector3i,
+    pub lod_index: u8,
 }
 
 #[derive(Debug)]
@@ -220,16 +228,7 @@ impl VoxelData {
         if self.lods[lod_index].map.has_block(block_pos) {
             return false;
         }
-        match block.into_voxels() {
-            Some(voxels) => {
-                self.lods[lod_index]
-                    .map
-                    .set_block_buffer(block_pos, voxels, false);
-            }
-            None => {
-                self.lods[lod_index].map.set_empty_block(block_pos, false);
-            }
-        }
+        self.lods[lod_index].map.set_block(block_pos, block, false);
         true
     }
 
@@ -267,6 +266,116 @@ impl VoxelData {
         newly_needing_lod
     }
 
+    pub fn pre_generate_box(
+        &mut self,
+        voxel_box: Box3i,
+        mut generator: Option<&mut dyn VoxelGenerator>,
+    ) -> usize {
+        let mut generated_count = 0;
+        let data_block_size = self.block_size() as i32;
+        for lod_index in 0..self.lods.len() {
+            let lod_block_size = data_block_size << lod_index;
+            let block_box = voxel_box.downscaled(lod_block_size);
+            for block_pos in block_box.iter_cells_zxy() {
+                let should_generate = match self.lods[lod_index].map.get_block(block_pos) {
+                    Some(block) => !block.has_voxels(),
+                    None => !self.streaming_enabled,
+                };
+                if !should_generate {
+                    continue;
+                }
+
+                let mut voxels = self.create_block_buffer();
+                if let Some(generator) = generator.as_deref_mut() {
+                    generator.generate_block(VoxelQueryData {
+                        buffer: &mut voxels,
+                        origin_in_voxels: block_pos * lod_block_size,
+                        lod: lod_index as u32,
+                    });
+                }
+
+                if self.lods[lod_index]
+                    .map
+                    .get_block(block_pos)
+                    .is_some_and(|block| block.has_voxels())
+                {
+                    continue;
+                }
+
+                self.lods[lod_index]
+                    .map
+                    .set_block_buffer(block_pos, voxels, true);
+                generated_count += 1;
+            }
+        }
+        generated_count
+    }
+
+    pub fn consume_block_modifications(&mut self, block_pos: Vector3i) -> Option<BlockToSave> {
+        self.consume_block_modifications_at(block_pos, 0)
+    }
+
+    pub fn consume_all_modifications(&mut self) -> Vec<BlockToSave> {
+        let mut saves = Vec::new();
+        for lod_index in 0..self.lods.len() {
+            let block_positions: Vec<_> = self.lods[lod_index].map.block_positions().collect();
+            for block_pos in block_positions {
+                if let Some(save) = self.consume_block_modifications_at(block_pos, lod_index) {
+                    saves.push(save);
+                }
+            }
+        }
+        saves
+    }
+
+    fn consume_block_modifications_at(
+        &mut self,
+        block_pos: Vector3i,
+        lod_index: usize,
+    ) -> Option<BlockToSave> {
+        let lod = self.lods.get_mut(lod_index)?;
+        let block = lod.map.get_block_mut(block_pos)?;
+        if !block.is_modified() {
+            return None;
+        }
+        let voxels = if block.has_voxels() {
+            Some(block.voxels().copy_to_owned())
+        } else {
+            None
+        };
+        block.set_modified(false);
+        Some(BlockToSave {
+            voxels,
+            position: block_pos,
+            lod_index: lod_index as u8,
+        })
+    }
+
+    pub fn unload_blocks(
+        &mut self,
+        blocks_box: Box3i,
+        lod_index: usize,
+        collect_modified: bool,
+    ) -> Vec<BlockToSave> {
+        let Some(lod) = self.lods.get_mut(lod_index) else {
+            return Vec::new();
+        };
+        let mut saves = Vec::new();
+        for block_pos in blocks_box.iter_cells_zxy() {
+            let Some(block) = lod.map.remove_block(block_pos) else {
+                continue;
+            };
+            if collect_modified && block.is_modified() {
+                saves.push(BlockToSave {
+                    voxels: block.into_voxels(),
+                    position: block_pos,
+                    lod_index: lod_index as u8,
+                });
+            }
+        }
+        saves
+    }
+
     pub fn get_block(&self, block_pos: Vector3i, lod_index: usize) -> Option<&VoxelDataBlock> {
         self.lods
             .get(lod_index)
@@ -277,8 +386,27 @@ impl VoxelData {
 #[cfg(test)]
 mod tests {
     use super::VoxelData;
+    use crate::generators::base::{GenResult, VoxelGenerator, VoxelQueryData};
     use crate::math::{Box3i, Vector3i};
     use crate::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelDataBlock, VoxelFormat};
+
+    #[derive(Default)]
+    struct RecordingGenerator {
+        calls: Vec<(Vector3i, u32)>,
+    }
+
+    impl VoxelGenerator for RecordingGenerator {
+        fn generate_block(&mut self, input: VoxelQueryData<'_>) -> GenResult {
+            self.calls.push((input.origin_in_voxels, input.lod));
+            let value = 10 + input.lod as u64 + input.origin_in_voxels.x as u64;
+            input.buffer.fill(value, ChannelId::Type.index());
+            GenResult::default()
+        }
+
+        fn used_channels_mask(&self) -> u32 {
+            1 << ChannelId::Type.index()
+        }
+    }
 
     #[test]
     fn lod_count_resizes_maps_and_reset_preserves_settings() {
@@ -415,5 +543,146 @@ mod tests {
             true,
         );
         assert!(second.is_empty());
+    }
+
+    #[test]
+    fn pre_generate_box_non_streaming_generates_missing_lod_blocks() {
+        let mut data = VoxelData::new();
+        data.set_lod_count(2);
+        data.set_streaming_enabled(false);
+        let mut generator = RecordingGenerator::default();
+
+        let generated = data.pre_generate_box(
+            Box3i::new(Vector3i::zero(), Vector3i::new(32, 16, 16)),
+            Some(&mut generator),
+        );
+
+        assert_eq!(generated, 3);
+        assert_eq!(
+            generator.calls,
+            vec![
+                (Vector3i::new(0, 0, 0), 0),
+                (Vector3i::new(16, 0, 0), 0),
+                (Vector3i::new(0, 0, 0), 1),
+            ]
+        );
+        assert_eq!(
+            data.get_block(Vector3i::new(1, 0, 0), 0)
+                .unwrap()
+                .voxels()
+                .get_voxel(0, 0, 0, ChannelId::Type.index()),
+            26
+        );
+        assert_eq!(
+            data.get_block(Vector3i::zero(), 1)
+                .unwrap()
+                .voxels()
+                .get_voxel(0, 0, 0, ChannelId::Type.index()),
+            11
+        );
+    }
+
+    #[test]
+    fn pre_generate_box_streaming_only_fills_existing_empty_blocks() {
+        let mut data = VoxelData::new();
+        let block_pos = Vector3i::zero();
+        assert!(data.try_set_block(block_pos, VoxelDataBlock::empty(0)));
+        let mut generator = RecordingGenerator::default();
+
+        let generated = data.pre_generate_box(
+            Box3i::new(Vector3i::zero(), Vector3i::new(32, 16, 16)),
+            Some(&mut generator),
+        );
+
+        assert_eq!(generated, 1);
+        assert!(data.try_get_block_voxels(block_pos).is_some());
+        assert!(!data.has_block(Vector3i::new(1, 0, 0), 0));
+    }
+
+    #[test]
+    fn consume_block_modifications_copies_voxels_and_clears_modified_flag() {
+        let mut data = VoxelData::new();
+        data.set_bounds(Box3i::new(Vector3i::zero(), Vector3i::new(16, 16, 16)));
+        data.set_streaming_enabled(false);
+        data.set_full_load_completed(true);
+        let channel = ChannelId::Type.index();
+        assert!(data.try_set_voxel(7, Vector3i::new(1, 1, 1), channel));
+        data.mark_area_modified(
+            Box3i::new(Vector3i::zero(), Vector3i::new(16, 16, 16)),
+            false,
+        );
+
+        let mut save = data
+            .consume_block_modifications(Vector3i::zero())
+            .expect("modified block should be consumed");
+
+        assert_eq!(save.position, Vector3i::zero());
+        assert_eq!(save.lod_index, 0);
+        assert_eq!(save.voxels.as_ref().unwrap().get_voxel(1, 1, 1, channel), 7);
+        save.voxels.as_mut().unwrap().set_voxel(9, 1, 1, 1, channel);
+        assert_eq!(data.get_voxel(Vector3i::new(1, 1, 1), channel, 99), 7);
+        assert!(!data.get_block(Vector3i::zero(), 0).unwrap().is_modified());
+        assert!(data.consume_block_modifications(Vector3i::zero()).is_none());
+    }
+
+    #[test]
+    fn consume_all_modifications_collects_all_lods() {
+        let mut data = VoxelData::new();
+        data.set_lod_count(2);
+        data.set_bounds(Box3i::new(Vector3i::zero(), Vector3i::new(16, 16, 16)));
+        data.set_streaming_enabled(false);
+        data.set_full_load_completed(true);
+        assert!(data.try_set_voxel(3, Vector3i::new(1, 1, 1), ChannelId::Type.index()));
+        data.mark_area_modified(
+            Box3i::new(Vector3i::zero(), Vector3i::new(16, 16, 16)),
+            false,
+        );
+
+        let mut lod1_voxels = VoxelBuffer::with_size(Vector3i::splat(data.block_size() as i32));
+        lod1_voxels.set_voxel(4, 0, 0, 0, ChannelId::Type.index());
+        let mut lod1_block = VoxelDataBlock::with_voxels(lod1_voxels, 1);
+        lod1_block.set_modified(true);
+        assert!(data.try_set_block(Vector3i::new(2, 0, 0), lod1_block));
+
+        let saves = data.consume_all_modifications();
+
+        assert_eq!(saves.len(), 2);
+        assert!(saves
+            .iter()
+            .any(|save| save.position == Vector3i::zero() && save.lod_index == 0));
+        assert!(saves
+            .iter()
+            .any(|save| save.position == Vector3i::new(2, 0, 0) && save.lod_index == 1));
+        assert!(!data.get_block(Vector3i::zero(), 0).unwrap().is_modified());
+        assert!(!data
+            .get_block(Vector3i::new(2, 0, 0), 1)
+            .unwrap()
+            .is_modified());
+    }
+
+    #[test]
+    fn unload_blocks_removes_blocks_and_returns_modified_voxels_to_save() {
+        let mut data = VoxelData::new();
+        data.set_bounds(Box3i::new(Vector3i::zero(), Vector3i::new(32, 16, 16)));
+        data.set_streaming_enabled(false);
+        data.set_full_load_completed(true);
+        assert!(data.try_set_voxel(5, Vector3i::new(1, 1, 1), ChannelId::Type.index()));
+        assert!(data.try_set_voxel(6, Vector3i::new(20, 1, 1), ChannelId::Type.index()));
+        data.mark_area_modified(
+            Box3i::new(Vector3i::zero(), Vector3i::new(16, 16, 16)),
+            false,
+        );
+
+        let saves = data.unload_blocks(
+            Box3i::new(Vector3i::zero(), Vector3i::new(2, 1, 1)),
+            0,
+            true,
+        );
+
+        assert_eq!(saves.len(), 1);
+        assert_eq!(saves[0].position, Vector3i::zero());
+        assert!(saves[0].voxels.is_some());
+        assert!(!data.has_block(Vector3i::zero(), 0));
+        assert!(!data.has_block(Vector3i::new(1, 0, 0), 0));
     }
 }

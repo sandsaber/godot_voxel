@@ -162,6 +162,25 @@ impl VoxelDataMap {
             .expect("block exists after set_empty_block")
     }
 
+    pub fn set_block(
+        &mut self,
+        block_pos: Vector3i,
+        block: VoxelDataBlock,
+        overwrite: bool,
+    ) -> &mut VoxelDataBlock {
+        assert_eq!(
+            block.lod_index(),
+            self.lod_index,
+            "block LOD must match VoxelDataMap LOD"
+        );
+        if !self.blocks.contains_key(&block_pos) || overwrite {
+            self.blocks.insert(block_pos, block);
+        }
+        self.blocks
+            .get_mut(&block_pos)
+            .expect("block exists after set_block")
+    }
+
     pub fn remove_block(&mut self, block_pos: Vector3i) -> Option<VoxelDataBlock> {
         self.blocks.remove(&block_pos)
     }
@@ -190,6 +209,10 @@ impl VoxelDataMap {
 
     pub fn block_count(&self) -> usize {
         self.blocks.len()
+    }
+
+    pub fn block_positions(&self) -> impl Iterator<Item = Vector3i> + '_ {
+        self.blocks.keys().copied()
     }
 
     pub fn is_area_fully_loaded(&self, voxels_box: Box3i) -> bool {

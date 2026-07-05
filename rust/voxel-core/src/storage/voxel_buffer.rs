@@ -547,6 +547,26 @@ impl VoxelBuffer {
         dst.compression = Compression::Uniform;
     }
 
+    /// Copy all voxel data and channel depths into `dst`. Metadata is not part
+    /// of the Rust storage port yet, so this matches the voxel-data half of C++
+    /// `copy_to`.
+    pub fn copy_to(&self, dst: &mut VoxelBuffer) {
+        dst.create(self.size);
+        for ci in 0..MAX_CHANNELS {
+            dst.set_channel_depth(ci, self.channels[ci].depth);
+        }
+        dst.copy_channels_from(self);
+    }
+
+    pub fn copy_to_owned(&self) -> VoxelBuffer {
+        let mut dst = VoxelBuffer::new(self.allocator);
+        if let Some(pool) = &self.pool {
+            dst = dst.with_pool(pool.clone());
+        }
+        self.copy_to(&mut dst);
+        dst
+    }
+
     /// Copy a rectangular area of one channel from `other`. Matches the C++
     /// `copy_channel_from(other, src_min, src_max, dst_min, channel)` overload.
     pub fn copy_channel_from_area(
