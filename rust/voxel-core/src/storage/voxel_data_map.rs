@@ -203,11 +203,39 @@ impl VoxelDataMap {
             dst_buffer.set_channel_depth(channel_index, self.format.depths[channel_index]);
         }
 
-        for dst_pos in Box3i::new(Vector3i::zero(), dst_buffer.size()).iter_cells_zxy() {
-            let src_pos = min_pos + dst_pos;
+        let size = dst_buffer.size();
+        if size.x <= 0 || size.y <= 0 || size.z <= 0 {
+            return;
+        }
+
+        let max_pos = min_pos + size;
+        let min_block_pos = self.voxel_to_block(min_pos);
+        let max_block_pos = self.voxel_to_block(max_pos - Vector3i::splat(1)) + Vector3i::splat(1);
+        let block_size = Vector3i::splat(Self::BLOCK_SIZE as i32);
+
+        for block_pos in Box3i::from_min_max(min_block_pos, max_block_pos).iter_cells_zxy() {
+            let src_block_origin = self.block_to_voxel(block_pos);
+            if let Some(block) = self.get_block(block_pos).filter(|block| block.has_voxels()) {
+                for &channel_index in &channels {
+                    dst_buffer.copy_channel_from_area(
+                        block.voxels(),
+                        min_pos - src_block_origin,
+                        block.voxels().size(),
+                        Vector3i::zero(),
+                        channel_index,
+                    );
+                }
+                continue;
+            }
+
             for &channel_index in &channels {
-                let value = self.get_voxel(src_pos, channel_index);
-                dst_buffer.set_voxel(value, dst_pos.x, dst_pos.y, dst_pos.z, channel_index);
+                dst_buffer.fill_area(
+                    self.format
+                        .default_raw_value(channel_id_from_index(channel_index)),
+                    src_block_origin - min_pos,
+                    src_block_origin - min_pos + block_size,
+                    channel_index,
+                );
             }
         }
     }
@@ -220,32 +248,36 @@ impl VoxelDataMap {
         create_new_blocks: bool,
     ) {
         let channels = channel_indices_from_mask(channels_mask);
-        for src_pos in Box3i::new(Vector3i::zero(), src_buffer.size()).iter_cells_zxy() {
-            let dst_pos = min_pos + src_pos;
-            if create_new_blocks {
-                for &channel_index in &channels {
-                    let value =
-                        src_buffer.get_voxel(src_pos.x, src_pos.y, src_pos.z, channel_index);
-                    self.set_voxel(value, dst_pos, channel_index);
-                }
-                continue;
-            }
 
-            let block_pos = self.voxel_to_block(dst_pos);
-            let local_pos = self.to_local(dst_pos);
-            let Some(block) = self.get_block_mut(block_pos) else {
+        let size = src_buffer.size();
+        if size.x <= 0 || size.y <= 0 || size.z <= 0 {
+            return;
+        }
+
+        let max_pos = min_pos + size;
+        let min_block_pos = self.voxel_to_block(min_pos);
+        let max_block_pos = self.voxel_to_block(max_pos - Vector3i::splat(1)) + Vector3i::splat(1);
+
+        for block_pos in Box3i::from_min_max(min_block_pos, max_block_pos).iter_cells_zxy() {
+            let dst_block_origin = self.block_to_voxel(block_pos);
+            let block = if create_new_blocks {
+                let block_min_pos = self.block_to_voxel(block_pos);
+                Some(self.get_or_create_block_at_voxel_pos(block_min_pos))
+            } else {
+                self.get_block_mut(block_pos)
+            };
+            let Some(block) = block else {
                 continue;
             };
             if !block.has_voxels() {
                 continue;
             }
             for &channel_index in &channels {
-                let value = src_buffer.get_voxel(src_pos.x, src_pos.y, src_pos.z, channel_index);
-                block.voxels_mut().set_voxel(
-                    value,
-                    local_pos.x,
-                    local_pos.y,
-                    local_pos.z,
+                block.voxels_mut().copy_channel_from_area(
+                    src_buffer,
+                    Vector3i::zero(),
+                    size,
+                    min_pos - dst_block_origin,
                     channel_index,
                 );
             }
@@ -618,6 +650,34 @@ mod tests {
                     == source.get_voxel(pos.x, pos.y, pos.z, channel)
             })
         );
+    }
+
+    #[test]
+    fn copy_fills_missing_blocks_with_channel_defaults() {
+        let channel = ChannelId::Type.index();
+        let channels_mask = 1u32 << channel;
+        let mut map = VoxelDataMap::new(0);
+        map.set_voxel(7, Vector3i::new(1, 1, 1), channel);
+
+        let mut copied = VoxelBuffer::with_size(Vector3i::new(32, 16, 16));
+        copied.fill(99, channel);
+        map.copy(Vector3i::zero(), &mut copied, channels_mask);
+
+        assert_eq!(copied.get_voxel(1, 1, 1, channel), 7);
+        assert_eq!(copied.get_voxel(20, 1, 1, channel), 0);
+    }
+
+    #[test]
+    fn paste_uniform_source_overwrites_existing_voxels() {
+        let channel = ChannelId::Type.index();
+        let channels_mask = 1u32 << channel;
+        let mut map = VoxelDataMap::new(0);
+        map.set_voxel(42, Vector3i::new(1, 1, 1), channel);
+        let source = VoxelBuffer::with_size(Vector3i::new(2, 2, 2));
+
+        map.paste(Vector3i::zero(), &source, channels_mask, true);
+
+        assert_eq!(map.get_voxel(Vector3i::new(1, 1, 1), channel), 0);
     }
 
     #[test]

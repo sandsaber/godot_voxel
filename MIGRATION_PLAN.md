@@ -400,6 +400,7 @@ Threading + terrain — самый сложный этап. Порядок по 
 | 4.6b | `storage::voxel_data_map` copy/paste | `storage/voxel_data_map.cpp` (`copy`, `paste`) | VoxelDataMap, VoxelBuffer | ✅ Basic channel-mask copy/paste across sparse blocks; `create_new_blocks=false` skips missing/empty blocks. Metadata, source/destination masks and generator callback copy remain pending |
 | 4.6c | `storage::voxel_data_map` source-mask paste | `storage/voxel_data_map.cpp` (`paste_masked`) | VoxelDataMap, VoxelBuffer | ✅ Source-mask paste skips voxels whose source mask channel equals the mask value. Destination writable masks, metadata and generator callback copy remain pending |
 | 4.6d | `storage::voxel_data_map` destination-mask paste | `storage/voxel_data_map.cpp` (`paste_masked`) | VoxelDataMap, VoxelBuffer | ✅ Destination writable-value mask for source-masked paste, matching negative-coordinate C++ parity test. Metadata and generator callback copy remain pending |
+| 4.6e | `storage::{voxel_buffer,voxel_data_map}` region copy/paste | `storage/voxel_buffer.cpp` (`copy_channel_from` area overload), `storage/voxel_data_map.cpp` (`copy`, `paste`) | `copy_3d_region_zxy`, VoxelBuffer, VoxelDataMap | ✅ Area copy helper with uniform/materialized channel handling; unmasked `VoxelDataMap::copy`/`paste` now iterate block regions instead of per voxel. Masked predicate paste remains per-voxel pending a dedicated helper |
 | 4.6 | `engine::voxel_data` | `engine/voxel_data.{h,cpp}` | VoxelDataMap, streams, generators, LOD | In progress: streaming voxel data grid, LOD updates, modification consumption, generator-backed pre-generation |
 | 4.7 | `terrain::voxel_terrain` / `voxel_lod_terrain` | `terrain/*` | VoxelData, meshers, Node3D | VoxelTerrain node (без Godot binding — pure logic) |
 | 4.8 | `generators::graph` (runtime) | `generators/graph/*` | `string::expression_parser` (Phase 1 deferred) | Graph-based procedural gen без редактора |
@@ -448,7 +449,7 @@ cargo bench                    # transvoxel benches (16³=143 / 32³=199 / 64³=
 - `zstd` (v0.13, C bindings через `zstd-sys`) — **optional feature** в voxel-core: C++
   поддерживает ZSTD всегда, но для дефолтной мобильной сборки вынесен за флаг `zstd`.
   Без флага ZSTD-streams возвращают `Error::Unsupported`.
-- `block-mesh` — **кандидат для blocky mesher** (Фаза 3), зрелый.
+- `block-mesh-rs` (https://github.com/bonsairobo/block-mesh-rs) — **кандидат для будущей оптимизации block/cube mesher нагрузки**: оценить адаптацию `visible_block_faces` и `greedy_quads` после Phase 4 terrain integration. Не добавлять зависимость автоматически: сначала сравнить с текущими `meshers::{cubes,blocky}` по parity, материалам/палитрам, прозрачности и LOD skirts.
 - `fastnoise-lite` (pure Rust) — **кандидат для замены FastNoise2** без C++ FFI.
 - Rapier3d — **primary для физики** (Фаза 3-4), Avian — fallback.
 

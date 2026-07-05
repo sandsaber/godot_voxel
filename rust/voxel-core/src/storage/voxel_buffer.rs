@@ -547,6 +547,62 @@ impl VoxelBuffer {
         dst.compression = Compression::Uniform;
     }
 
+    /// Copy a rectangular area of one channel from `other`. Matches the C++
+    /// `copy_channel_from(other, src_min, src_max, dst_min, channel)` overload.
+    pub fn copy_channel_from_area(
+        &mut self,
+        other: &VoxelBuffer,
+        mut src_min: Vector3i,
+        mut src_max: Vector3i,
+        mut dst_min: Vector3i,
+        channel_index: usize,
+    ) {
+        let src = &other.channels[channel_index];
+        assert_eq!(
+            self.channels[channel_index].depth, src.depth,
+            "copy_channel_from_area requires equal channel depths"
+        );
+
+        Vector3i::sort_min_max(&mut src_min, &mut src_max);
+        funcs::clip_copy_region(
+            &mut src_min,
+            &mut src_max,
+            other.size,
+            &mut dst_min,
+            self.size,
+        );
+        let area_size = src_max - src_min;
+        if area_size.x <= 0 || area_size.y <= 0 || area_size.z <= 0 {
+            return;
+        }
+
+        if src.compression == Compression::None {
+            if self.channels[channel_index].compression == Compression::Uniform {
+                self.decompress_channel(channel_index);
+            }
+            let item_size = self.channels[channel_index].depth.byte_count() as usize;
+            funcs::copy_3d_region_zxy(
+                &mut self.channels[channel_index].data,
+                self.size,
+                dst_min,
+                &src.data,
+                other.size,
+                src_min,
+                src_max,
+                item_size,
+            );
+            return;
+        }
+
+        if self.channels[channel_index].compression == Compression::Uniform
+            && self.channels[channel_index].defval == src.defval
+        {
+            return;
+        }
+
+        self.fill_area(src.defval, dst_min, dst_min + area_size, channel_index);
+    }
+
     /// Copy all channels from `other`. Matches `copy_channels_from`.
     pub fn copy_channels_from(&mut self, other: &VoxelBuffer) {
         for ci in 0..MAX_CHANNELS {
@@ -908,6 +964,62 @@ mod tests {
 
         dst.clear_channel(ChannelId::Type.index(), 0);
         assert_eq!(pool.used_blocks(), 0);
+    }
+
+    #[test]
+    fn copy_channel_from_area_copies_materialized_region() {
+        let channel = ChannelId::Type.index();
+        let mut src = VoxelBuffer::with_size(Vector3i::new(4, 4, 4));
+        for z in 0..4 {
+            for x in 0..4 {
+                for y in 0..4 {
+                    src.set_voxel((1 + y + 10 * x + 100 * z) as u64, x, y, z, channel);
+                }
+            }
+        }
+        let mut dst = VoxelBuffer::with_size(Vector3i::new(4, 4, 4));
+        dst.fill(999, channel);
+
+        dst.copy_channel_from_area(
+            &src,
+            Vector3i::new(1, 1, 1),
+            Vector3i::new(3, 3, 3),
+            Vector3i::zero(),
+            channel,
+        );
+
+        for z in 0..4 {
+            for x in 0..4 {
+                for y in 0..4 {
+                    let expected = if x < 2 && y < 2 && z < 2 {
+                        src.get_voxel(x + 1, y + 1, z + 1, channel)
+                    } else {
+                        999
+                    };
+                    assert_eq!(dst.get_voxel(x, y, z, channel), expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn copy_channel_from_area_uniform_source_overwrites_materialized_region() {
+        let channel = ChannelId::Type.index();
+        let src = VoxelBuffer::with_size(Vector3i::new(4, 4, 4));
+        let mut dst = VoxelBuffer::with_size(Vector3i::new(4, 4, 4));
+        dst.set_voxel(42, 1, 1, 1, channel);
+        dst.set_voxel(43, 2, 2, 2, channel);
+
+        dst.copy_channel_from_area(
+            &src,
+            Vector3i::zero(),
+            Vector3i::new(2, 2, 2),
+            Vector3i::new(1, 1, 1),
+            channel,
+        );
+
+        assert_eq!(dst.get_voxel(1, 1, 1, channel), 0);
+        assert_eq!(dst.get_voxel(2, 2, 2, channel), 0);
     }
 
     #[test]
