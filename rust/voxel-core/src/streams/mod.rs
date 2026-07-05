@@ -17,8 +17,10 @@
 //! - [`stream_cache`] — in-memory `(position, lod)` → `VoxelBuffer` cache
 //!   (`BlockCache`), ported from `voxel_stream_cache`. Single-threaded; the
 //!   C++ per-LoD `RWLock` is omitted (Phase 4).
+//! - [`voxel_stream`] — engine-agnostic base stream contract ported from
+//!   `streams/voxel_stream`.
 //! - [`stream_memory`] — fake in-memory `VoxelStream` for tests (`MemoryStream`),
-//!   ported from `voxel_stream_memory`. Engine base-class machinery is omitted.
+//!   ported from `voxel_stream_memory`.
 
 pub mod block_serializer;
 pub mod compressed_data;
@@ -26,6 +28,11 @@ pub mod instance_data;
 pub mod region;
 pub mod stream_cache;
 pub mod stream_memory;
+pub mod voxel_stream;
 
 pub use stream_cache::BlockCache;
-pub use stream_memory::{LoadResult, MemoryStream, SaveMode};
+pub use stream_memory::MemoryStream;
+pub use voxel_stream::{
+    LoadResult, SaveMode, StreamResult, VoxelLoadQuery, VoxelSaveQuery, VoxelStream,
+    VoxelStreamError,
+};

@@ -181,19 +181,20 @@ godot_voxel (fork)
   desktop/Android demo — нужен Phase 4 terrain node для интеграции
 
 ### Фаза 4: Terrain + threading (8-10 недель) — НАЧАТА
-- `util/thread` wrappers ✅; `util/tasks` value types ✅; thread pool/runner — далее
+- `util/thread` wrappers ✅; `util/tasks` value types ✅; `io::file_locker` ✅; `VoxelStream` base ✅
+- thread pool/runner + threaded stream tasks — далее
 - `terrain` (VoxelTerrain, VoxelLodTerrain)
 - `generators/graph` (runtime, без редактора)
-- `VoxelStream` base + threaded stream tasks (`*_task.cpp`)
-- `VoxelData` / streaming dependency, `file_locker`
+- `VoxelStream` base ✅; threaded stream tasks (`*_task.cpp`) — далее
+- `VoxelData` / streaming dependency
 - **GO-критерий:** стриминг бесконечного terrain'а работает, нет race conditions
   (проверка под ThreadSanitizer/loom)
 
   **План порта Phase 4 (порядок):**
   1. `util/thread/{mutex,rw_lock}` — ✅ wrappers over `std::sync` (recursive `Mutex`, `BinaryMutex`, `RwLock`)
-  2. `util/tasks/{task_priority,cancellation_token}` — ✅ value types; `task_scheduler`/`threaded_task` — next
-  3. `io::file_locker` — cross-process file locking (depends on mutex)
-  4. `streams::{voxel_stream base, load/save_block_data_task}` — threaded stream layer
+  2. `util/tasks/{task_priority,cancellation_token}` — ✅ value types; `task_scheduler`/`threaded_task` — pending
+  3. `io::file_locker` — ✅ per-path read/write coordination (depends on mutex)
+  4. `streams::{voxel_stream base, load/save_block_data_task}` — ✅ base trait; threaded load/save tasks pending
   5. `engine/{voxel_data,voxel_lod_terrain,voxel_terrain}` — streaming terrain core
   6. `generators/graph` runtime (needs `string::expression_parser` from Phase 1 deferred)
   7. Integration: VoxelTerrain node streaming + LOD + meshers end-to-end
@@ -362,7 +363,7 @@ Compute-слой. Каждый модуль — отдельный коммит,
 | `meshers::blocky::lod_skirts` | `meshers/blocky/blocky_lod_skirts.h` | ✅ +6 тестов (`append_skirts`/`append_side_skirts` — LOD seam-skirt geometry для всех 6 сторон. `TintSampler` → `skirt_depth: f32` (tint integration отложен до Фазы 5)) |
 | `meshers::blocky::shadow_occluders` | `meshers/blocky/blocky_shadow_occluders.{h,cpp}` | ✅ +12 тестов (`generate_shadow_occluders`/`generate_occluders_geometry`/`classify_chunk_occlusion_from_voxels` — shadow geometry из per-face box quads с точным winding per side; `ShadowOccluderArrays`; две bit-ordering конвенции reproduced + задокументированы) |
 | `streams::stream_cache` | `streams/voxel_stream_cache.{h,cpp}` | ✅ +8 тестов (`BlockCache` — in-memory `(Vector3i, lod) → VoxelBuffer` cache через `HashMap`. RWLock опущен — single-threaded как весь Rust-порт; threading в Фазе 4) |
-| `streams::stream_memory` | `streams/voxel_stream_memory.{h,cpp}` | ✅ +6 тестов (`MemoryStream` — "fake" in-memory stream для тестов: `save_block`/`load_block`/`SaveMode`/`LoadResult`. Godot `VoxelStream` base/Mutex → Фаза 4) |
+| `streams::stream_memory` | `streams/voxel_stream_memory.{h,cpp}` | ✅ +8 тестов (`MemoryStream` — "fake" in-memory stream для тестов: `save_block`/`load_block`/`SaveMode`/`LoadResult`; теперь реализует Phase 4 `VoxelStream` trait и защищает storage через `RwLock`) |
 | `generators::simple::HeightmapNoise` | `generators/simple/voxel_generator_noise_2d.{h,cpp}` | ✅ +6 тестов (2D-noise heightmap через `generate_heightmap`: `NoiseConfig` (Clone-able seed/freq/type → rebuild FastNoiseLite per call), optional `Curve` remap `[0,1]→height` с linear interpolation, `compress_uniform_channels` post-generation. Godot `Ref<Noise>`/`Ref<Curve>`/signal handling → Фаза 5) |
 
 **Фаза 3 (compute-слой) ЗАВЕРШЕНА.** Все engine-agnostic компоненты портированы:
@@ -372,7 +373,7 @@ Waves, Flat, Noise, HeightmapNoise), `meshers` (transvoxel, cubes, blocky с
 полным bake+mesher+skirts+shadow), `constants::cube_tables`, `io` extensions.
 
 **Отложено в Фазу 4** (threading/terrain): threaded tasks (`*_task.cpp`),
-`VoxelStream` base с Mutex, file_locker, `VoxelData`/streaming dependency.
+`VoxelData`/streaming dependency.
 
 **Отложено в Фазу 5** (Godot binding): все `Resource`/`GDCLASS`/`Ref<Material>`/
 `Ref<Mesh>`/editor слои (`VoxelMesherBlocky`, `VoxelBlockyLibraryBase`,
@@ -388,9 +389,9 @@ Threading + terrain — самый сложный этап. Порядок по 
 |---|---|---|---|---|
 | 4.1 | `thread::mutex` / `thread::rw_lock` | `util/thread/{mutex,rw_lock}.h` | `std::sync` | ✅ recursive `Mutex`, `BinaryMutex`, `RwLock`; открывает file_locker + VoxelStream |
 | 4.2a | `tasks::task_priority` / `tasks::cancellation_token` | `util/tasks/{task_priority,cancellation_token}.h` | atomics | ✅ packed 4-band priority + shared cancel flag |
-| 4.2b | `tasks::task_scheduler` / `tasks::threaded_task` | `util/tasks/*` | thread, `IThreadedTask` | Thread pool замена WorkerThreadPool |
-| 4.3 | `io::file_locker` | `util/io/file_locker.h` | mutex | Cross-process file locking (отложен с Фазы 1) |
-| 4.4 | `streams::voxel_stream` (base trait) | `streams/voxel_stream.{h,cpp}` | RWLock, VoxelBuffer | Абстрактный stream с `save_block`/`load_block` |
+| 4.2b | `tasks::task_scheduler` / `tasks::threaded_task` | `util/tasks/*` | thread, `IThreadedTask` | ⏳ Thread pool замена WorkerThreadPool |
+| 4.3 | `io::file_locker` | `util/io/file_locker.h` | mutex | ✅ RAII per-path read/write guards; entries persist like C++ map |
+| 4.4 | `streams::voxel_stream` (base trait) | `streams/voxel_stream.{h,cpp}` | RWLock, VoxelBuffer | ✅ `VoxelStream: Send + Sync`, `LoadResult`/`SaveMode`, batch defaults; `MemoryStream` impl |
 | 4.5 | `streams::{load,save}_block_data_task` | `streams/*_task.cpp` | tasks, VoxelStream, VoxelData | Threaded stream I/O |
 | 4.6 | `engine::voxel_data` | `engine/voxel_data.{h,cpp}` | VoxelBuffer, streams, generators, LOD | Streaming voxel data grid (ядро terrain) |
 | 4.7 | `terrain::voxel_terrain` / `voxel_lod_terrain` | `terrain/*` | VoxelData, meshers, Node3D | VoxelTerrain node (без Godot binding — pure logic) |

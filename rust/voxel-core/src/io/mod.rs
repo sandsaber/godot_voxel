@@ -9,10 +9,13 @@
 //!
 //! ## Deferred
 //!
-//! **Deferred to Phase 4** (terrain/threading): `file_locker.h` — per-path
-//! read/write locking built on the newly ported thread primitives.
+//! Phase 4 adds [`file_locker`] for per-path read/write coordination used by
+//! stream backends.
 
+pub mod file_locker;
 pub mod log;
 pub mod serialization;
 pub mod text_writer;
 pub mod voxel_file;
+
+pub use file_locker::FileLocker;

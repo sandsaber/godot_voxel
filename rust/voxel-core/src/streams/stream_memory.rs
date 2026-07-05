@@ -9,13 +9,10 @@
 //! ## What changed from C++
 //!
 //! The C++ `VoxelStreamMemory` inherits `VoxelStream` (a Godot `Resource`,
-//! which drags in `ClassDB`, `GDCLASS`, `_bind_methods`, `Mutex` per LoD, an
-//! `artificial_save_latency_usec` knob, batched `Span<VoxelQueryData>` entry
-//! points, and the instance-block / load-all-blocks overrides). All of that
-//! engine machinery is omitted here: the [`VoxelStream`] trait itself lands in
-//! Phase 4 alongside the locking strategy, and the latency knob, batched API
-//! and instance blocks are out of scope for this port. What remains is the data
-//! storage — the part tests actually exercise.
+//! which drags in `ClassDB`, `GDCLASS`, `_bind_methods`, per-LoD maps, an
+//! `artificial_save_latency_usec` knob and instance blocks). The Rust port keeps
+//! the engine-agnostic data storage and implements the Phase 4
+//! [`VoxelStream`](super::voxel_stream::VoxelStream) trait.
 //!
 //! The C++ storage is `FixedArray<Lod, MAX_LOD>` with one
 //! `StdUnorderedMap<Vector3i, VoxelChunk>` per LoD, each `VoxelChunk` wrapping
@@ -24,43 +21,18 @@
 //! is the same shape the sibling [`BlockCache`](crate::streams::BlockCache)
 //! uses; the per-LoD split only existed to shard the `Mutex`.
 
+use super::voxel_stream::{
+    LoadResult, SaveMode, StreamResult, VoxelLoadQuery, VoxelSaveQuery, VoxelStream,
+};
+use crate::constants::voxel_constants::MAX_LOD;
 use crate::math::Vector3i;
+use crate::storage::voxel_buffer::{ALL_CHANNELS_MASK, MAX_CHANNELS};
 use crate::storage::VoxelBuffer;
 use std::collections::HashMap;
-
-/// Outcome of a [`MemoryStream::load_block`] attempt. Mirrors the relevant
-/// subset of the C++ `VoxelStream::ResultCode` enum (only the two values a
-/// memory stream can actually return).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LoadResult {
-    /// The block was found and copied into the caller's buffer. Corresponds to
-    /// `RESULT_BLOCK_FOUND`.
-    Found,
-    /// No block is stored at the queried `(position, lod)`. Corresponds to
-    /// `RESULT_BLOCK_NOT_FOUND`.
-    NotFound,
-}
-
-/// Persistence capability reported by a stream. Mirrors the concept behind the
-/// C++ `VoxelStream` save/load contract: a stream may be read/write, read-only
-/// or non-persistent. The memory stream is read/write but its data lives only
-/// in RAM, hence [`SaveMode::Memory`].
-///
-/// This stands in for the spec's `get_supported_save_mode`: the underlying C++
-/// class does not declare that exact method (its closest kin are
-/// `supports_loading_all_blocks` and `get_used_channels_mask`), but a save-mode
-/// flag is what a `MemoryStream` test harness needs to pick a persistence
-/// strategy, so we expose it here.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum SaveMode {
-    /// The stream cannot persist blocks at all (a pure generator / read-only
-    /// source). Saves are dropped on the floor.
-    #[default]
-    None,
-    /// Blocks persist for the lifetime of the process — i.e. in memory. This is
-    /// what [`MemoryStream`] reports.
-    Memory,
-}
+use std::sync::{
+    PoisonError, RwLock as StdRwLock, RwLockReadGuard as StdRwLockReadGuard,
+    RwLockWriteGuard as StdRwLockWriteGuard,
+};
 
 /// In-memory voxel stream: stores block copies in a `HashMap`, never touching
 /// the filesystem. Ported from `VoxelStreamMemory` (data-storage half only).
@@ -72,7 +44,7 @@ pub enum SaveMode {
 /// populated by copy.
 #[derive(Debug, Default)]
 pub struct MemoryStream {
-    blocks: HashMap<(Vector3i, u8), VoxelBuffer>,
+    blocks: StdRwLock<HashMap<(Vector3i, u8), VoxelBuffer>>,
 }
 
 impl MemoryStream {
@@ -85,12 +57,12 @@ impl MemoryStream {
     /// equivalent (it exposes `load_all_blocks` instead), but the count is the
     /// natural invariant for tests.
     pub fn len(&self) -> usize {
-        self.blocks.len()
+        self.read_blocks().len()
     }
 
     /// Whether the stream holds any blocks.
     pub fn is_empty(&self) -> bool {
-        self.blocks.is_empty()
+        self.read_blocks().is_empty()
     }
 
     /// Whether the stream reports the given persistence mode. Always
@@ -108,13 +80,13 @@ impl MemoryStream {
     /// its own copy. Saving a block whose size is empty is silently ignored,
     /// matching the "you can't have meaningfully saved nothing" invariant the
     /// cache enforces too.
-    pub fn save_block(&mut self, position: Vector3i, lod: u8, voxels: &VoxelBuffer) {
+    pub fn save_block(&self, position: Vector3i, lod: u8, voxels: &VoxelBuffer) {
         if voxels.size().is_empty_size() {
             return;
         }
         let mut entry = VoxelBuffer::new(voxels.allocator());
         copy_buffer_into(voxels, &mut entry);
-        self.blocks.insert((position, lod), entry);
+        self.write_blocks().insert((position, lod), entry);
     }
 
     /// Load the block at `(position, lod)` into `out_voxels`. Ported from
@@ -130,7 +102,8 @@ impl MemoryStream {
         lod: u8,
         out_voxels: &mut VoxelBuffer,
     ) -> LoadResult {
-        let Some(stored) = self.blocks.get(&(position, lod)) else {
+        let blocks = self.read_blocks();
+        let Some(stored) = blocks.get(&(position, lod)) else {
             return LoadResult::NotFound;
         };
         copy_buffer_into(stored, out_voxels);
@@ -141,13 +114,52 @@ impl MemoryStream {
     /// deleted between a save and a subsequent load. No direct C++ counterpart
     /// (the memory stream never erases), but trivially faithful to the
     /// underlying map storage.
-    pub fn remove(&mut self, position: Vector3i, lod: u8) -> bool {
-        self.blocks.remove(&(position, lod)).is_some()
+    pub fn remove(&self, position: Vector3i, lod: u8) -> bool {
+        self.write_blocks().remove(&(position, lod)).is_some()
     }
 
     /// Drop every stored block.
-    pub fn clear(&mut self) {
-        self.blocks.clear();
+    pub fn clear(&self) {
+        self.write_blocks().clear();
+    }
+
+    fn read_blocks(&self) -> StdRwLockReadGuard<'_, HashMap<(Vector3i, u8), VoxelBuffer>> {
+        self.blocks.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn write_blocks(&self) -> StdRwLockWriteGuard<'_, HashMap<(Vector3i, u8), VoxelBuffer>> {
+        self.blocks.write().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl VoxelStream for MemoryStream {
+    fn load_voxel_block(&self, query: VoxelLoadQuery<'_>) -> StreamResult<LoadResult> {
+        Ok(self.load_block(
+            query.position_in_blocks,
+            query.lod_index,
+            query.voxel_buffer,
+        ))
+    }
+
+    fn save_voxel_block(&self, query: VoxelSaveQuery<'_>) -> StreamResult<()> {
+        self.save_block(
+            query.position_in_blocks,
+            query.lod_index,
+            query.voxel_buffer,
+        );
+        Ok(())
+    }
+
+    fn get_used_channels_mask(&self) -> u8 {
+        ALL_CHANNELS_MASK
+    }
+
+    fn get_lod_count(&self) -> u8 {
+        MAX_LOD as u8
+    }
+
+    fn get_supported_save_mode(&self) -> SaveMode {
+        SaveMode::Memory
     }
 }
 
@@ -159,6 +171,9 @@ fn copy_buffer_into(src: &VoxelBuffer, dst: &mut VoxelBuffer) {
     dst.create(src.size());
     // Mirrors `copy_to(_, /*copy_channels=*/true)`: copies depth, compression,
     // default value and raw bytes for all eight channels.
+    for ci in 0..MAX_CHANNELS {
+        dst.set_channel_depth(ci, src.channel_depth(ci));
+    }
     dst.copy_channels_from(src);
 }
 
@@ -166,7 +181,8 @@ fn copy_buffer_into(src: &VoxelBuffer, dst: &mut VoxelBuffer) {
 mod tests {
     use super::*;
     use crate::math::Vector3i;
-    use crate::storage::{Allocator, ChannelId, VoxelBuffer};
+    use crate::storage::{Allocator, ChannelDepth, ChannelId, VoxelBuffer};
+    use crate::streams::{VoxelLoadQuery, VoxelSaveQuery, VoxelStream};
 
     /// Build a small non-uniform block: a 2³ buffer with `value` written to one
     /// voxel in the Type channel, so a copy is observably different from a
@@ -191,7 +207,7 @@ mod tests {
 
     #[test]
     fn save_then_load_round_trips_block_data() {
-        let mut stream = MemoryStream::new();
+        let stream = MemoryStream::new();
         let pos = Vector3i::new(5, -3, 1);
         let stored = sample_block(123);
 
@@ -222,7 +238,7 @@ mod tests {
 
     #[test]
     fn save_overwrites_existing_block_at_same_key() {
-        let mut stream = MemoryStream::new();
+        let stream = MemoryStream::new();
         let pos = Vector3i::new(2, 2, 2);
 
         stream.save_block(pos, 0, &sample_block(1));
@@ -236,7 +252,7 @@ mod tests {
 
     #[test]
     fn save_ignores_empty_size_buffer() {
-        let mut stream = MemoryStream::new();
+        let stream = MemoryStream::new();
         let empty = VoxelBuffer::new(Allocator::Default); // size (0,0,0)
         stream.save_block(Vector3i::new(0, 0, 0), 0, &empty);
         assert!(stream.is_empty(), "empty-size buffer must not be stored");
@@ -244,7 +260,7 @@ mod tests {
 
     #[test]
     fn keys_distinct_on_position_and_lod() {
-        let mut stream = MemoryStream::new();
+        let stream = MemoryStream::new();
         let pos = Vector3i::new(1, 1, 1);
 
         stream.save_block(pos, 0, &sample_block(10));
@@ -257,5 +273,45 @@ mod tests {
         assert_eq!(stream.load_block(pos, 2, &mut b), LoadResult::Found);
         assert_eq!(type_voxel(&a, 1, 0, 1), 10);
         assert_eq!(type_voxel(&b, 1, 0, 1), 20);
+    }
+
+    #[test]
+    fn round_trips_custom_channel_depths() {
+        let stream = MemoryStream::new();
+        let pos = Vector3i::new(-4, 5, 6);
+        let mut stored = sample_block(0x1234_5678);
+        stored.set_channel_depth(ChannelId::Type.index(), ChannelDepth::Bit32);
+        stored.set_voxel(0x1234_5678, 1, 0, 1, ChannelId::Type.index());
+
+        stream.save_block(pos, 0, &stored);
+
+        let mut loaded = VoxelBuffer::new(Allocator::Default);
+        assert_eq!(stream.load_block(pos, 0, &mut loaded), LoadResult::Found);
+        assert_eq!(
+            loaded.channel_depth(ChannelId::Type.index()),
+            ChannelDepth::Bit32
+        );
+        assert_eq!(type_voxel(&loaded, 1, 0, 1), 0x1234_5678);
+    }
+
+    #[test]
+    fn implements_voxel_stream_contract() {
+        let stream = MemoryStream::new();
+        let pos = Vector3i::new(8, 0, -2);
+        let stored = sample_block(77);
+        stream
+            .save_voxel_block(VoxelSaveQuery::new(&stored, pos, 0))
+            .unwrap();
+
+        let mut loaded = VoxelBuffer::new(Allocator::Default);
+        let result = stream
+            .load_voxel_block(VoxelLoadQuery::new(&mut loaded, pos, 0))
+            .unwrap();
+
+        assert_eq!(result, LoadResult::Found);
+        assert_eq!(type_voxel(&loaded, 1, 0, 1), 77);
+        assert_eq!(stream.get_supported_save_mode(), SaveMode::Memory);
+        assert_eq!(stream.get_used_channels_mask(), ALL_CHANNELS_MASK);
+        assert_eq!(stream.get_lod_count(), MAX_LOD as u8);
     }
 }
