@@ -214,6 +214,173 @@ fn write_unpoisoned<T>(lock: &StdRwLock<T>) -> StdRwLockWriteGuard<'_, T> {
     lock.write().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Counting semaphore. Ported from `util/thread/semaphore.h` (header-only,
+/// built on `std::mutex` + `std::condition_variable`). Used as the blocking
+/// primitive inside [`SpatialLock3D`].
+///
+/// Hand-rolled with `Mutex<usize>` + `Condvar` to keep the crate dependency-
+/// free (the stdlib `Semaphore` is unstable; `parking_lot::Semaphore` would
+/// add a runtime dep).
+#[derive(Debug, Default)]
+pub struct Semaphore {
+    state: StdMutex<usize>,
+    cvar: Condvar,
+}
+
+impl Semaphore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_count(count: usize) -> Self {
+        Self {
+            state: StdMutex::new(count),
+            cvar: Condvar::new(),
+        }
+    }
+
+    /// Increment the counter and wake one waiter.
+    pub fn post(&self) {
+        let mut count = lock_unpoisoned(&self.state);
+        *count = count.saturating_add(1);
+        self.cvar.notify_one();
+    }
+
+    /// Block until the counter is non-zero, then decrement it.
+    pub fn wait(&self) {
+        let mut count = lock_unpoisoned(&self.state);
+        while *count == 0 {
+            count = wait_unpoisoned(&self.cvar, count);
+        }
+        *count -= 1;
+    }
+
+    /// Decrement the counter if non-zero; returns `true` on success.
+    pub fn try_wait(&self) -> bool {
+        let mut count = lock_unpoisoned(&self.state);
+        if *count == 0 {
+            return false;
+        }
+        *count -= 1;
+        true
+    }
+
+    pub fn count(&self) -> usize {
+        *lock_unpoisoned(&self.state)
+    }
+}
+
+/// Mode of a [`SpatialLock3D`] area guard. Mirrors C++ `SpatialLock3D::Mode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpatialLockMode {
+    Read,
+    Write,
+}
+
+/// Region-based read/write lock over 3D integer boxes.
+///
+/// **Stub implementation.** Ported from `util/thread/spatial_lock_3d.{h,cpp}`
+/// to preserve the C++ transcription surface — methods take the same
+/// arguments and the [`SpatialLock3D::Read`] / [`SpatialLock3D::Write`]
+/// guards exist so future port work on `VoxelData` can keep the per-method
+/// guard variables 1:1 with C++. The guards here are **no-ops**: they
+/// record nothing and provide no actual exclusion. Safety today comes from
+/// `VoxelData` taking `&mut self` for every mutation (the borrow checker
+/// enforces exclusivity at the type level).
+///
+/// When terrain worker threads land, replace this with a real
+/// `Vec<Box<Mode>>` + [`Semaphore`] retry loop (see C++
+/// `spatial_lock_3d.h:48-104`). The public API and guard types are designed
+/// to remain stable across that swap.
+#[derive(Debug, Default)]
+pub struct SpatialLock3D {
+    // Intentionally empty: the no-op stub provides no tracking. The field
+    // exists so the type still has non-zero size and a stable layout when
+    // the real implementation replaces it.
+    _placeholder: (),
+}
+
+impl SpatialLock3D {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// No-op: always succeeds. Real impl: returns `false` if an overlapping
+    /// box is held in a conflicting mode.
+    pub fn try_lock_read(&self, _bounds: crate::math::BoxBounds3i) -> bool {
+        true
+    }
+
+    /// No-op: always succeeds immediately.
+    pub fn lock_read(&self, _bounds: crate::math::BoxBounds3i) {}
+
+    /// No-op.
+    pub fn unlock_read(&self, _bounds: crate::math::BoxBounds3i) {}
+
+    /// No-op: always succeeds.
+    pub fn try_lock_write(&self, _bounds: crate::math::BoxBounds3i) -> bool {
+        true
+    }
+
+    /// No-op: always succeeds immediately.
+    pub fn lock_write(&self, _bounds: crate::math::BoxBounds3i) {}
+
+    /// No-op.
+    pub fn unlock_write(&self, _bounds: crate::math::BoxBounds3i) {}
+
+    /// No-op stub returns 0.
+    pub fn locked_boxes_count(&self) -> usize {
+        0
+    }
+
+    /// Convenience: acquire a read lock for `bounds` and return an RAII guard.
+    /// Mirrors the C++ `SpatialLock3D::Read` nested type.
+    pub fn read(&self, bounds: crate::math::BoxBounds3i) -> SpatialLockReadGuard<'_> {
+        self.lock_read(bounds);
+        SpatialLockReadGuard {
+            lock: self,
+            bounds,
+        }
+    }
+
+    /// Convenience: acquire a write lock for `bounds` and return an RAII guard.
+    /// Mirrors the C++ `SpatialLock3D::Write` nested type.
+    pub fn write(&self, bounds: crate::math::BoxBounds3i) -> SpatialLockWriteGuard<'_> {
+        self.lock_write(bounds);
+        SpatialLockWriteGuard {
+            lock: self,
+            bounds,
+        }
+    }
+}
+
+/// RAII read guard for [`SpatialLock3D`]. Releases on drop. No-op in the
+/// current stub; will call `unlock_read` once the lock is real.
+#[derive(Debug)]
+pub struct SpatialLockReadGuard<'a> {
+    lock: &'a SpatialLock3D,
+    bounds: crate::math::BoxBounds3i,
+}
+
+impl Drop for SpatialLockReadGuard<'_> {
+    fn drop(&mut self) {
+        self.lock.unlock_read(self.bounds);
+    }
+}
+
+/// RAII write guard for [`SpatialLock3D`]. Releases on drop.
+#[derive(Debug)]
+pub struct SpatialLockWriteGuard<'a> {
+    lock: &'a SpatialLock3D,
+    bounds: crate::math::BoxBounds3i,
+}
+
+impl Drop for SpatialLockWriteGuard<'_> {
+    fn drop(&mut self) {
+        self.lock.unlock_write(self.bounds);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{BinaryMutex, Mutex, RwLock};
@@ -262,5 +429,50 @@ mod tests {
         drop(writer);
         handle.join().unwrap();
         assert!(lock.read_try_lock().is_some());
+    }
+
+    #[test]
+    fn semaphore_try_wait_returns_false_at_zero_and_true_after_post() {
+        use super::Semaphore;
+        let sem = Semaphore::new();
+        assert_eq!(sem.count(), 0);
+        assert!(!sem.try_wait());
+        sem.post();
+        sem.post();
+        assert_eq!(sem.count(), 2);
+        assert!(sem.try_wait());
+        assert_eq!(sem.count(), 1);
+    }
+
+    #[test]
+    fn semaphore_wait_blocks_until_another_thread_posts() {
+        use super::Semaphore;
+        let sem = Arc::new(Semaphore::new());
+        let worker_sem = sem.clone();
+        let handle = std::thread::spawn(move || {
+            // Worker waits (will block until the main thread posts).
+            worker_sem.wait();
+        });
+        // Give the worker a moment to enter wait(), then post.
+        std::thread::sleep(Duration::from_millis(20));
+        sem.post();
+        handle.join().expect("worker should unblock after post");
+    }
+
+    #[test]
+    fn spatial_lock_3d_stub_provides_no_op_read_and_write_guards() {
+        use super::SpatialLock3D;
+        use crate::math::BoxBounds3i;
+        let lock = SpatialLock3D::new();
+        let bounds = BoxBounds3i::from_position(crate::math::Vector3i::new(1, 2, 3));
+        // Locks always succeed in the stub.
+        assert!(lock.try_lock_read(bounds));
+        assert!(lock.try_lock_write(bounds));
+        // Guards drop without panicking.
+        {
+            let _read = lock.read(bounds);
+            let _write = lock.write(bounds);
+        }
+        assert_eq!(lock.locked_boxes_count(), 0);
     }
 }
