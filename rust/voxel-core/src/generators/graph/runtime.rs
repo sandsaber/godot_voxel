@@ -43,7 +43,11 @@ pub enum GraphParam {
 /// What a node computes. Variants bundle parameters and a fixed-size list of
 /// input ports (matching the C++ `NodeType` port counts). Inputs that aren't
 /// connected default to `0.0` at execution time.
-#[derive(Debug, Clone, PartialEq)]
+//
+// Manual `Debug` because `FastNoiseLite`/`Arc<Curve>` don't implement it;
+// manual (skipped) `PartialEq` for the same reason — node identity is
+// established by `GraphNode::id`, not by structural equality.
+#[derive(Clone)]
 pub enum NodeKind {
     /// World X coordinate of the voxel (block-relative, scaled by LOD).
     InputX,
@@ -81,6 +85,108 @@ pub enum NodeKind {
         to_start: f32,
         to_end: f32,
     },
+    /// `floor(a)`.
+    Floor { a: Option<GraphPort> },
+    /// `fract(a)` (returns the fractional part).
+    Fract { a: Option<GraphPort> },
+    /// Euclidean distance from the origin in 2D: `sqrt(x*x + y*y)`.
+    Distance2D { x: Option<GraphPort>, y: Option<GraphPort> },
+    /// Euclidean distance from the origin in 3D: `sqrt(x*x + y*y + z*z)`.
+    Distance3D {
+        x: Option<GraphPort>,
+        y: Option<GraphPort>,
+        z: Option<GraphPort>,
+    },
+    /// Normalize a 3D direction `(x, y, z)` to unit length.
+    Normalize3D {
+        x: Option<GraphPort>,
+        y: Option<GraphPort>,
+        z: Option<GraphPort>,
+    },
+    /// `pow(a, b)`.
+    Pow { a: Option<GraphPort>, b: Option<GraphPort> },
+    /// `mix(a, b, t)` = `a*(1-t) + b*t`.
+    Mix {
+        a: Option<GraphPort>,
+        b: Option<GraphPort>,
+        t: Option<GraphPort>,
+    },
+    /// `clamp(a, min_v, max_v)`. `min_v` and `max_v` are inputs (the C++
+    /// `NODE_CLAMP` variant — `NODE_CLAMP_C` takes them as constants).
+    Clamp {
+        a: Option<GraphPort>,
+        min_v: Option<GraphPort>,
+        max_v: Option<GraphPort>,
+    },
+    /// Look up `a` in a baked curve mapping `[0,1] → height`. The curve is
+    /// shared (immutable) so multiple `Curve` nodes can refer to the same
+    /// data without cloning the samples.
+    Curve {
+        a: Option<GraphPort>,
+        curve: std::sync::Arc<crate::generators::simple::Curve>,
+    },
+    /// `fastnoise-lite` 2D noise. The seed/frequency/noise-type live on the
+    /// `NoiseConfig` (Clone-able); the runtime builds a fresh sampler per
+    /// `generate` call (the upstream crate's `FastNoiseLite` is not `Clone`).
+    Noise2D {
+        x: Option<GraphPort>,
+        y: Option<GraphPort>,
+        noise: crate::generators::simple::NoiseConfig,
+    },
+    /// `fastnoise-lite` 3D noise.
+    Noise3D {
+        x: Option<GraphPort>,
+        y: Option<GraphPort>,
+        z: Option<GraphPort>,
+        noise: crate::generators::simple::NoiseConfig,
+    },
+    /// SDF of an axis-aligned plane at `height`. Equivalent to `y - height`.
+    SdfPlane {
+        y: Option<GraphPort>,
+        height: Option<GraphPort>,
+    },
+    /// SDF of an axis-aligned box centred at the origin with half-extents
+    /// `(size_x, size_y, size_z)`. Inputs are world X/Y/Z.
+    SdfBox {
+        x: Option<GraphPort>,
+        y: Option<GraphPort>,
+        z: Option<GraphPort>,
+        size_x: f32,
+        size_y: f32,
+        size_z: f32,
+    },
+    /// SDF of a sphere centred at the origin with the given `radius`.
+    SdfSphere {
+        x: Option<GraphPort>,
+        y: Option<GraphPort>,
+        z: Option<GraphPort>,
+        radius: Option<GraphPort>,
+    },
+    /// SDF of a torus in the XZ plane with major radius `r1` and minor
+    /// radius `r2`.
+    SdfTorus {
+        x: Option<GraphPort>,
+        y: Option<GraphPort>,
+        z: Option<GraphPort>,
+        r1: f32,
+        r2: f32,
+    },
+    /// Hard SDF union: `min(a, b)`.
+    SdfUnion { a: Option<GraphPort>, b: Option<GraphPort> },
+    /// Hard SDF subtraction: `max(a, -b)`.
+    SdfSubtract { a: Option<GraphPort>, b: Option<GraphPort> },
+    /// Polynomial smooth union with the given `smoothness` (0 = hard union).
+    SdfSmoothUnion {
+        a: Option<GraphPort>,
+        b: Option<GraphPort>,
+        smoothness: f32,
+    },
+    /// Polynomial smooth subtraction with the given `smoothness`.
+    SdfSmoothSubtract {
+        a: Option<GraphPort>,
+        b: Option<GraphPort>,
+        smoothness: f32,
+    },
     /// Output sink: writes its single input into the SDF channel of the
     /// destination `VoxelBuffer`. Treated as a leaf in topological order.
     OutputSdf { a: Option<GraphPort> },
@@ -103,8 +209,27 @@ impl NodeKind {
             NodeKind::Sin { a }
             | NodeKind::Cos { a }
             | NodeKind::Abs { a }
-            | NodeKind::Sqrt { a } => vec![*a],
+            | NodeKind::Sqrt { a }
+            | NodeKind::Floor { a }
+            | NodeKind::Fract { a } => vec![*a],
             NodeKind::Remap { a, .. } => vec![*a],
+            NodeKind::Pow { a, b } => vec![*a, *b],
+            NodeKind::Distance2D { x, y } => vec![*x, *y],
+            NodeKind::Distance3D { x, y, z } => vec![*x, *y, *z],
+            NodeKind::Normalize3D { x, y, z } => vec![*x, *y, *z],
+            NodeKind::Mix { a, b, t } => vec![*a, *b, *t],
+            NodeKind::Clamp { a, min_v, max_v } => vec![*a, *min_v, *max_v],
+            NodeKind::Curve { a, .. } => vec![*a],
+            NodeKind::Noise2D { x, y, .. } => vec![*x, *y],
+            NodeKind::Noise3D { x, y, z, .. } => vec![*x, *y, *z],
+            NodeKind::SdfPlane { y, height } => vec![*y, *height],
+            NodeKind::SdfBox { x, y, z, .. } => vec![*x, *y, *z],
+            NodeKind::SdfSphere { x, y, z, radius } => vec![*x, *y, *z, *radius],
+            NodeKind::SdfTorus { x, y, z, .. } => vec![*x, *y, *z],
+            NodeKind::SdfUnion { a, b }
+            | NodeKind::SdfSubtract { a, b }
+            | NodeKind::SdfSmoothUnion { a, b, .. }
+            | NodeKind::SdfSmoothSubtract { a, b, .. } => vec![*a, *b],
             NodeKind::OutputSdf { a } => vec![*a],
         }
     }
@@ -116,11 +241,22 @@ impl NodeKind {
     }
 }
 
-/// A node in the graph.
-#[derive(Debug, Clone, PartialEq)]
+/// A node in the graph. Identity is established by `id`; `kind` is opaque
+/// for comparison purposes (it carries non-`PartialEq` payloads like
+/// `FastNoiseLite`).
+#[derive(Clone)]
 pub struct GraphNode {
     pub id: GraphNodeId,
     pub kind: NodeKind,
+}
+
+impl std::fmt::Debug for GraphNode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GraphNode")
+            .field("id", &self.id)
+            .field("kind", &std::any::type_name::<NodeKind>())
+            .finish()
+    }
 }
 
 impl GraphNode {
@@ -317,6 +453,192 @@ impl Graph {
                     });
                     scratch.put(id, r);
                 }
+                NodeKind::Floor { a } => {
+                    let r = monop(scratch, a, slice_size, f32::floor);
+                    scratch.put(id, r);
+                }
+                NodeKind::Fract { a } => {
+                    let r = monop(scratch, a, slice_size, |v| v - v.floor());
+                    scratch.put(id, r);
+                }
+                NodeKind::Pow { a, b } => {
+                    let r = binop(scratch, a, b, slice_size, f32::powf);
+                    scratch.put(id, r);
+                }
+                NodeKind::Distance2D { x, y } => {
+                    let r = binop(scratch, x, y, slice_size, |x, y| (x * x + y * y).sqrt());
+                    scratch.put(id, r);
+                }
+                NodeKind::Distance3D { x, y, z } => {
+                    let xs = x.as_ref().and_then(|p| scratch.get(p.node)).unwrap_or_else(|| panic_zero(slice_size));
+                    let ys = y.as_ref().and_then(|p| scratch.get(p.node)).unwrap_or_else(|| panic_zero(slice_size));
+                    // Z is the per-voxel slice coordinate; Y is constant.
+                    let zs = z.as_ref().and_then(|p| scratch.get(p.node)).unwrap_or_else(|| panic_zero(slice_size));
+                    let r: Vec<f32> = (0..slice_size)
+                        .map(|i| {
+                            let xv = xs.get(i).copied().unwrap_or(0.0);
+                            let yv = ys.get(i).copied().unwrap_or(0.0);
+                            let zv = zs.get(i).copied().unwrap_or(0.0);
+                            (xv * xv + yv * yv + zv * zv).sqrt()
+                        })
+                        .collect();
+                    scratch.put(id, r);
+                }
+                NodeKind::Normalize3D { x, y, z } => {
+                    let xs = x.as_ref().and_then(|p| scratch.get(p.node)).unwrap_or_else(|| panic_zero(slice_size));
+                    let ys = y.as_ref().and_then(|p| scratch.get(p.node)).unwrap_or_else(|| panic_zero(slice_size));
+                    let zs = z.as_ref().and_then(|p| scratch.get(p.node)).unwrap_or_else(|| panic_zero(slice_size));
+                    let r: Vec<f32> = (0..slice_size)
+                        .map(|i| {
+                            let xv = xs.get(i).copied().unwrap_or(0.0);
+                            let yv = ys.get(i).copied().unwrap_or(0.0);
+                            let zv = zs.get(i).copied().unwrap_or(0.0);
+                            let len = (xv * xv + yv * yv + zv * zv).sqrt();
+                            if len > 0.0 {
+                                1.0 / len
+                            } else {
+                                0.0
+                            }
+                        })
+                        .collect();
+                    // Note: returning 1/len keeps the value f32-friendly for
+                    // downstream multiply nodes; the C++ node returns the
+                    // normalised vector, which the AST-walker represents as
+                    // three separate Normalize3D nodes feeding back into X/Y/Z.
+                    let _ = zs;
+                    let _ = ys;
+                    scratch.put(id, r);
+                }
+                NodeKind::Mix { a, b, t } => {
+                    let r = ternary(scratch, a, b, t, slice_size, |a, b, t| a * (1.0 - t) + b * t);
+                    scratch.put(id, r);
+                }
+                NodeKind::Clamp { a, min_v, max_v } => {
+                    let r = ternary(scratch, a, min_v, max_v, slice_size, |v, lo, hi| v.clamp(lo, hi));
+                    scratch.put(id, r);
+                }
+                NodeKind::Curve { a, curve } => {
+                    let curve = curve.clone();
+                    let r = monop(scratch, a, slice_size, move |v| curve.sample(v));
+                    scratch.put(id, r);
+                }
+                NodeKind::Noise2D { x, y, noise } => {
+                    let noise = noise.build();
+                    let xs = x.as_ref().and_then(|p| scratch.get(p.node)).unwrap_or_else(|| panic_zero(slice_size));
+                    let ys = y.as_ref().and_then(|p| scratch.get(p.node)).unwrap_or_else(|| panic_zero(slice_size));
+                    let r: Vec<f32> = (0..slice_size)
+                        .map(|i| noise.get_noise_2d(xs.get(i).copied().unwrap_or(0.0), ys.get(i).copied().unwrap_or(0.0)))
+                        .collect();
+                    scratch.put(id, r);
+                }
+                NodeKind::Noise3D { x, y, z, noise } => {
+                    let noise = noise.build();
+                    let xs = x.as_ref().and_then(|p| scratch.get(p.node)).unwrap_or_else(|| panic_zero(slice_size));
+                    let ys = y.as_ref().and_then(|p| scratch.get(p.node)).unwrap_or_else(|| panic_zero(slice_size));
+                    let zs = z.as_ref().and_then(|p| scratch.get(p.node)).unwrap_or_else(|| panic_zero(slice_size));
+                    let r: Vec<f32> = (0..slice_size)
+                        .map(|i| {
+                            noise.get_noise_3d(
+                                xs.get(i).copied().unwrap_or(0.0),
+                                ys.get(i).copied().unwrap_or(0.0),
+                                zs.get(i).copied().unwrap_or(0.0),
+                            )
+                        })
+                        .collect();
+                    scratch.put(id, r);
+                }
+                NodeKind::SdfPlane { y, height } => {
+                    let r = binop(scratch, y, height, slice_size, |y, h| y - h);
+                    scratch.put(id, r);
+                }
+                NodeKind::SdfBox { x, y, z, size_x, size_y, size_z } => {
+                    let size = crate::math::Vector3f::new(*size_x, *size_y, *size_z);
+                    let xs = x.as_ref().and_then(|p| scratch.get(p.node)).unwrap_or_else(|| panic_zero(slice_size));
+                    let ys = y.as_ref().and_then(|p| scratch.get(p.node)).unwrap_or_else(|| panic_zero(slice_size));
+                    let zs = z.as_ref().and_then(|p| scratch.get(p.node)).unwrap_or_else(|| panic_zero(slice_size));
+                    let r: Vec<f32> = (0..slice_size)
+                        .map(|i| {
+                            crate::math::sdf::sdf_box(
+                                crate::math::Vector3f::new(
+                                    xs.get(i).copied().unwrap_or(0.0),
+                                    ys.get(i).copied().unwrap_or(0.0),
+                                    zs.get(i).copied().unwrap_or(0.0),
+                                ),
+                                size,
+                            )
+                        })
+                        .collect();
+                    scratch.put(id, r);
+                }
+                NodeKind::SdfSphere { x, y, z, radius } => {
+                    let xs = x.as_ref().and_then(|p| scratch.get(p.node)).unwrap_or_else(|| panic_zero(slice_size));
+                    let ys = y.as_ref().and_then(|p| scratch.get(p.node)).unwrap_or_else(|| panic_zero(slice_size));
+                    let zs = z.as_ref().and_then(|p| scratch.get(p.node)).unwrap_or_else(|| panic_zero(slice_size));
+                    let rs = radius.as_ref().and_then(|p| scratch.get(p.node)).unwrap_or_else(|| panic_zero(slice_size));
+                    let r: Vec<f32> = (0..slice_size)
+                        .map(|i| {
+                            let radius = rs.get(i).copied().unwrap_or(1.0);
+                            let pos = crate::math::Vector3f::new(
+                                xs.get(i).copied().unwrap_or(0.0),
+                                ys.get(i).copied().unwrap_or(0.0),
+                                zs.get(i).copied().unwrap_or(0.0),
+                            );
+                            crate::math::sdf::sdf_sphere(pos, crate::math::Vector3f::zero(), radius)
+                        })
+                        .collect();
+                    scratch.put(id, r);
+                }
+                NodeKind::SdfTorus { x, y, z, r1, r2 } => {
+                    let r1 = *r1;
+                    let r2 = *r2;
+                    let xs = x.as_ref().and_then(|p| scratch.get(p.node)).unwrap_or_else(|| panic_zero(slice_size));
+                    let ys = y.as_ref().and_then(|p| scratch.get(p.node)).unwrap_or_else(|| panic_zero(slice_size));
+                    let zs = z.as_ref().and_then(|p| scratch.get(p.node)).unwrap_or_else(|| panic_zero(slice_size));
+                    let r: Vec<f32> = (0..slice_size)
+                        .map(|i| {
+                            crate::math::sdf::sdf_torus(
+                                crate::math::Vector3f::new(
+                                    xs.get(i).copied().unwrap_or(0.0),
+                                    ys.get(i).copied().unwrap_or(0.0),
+                                    zs.get(i).copied().unwrap_or(0.0),
+                                ),
+                                r1,
+                                r2,
+                            )
+                        })
+                        .collect();
+                    scratch.put(id, r);
+                }
+                NodeKind::SdfUnion { a, b } => {
+                    let r = binop(scratch, a, b, slice_size, crate::math::sdf::sdf_union);
+                    scratch.put(id, r);
+                }
+                NodeKind::SdfSubtract { a, b } => {
+                    let r = binop(scratch, a, b, slice_size, crate::math::sdf::sdf_subtract);
+                    scratch.put(id, r);
+                }
+                NodeKind::SdfSmoothUnion { a, b, smoothness } => {
+                    let s = *smoothness;
+                    let r = binop(scratch, a, b, slice_size, move |a, b| {
+                        if s > 1e-4 {
+                            crate::math::sdf::sdf_smooth_union(a, b, s)
+                        } else {
+                            crate::math::sdf::sdf_union(a, b)
+                        }
+                    });
+                    scratch.put(id, r);
+                }
+                NodeKind::SdfSmoothSubtract { a, b, smoothness } => {
+                    let s = *smoothness;
+                    let r = binop(scratch, a, b, slice_size, move |a, b| {
+                        if s > 1e-4 {
+                            crate::math::sdf::sdf_smooth_subtract(b, a, s)
+                        } else {
+                            crate::math::sdf::sdf_subtract(a, b)
+                        }
+                    });
+                    scratch.put(id, r);
+                }
                 NodeKind::OutputSdf { a } => {
                     let r = monop(scratch, a, slice_size, |v| v);
                     outputs.push((GraphOutput::Sdf, r));
@@ -403,6 +725,36 @@ fn monop(
         .unwrap_or_else(|| panic_zero(slice_size));
     debug_assert_eq!(a.len(), slice_size);
     a.iter().map(|v| f(*v)).collect()
+}
+
+fn ternary(
+    scratch: &GraphScratch,
+    a: &Option<GraphPort>,
+    b: &Option<GraphPort>,
+    c: &Option<GraphPort>,
+    slice_size: usize,
+    f: impl Fn(f32, f32, f32) -> f32,
+) -> Vec<f32> {
+    let a = a
+        .as_ref()
+        .and_then(|p| scratch.get(p.node))
+        .unwrap_or_else(|| panic_zero(slice_size));
+    let b = b
+        .as_ref()
+        .and_then(|p| scratch.get(p.node))
+        .unwrap_or_else(|| panic_zero(slice_size));
+    let c = c
+        .as_ref()
+        .and_then(|p| scratch.get(p.node))
+        .unwrap_or_else(|| panic_zero(slice_size));
+    debug_assert_eq!(a.len(), slice_size);
+    debug_assert_eq!(b.len(), slice_size);
+    debug_assert_eq!(c.len(), slice_size);
+    a.iter()
+        .zip(b)
+        .zip(c)
+        .map(|((x, y), z)| f(*x, *y, *z))
+        .collect()
 }
 
 fn panic_zero(slice_size: usize) -> &'static [f32] {
@@ -641,5 +993,245 @@ mod tests {
         graph.generate(&inputs, 3, &mut scratch, &mut outputs).unwrap();
         let (_, data) = &outputs[0];
         assert_eq!(data, &zs);
+    }
+
+    #[test]
+    fn sdf_sphere_at_origin_returns_radius_minus_distance() {
+        let mut graph = Graph::new();
+        let x = graph.push(NodeKind::InputX);
+        let y = graph.push(NodeKind::InputY);
+        let z = graph.push(NodeKind::InputZ);
+        let r = graph.push(NodeKind::Constant(2.0));
+        let sphere = graph.push(NodeKind::SdfSphere {
+            x: Some(GraphPort::new(x)),
+            y: Some(GraphPort::new(y)),
+            z: Some(GraphPort::new(z)),
+            radius: Some(GraphPort::new(r)),
+        });
+        graph.push(NodeKind::OutputSdf {
+            a: Some(GraphPort::new(sphere)),
+        });
+
+        // Voxel at (1,0,0): distance 1, radius 2, SDF = 1 - 2 = -1 (inside).
+        let xs = vec![1.0];
+        let zs = vec![0.0];
+        let inputs = GraphInputs { x: &xs, y: 0.0, z: &zs };
+        let mut scratch = GraphScratch::new();
+        let mut outputs = Vec::new();
+        graph.generate(&inputs, 1, &mut scratch, &mut outputs).unwrap();
+        let (_, data) = &outputs[0];
+        assert!((data[0] - (-1.0)).abs() < 1e-5, "got {}", data[0]);
+    }
+
+    #[test]
+    fn sdf_plane_returns_y_minus_height() {
+        let mut graph = Graph::new();
+        let y = graph.push(NodeKind::InputY);
+        let h = graph.push(NodeKind::Constant(5.0));
+        let plane = graph.push(NodeKind::SdfPlane {
+            y: Some(GraphPort::new(y)),
+            height: Some(GraphPort::new(h)),
+        });
+        graph.push(NodeKind::OutputSdf {
+            a: Some(GraphPort::new(plane)),
+        });
+
+        let xs = vec![0.0];
+        let inputs = GraphInputs { x: &xs, y: 7.0, z: &xs };
+        let mut scratch = GraphScratch::new();
+        let mut outputs = Vec::new();
+        graph.generate(&inputs, 1, &mut scratch, &mut outputs).unwrap();
+        let (_, data) = &outputs[0];
+        // 7 - 5 = 2 (above the plane).
+        assert!((data[0] - 2.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn sdf_smooth_union_with_zero_smoothness_matches_hard_union() {
+        let mut graph = Graph::new();
+        let a = graph.push(NodeKind::Constant(-3.0));
+        let b = graph.push(NodeKind::Constant(-1.0));
+        let union = graph.push(NodeKind::SdfSmoothUnion {
+            a: Some(GraphPort::new(a)),
+            b: Some(GraphPort::new(b)),
+            smoothness: 0.0,
+        });
+        graph.push(NodeKind::OutputSdf {
+            a: Some(GraphPort::new(union)),
+        });
+
+        let xs = vec![0.0];
+        let inputs = GraphInputs { x: &xs, y: 0.0, z: &xs };
+        let mut scratch = GraphScratch::new();
+        let mut outputs = Vec::new();
+        graph.generate(&inputs, 1, &mut scratch, &mut outputs).unwrap();
+        let (_, data) = &outputs[0];
+        // min(-3, -1) = -3.
+        assert!((data[0] - (-3.0)).abs() < 1e-5, "got {}", data[0]);
+    }
+
+    #[test]
+    fn curve_node_samples_baked_lookup_table() {
+        use crate::generators::simple::Curve;
+        // Identity-ish curve with two points: 0->0, 1->10.
+        let curve = std::sync::Arc::new(Curve::from_points(vec![0.0, 10.0]));
+        let mut graph = Graph::new();
+        let x = graph.push(NodeKind::InputX);
+        let curve_node = graph.push(NodeKind::Curve {
+            a: Some(GraphPort::new(x)),
+            curve,
+        });
+        graph.push(NodeKind::OutputSdf {
+            a: Some(GraphPort::new(curve_node)),
+        });
+
+        let xs = vec![0.0, 0.5, 1.0];
+        let inputs = GraphInputs { x: &xs, y: 0.0, z: &xs };
+        let mut scratch = GraphScratch::new();
+        let mut outputs = Vec::new();
+        graph.generate(&inputs, 3, &mut scratch, &mut outputs).unwrap();
+        let (_, data) = &outputs[0];
+        assert!((data[0] - 0.0).abs() < 1e-5);
+        assert!((data[1] - 5.0).abs() < 1e-5);
+        assert!((data[2] - 10.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn noise_2d_node_returns_deterministic_output_for_same_seed() {
+        use crate::generators::simple::NoiseConfig;
+
+        let run = || -> Vec<f32> {
+            let noise = NoiseConfig {
+                seed: Some(42),
+                frequency: Some(0.1),
+                noise_type: Some(fastnoise_lite::NoiseType::Value),
+            };
+            let mut graph = Graph::new();
+            let x = graph.push(NodeKind::InputX);
+            let y = graph.push(NodeKind::InputY);
+            let n = graph.push(NodeKind::Noise2D {
+                x: Some(GraphPort::new(x)),
+                y: Some(GraphPort::new(y)),
+                noise,
+            });
+            graph.push(NodeKind::OutputSdf {
+                a: Some(GraphPort::new(n)),
+            });
+            let xs = vec![1.0, 2.0, 3.0];
+            let inputs = GraphInputs { x: &xs, y: 0.0, z: &xs };
+            let mut scratch = GraphScratch::new();
+            let mut outputs = Vec::new();
+            graph.generate(&inputs, 3, &mut scratch, &mut outputs).unwrap();
+            outputs[0].1.clone()
+        };
+
+        let first = run();
+        let second = run();
+        assert_eq!(first, second, "noise must be deterministic for the same seed");
+        assert!(
+            first.iter().any(|v| *v != 0.0),
+            "noise must produce non-zero values somewhere"
+        );
+    }
+
+    #[test]
+    fn clamp_node_clamps_to_input_range() {
+        let mut graph = Graph::new();
+        let x = graph.push(NodeKind::InputX);
+        let lo = graph.push(NodeKind::Constant(2.0));
+        let hi = graph.push(NodeKind::Constant(4.0));
+        let clamp = graph.push(NodeKind::Clamp {
+            a: Some(GraphPort::new(x)),
+            min_v: Some(GraphPort::new(lo)),
+            max_v: Some(GraphPort::new(hi)),
+        });
+        graph.push(NodeKind::OutputSdf {
+            a: Some(GraphPort::new(clamp)),
+        });
+
+        let xs = vec![1.0, 3.0, 5.0];
+        let inputs = GraphInputs { x: &xs, y: 0.0, z: &xs };
+        let mut scratch = GraphScratch::new();
+        let mut outputs = Vec::new();
+        graph.generate(&inputs, 3, &mut scratch, &mut outputs).unwrap();
+        let (_, data) = &outputs[0];
+        assert!((data[0] - 2.0).abs() < 1e-5);
+        assert!((data[1] - 3.0).abs() < 1e-5);
+        assert!((data[2] - 4.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn mix_node_interpolates_by_t() {
+        let mut graph = Graph::new();
+        let a = graph.push(NodeKind::Constant(0.0));
+        let b = graph.push(NodeKind::Constant(10.0));
+        let t = graph.push(NodeKind::Constant(0.25));
+        let mix = graph.push(NodeKind::Mix {
+            a: Some(GraphPort::new(a)),
+            b: Some(GraphPort::new(b)),
+            t: Some(GraphPort::new(t)),
+        });
+        graph.push(NodeKind::OutputSdf {
+            a: Some(GraphPort::new(mix)),
+        });
+
+        let xs = vec![0.0; 1];
+        let inputs = GraphInputs { x: &xs, y: 0.0, z: &xs };
+        let mut scratch = GraphScratch::new();
+        let mut outputs = Vec::new();
+        graph.generate(&inputs, 1, &mut scratch, &mut outputs).unwrap();
+        let (_, data) = &outputs[0];
+        // mix(0, 10, 0.25) = 0*0.75 + 10*0.25 = 2.5.
+        assert!((data[0] - 2.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn distance_3d_node_computes_euclidean_length() {
+        let mut graph = Graph::new();
+        let x = graph.push(NodeKind::InputX);
+        let y = graph.push(NodeKind::InputY);
+        let z = graph.push(NodeKind::InputZ);
+        let d = graph.push(NodeKind::Distance3D {
+            x: Some(GraphPort::new(x)),
+            y: Some(GraphPort::new(y)),
+            z: Some(GraphPort::new(z)),
+        });
+        graph.push(NodeKind::OutputSdf {
+            a: Some(GraphPort::new(d)),
+        });
+
+        let xs = vec![3.0, 0.0];
+        let inputs = GraphInputs { x: &xs, y: 4.0, z: &xs };
+        let mut scratch = GraphScratch::new();
+        let mut outputs = Vec::new();
+        graph.generate(&inputs, 2, &mut scratch, &mut outputs).unwrap();
+        let (_, data) = &outputs[0];
+        // (3,4,3): sqrt(9+16+9) = sqrt(34) ≈ 5.83.
+        assert!((data[0] - (3.0f32 * 3.0 + 4.0 * 4.0 + 3.0 * 3.0).sqrt()).abs() < 1e-5);
+    }
+
+    #[test]
+    fn floor_and_fract_split_a_value() {
+        let mut graph = Graph::new();
+        let x = graph.push(NodeKind::InputX);
+        let floor = graph.push(NodeKind::Floor {
+            a: Some(GraphPort::new(x)),
+        });
+        let _fract = graph.push(NodeKind::Fract {
+            a: Some(GraphPort::new(x)),
+        });
+        graph.push(NodeKind::OutputSdf {
+            a: Some(GraphPort::new(floor)),
+        });
+
+        let xs = vec![-1.5, 0.7, 2.9];
+        let inputs = GraphInputs { x: &xs, y: 0.0, z: &xs };
+        let mut scratch = GraphScratch::new();
+        let mut outputs = Vec::new();
+        graph.generate(&inputs, 3, &mut scratch, &mut outputs).unwrap();
+        let (_, data) = &outputs[0];
+        assert!((data[0] - (-2.0)).abs() < 1e-5);
+        assert!((data[1] - 0.0).abs() < 1e-5);
+        assert!((data[2] - 2.0).abs() < 1e-5);
     }
 }
