@@ -182,7 +182,7 @@ godot_voxel (fork)
 
 ### Фаза 4: Terrain + threading (8-10 недель) — НАЧАТА
 - `util/thread` wrappers ✅; `util/tasks` value types + thread runner ✅; `io::file_locker` ✅; `VoxelStream` base ✅
-- stream dependency shims ✅; `SaveBlockDataTask` voxel-only ✅; load task — далее
+- stream dependency shims ✅; voxel-only load/save block tasks ✅; generator/VoxelData integration — далее
 - `terrain` (VoxelTerrain, VoxelLodTerrain)
 - `generators/graph` (runtime, без редактора)
 - `VoxelStream` base ✅; threaded stream tasks (`*_task.cpp`) — далее
@@ -194,7 +194,7 @@ godot_voxel (fork)
   1. `util/thread/{mutex,rw_lock}` — ✅ wrappers over `std::sync` (recursive `Mutex`, `BinaryMutex`, `RwLock`)
   2. `util/tasks/{task_priority,cancellation_token,threaded_task,threaded_task_runner}` — ✅ value types + minimal owned runner
   3. `io::file_locker` — ✅ per-path read/write coordination (depends on mutex)
-  4. `streams::{voxel_stream base, load/save_block_data_task}` — ✅ base trait + dependency shims + save task; load task pending
+  4. `streams::{voxel_stream base, load/save_block_data_task}` — ✅ base trait + dependency shims + voxel-only load/save task layer
   5. `engine/{voxel_data,voxel_lod_terrain,voxel_terrain}` — streaming terrain core
   6. `generators/graph` runtime (needs `string::expression_parser` from Phase 1 deferred)
   7. Integration: VoxelTerrain node streaming + LOD + meshers end-to-end
@@ -394,8 +394,8 @@ Threading + terrain — самый сложный этап. Порядок по 
 | 4.4 | `streams::voxel_stream` (base trait) | `streams/voxel_stream.{h,cpp}` | RWLock, VoxelBuffer | ✅ `VoxelStream: Send + Sync`, `LoadResult`/`SaveMode`, batch defaults; `MemoryStream` impl |
 | 4.4a | `engine::{priority_dependency,streaming_dependency}` / `tasks::async_dependency_tracker` | `engine/*dependency*`, `util/tasks/async_dependency_tracker.*` | tasks, VoxelStream, atomics/locks | ✅ mutable viewer priority/drop-distance evaluation, stream invalidation handle, race-free async countdown with next-task handoff |
 | 4.5a | `streams::save_block_data_task` | `streams/save_block_data_task.{h,cpp}` | tasks, VoxelStream, VoxelBuffer | ✅ voxel-only save task: priority, tracker abort/complete, last-task flush, follow-up task handoff |
-| 4.5b | `streams::load_block_data_task` | `streams/load_block_data_task.{h,cpp}` | tasks, VoxelStream, VoxelFormat | Next: stream I/O half with explicit format/block size; generator fallback and VoxelData callbacks later |
-| 4.5c | `streams` block output layer | `VoxelEngine::BlockDataOutput` | load/save tasks | Needed before full VoxelData integration |
+| 4.5b | `streams::{block_data_output,load_block_data_task}` | `streams/load_block_data_task.{h,cpp}`, `VoxelEngine::BlockDataOutput` | tasks, VoxelStream, VoxelFormat | ✅ stream I/O half with explicit format/block size, output kinds for loaded/not found/needs generation; generator fallback and VoxelData callbacks later |
+| 4.5c | `streams` generator handoff | `GenerateBlockTask`, `VoxelGenerator` | load task, generators | Pending: schedule generator fallback after `NeedsGeneration` |
 | 4.6 | `engine::voxel_data` | `engine/voxel_data.{h,cpp}` | VoxelBuffer, streams, generators, LOD | Streaming voxel data grid (ядро terrain) |
 | 4.7 | `terrain::voxel_terrain` / `voxel_lod_terrain` | `terrain/*` | VoxelData, meshers, Node3D | VoxelTerrain node (без Godot binding — pure logic) |
 | 4.8 | `generators::graph` (runtime) | `generators/graph/*` | `string::expression_parser` (Phase 1 deferred) | Graph-based procedural gen без редактора |

@@ -4,7 +4,7 @@ use crate::constants::voxel_constants::{TASK_PRIORITY_BAND3_DEFAULT, TASK_PRIORI
 use crate::engine::StreamingDependency;
 use crate::math::Vector3i;
 use crate::storage::VoxelBuffer;
-use crate::streams::{VoxelSaveQuery, VoxelStreamError};
+use crate::streams::{BlockDataOutput, VoxelSaveQuery, VoxelStreamError};
 use crate::tasks::{
     AsyncDependencyError, AsyncDependencyTracker, TaskPriority, TaskRunOutcome, ThreadedTask,
     ThreadedTaskContext,
@@ -23,6 +23,7 @@ pub struct SaveBlockDataTask {
     stream_error: Option<VoxelStreamError>,
     tracker_error: Option<AsyncDependencyError>,
     follow_up_tasks: Vec<Box<dyn ThreadedTask>>,
+    output: Option<BlockDataOutput>,
 }
 
 impl SaveBlockDataTask {
@@ -47,6 +48,7 @@ impl SaveBlockDataTask {
             stream_error: None,
             tracker_error: None,
             follow_up_tasks: Vec::new(),
+            output: None,
         }
     }
 
@@ -74,7 +76,12 @@ impl SaveBlockDataTask {
         self.tracker_error
     }
 
+    pub fn take_output(&mut self) -> Option<BlockDataOutput> {
+        self.output.take()
+    }
+
     fn run_save(&mut self) {
+        self.output = None;
         let Some(voxels) = self.voxels.take() else {
             if let Some(tracker) = &self.tracker {
                 tracker.abort();
@@ -108,6 +115,11 @@ impl SaveBlockDataTask {
         }
 
         self.has_run = true;
+        self.output = Some(BlockDataOutput::saved(
+            self.position_in_blocks,
+            self.lod_index,
+            self.had_voxels,
+        ));
     }
 }
 
@@ -143,7 +155,9 @@ mod tests {
     use crate::engine::StreamingDependency;
     use crate::math::Vector3i;
     use crate::storage::{ChannelId, VoxelBuffer};
-    use crate::streams::{LoadResult, MemoryStream, StreamResult, VoxelSaveQuery, VoxelStream};
+    use crate::streams::{
+        BlockDataOutputKind, LoadResult, MemoryStream, StreamResult, VoxelSaveQuery, VoxelStream,
+    };
     use crate::tasks::{
         AsyncDependencyTracker, TaskPriority, TaskRunOutcome, ThreadedTask, ThreadedTaskContext,
     };
@@ -236,6 +250,30 @@ mod tests {
         );
         assert!(!task.is_cancelled());
         assert_eq!(task.debug_name(), "SaveBlockData");
+    }
+
+    #[test]
+    fn run_exposes_saved_block_output() {
+        let stream = Arc::new(MemoryStream::new());
+        let dependency = StreamingDependency::new(stream);
+        let position = Vector3i::new(5, 6, 7);
+        let mut task = SaveBlockDataTask::new_voxels(
+            position,
+            3,
+            Some(filled_buffer(9)),
+            dependency,
+            None,
+            false,
+        );
+
+        task.run_save();
+        let output = task.take_output().unwrap();
+
+        assert_eq!(output.kind, BlockDataOutputKind::Saved);
+        assert_eq!(output.position_in_blocks, position);
+        assert_eq!(output.lod_index, 3);
+        assert!(output.had_voxels);
+        assert!(output.voxels.is_none());
     }
 
     #[test]
