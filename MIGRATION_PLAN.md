@@ -180,7 +180,7 @@ godot_voxel (fork)
 - **GO-критерий:** ✅ генерация + meshing работают (439 unit тестов); ⏳ end-to-end
   desktop/Android demo — нужен Phase 4 terrain node для интеграции
 
-### Фаза 4: Terrain + threading (8-10 недель) — MESHING PIPELINE ЗАВЕРШЕН (HEADLESS)
+### Фаза 4: Terrain + threading (8-10 недель) — SINGLE-LOD PAGING TERRAIN ЗАВЕРШЕН (HEADLESS)
 - `util/thread` wrappers ✅; `util/tasks` value types + thread runner ✅ (priority throttle 32ms ✅); `io::file_locker` ✅; `VoxelStream` base ✅
 - stream dependency shims ✅; voxel-only load/save block tasks ✅ (stream-error/abort output fix ✅); generator/VoxelData integration ✅
 - `VoxelBuffer::downscale_to` ✅; `VoxelData::update_lods` LOD cascade ✅
@@ -193,11 +193,11 @@ godot_voxel (fork)
 - **`MeshingDependency` ✅; `MeshBlockTask` (gather_voxels_cpu + build) ✅**
 - **`TransvoxelMesher` real adapter ✅ (обёртка над build_regular_mesh)**
 - **End-to-end test: generator → VoxelData → MeshBlockTask → TransvoxelMesher → mesh ✅**
-- `terrain` paging orchestrator (VoxelTerrain/VoxelLodTerrain core) — далее
-- `VoxelEngine` subset (volume/viewer registry, process loop) — далее
-- `VoxelLodTerrainUpdateData` + threaded update task (clipbox/octree) — далее (multi-LOD paging)
+- **`VoxelTerrainCore` single-LOD paging orchestrator ✅** (viewers → loads → meshing → outputs → unload; full lifecycle работает headlessly)
+- Multi-LOD paging (VoxelLodTerrain) — далее (clipbox/octree стратегии)
+- `VoxelEngine` subset (volume/viewer registry, multi-volume) — далее
 - `generators/graph` runtime (нужен `string::expression_parser`) — далее
-- `VoxelDataGrid`, Cubes/Blocky mesher adapters, real SpatialLock3D — далее
+- Cubes/Blocky mesher adapters, `VoxelDataGrid`, real `SpatialLock3D` — далее
 - **GO-критерий:** стриминг бесконечного terrain'а работает, нет race conditions
   (проверка под ThreadSanitizer/loom)
 
@@ -275,6 +275,7 @@ godot_voxel (fork)
 | 2026-07-05 | Фаза 1-3 audit fixes + старт Фазы 4 | ✅ total 439 unit. Исправлены parity gaps: `shift_up(pos=len)`, `is_uniform([])`, base10 parse без цифр, `%g`-style float formatting, SDF/mixel4 defaults + lower-case channel names, `VoxelFormat::configure_buffer`, region sector compaction, simple-cubes padding coords, Noise frequency, metadata envelope validation, `VoxelBuffer` depth reset/pool-safe channel copy. Фаза 4: `thread::{Mutex,BinaryMutex,RwLock}` + `tasks::{TaskPriority,TaskCancellationToken}` |
 | 2026-07-05 | Фаза 4 audit + fixes + оптимизации + миграция | ✅ total 533 unit. Audit выявил 2 бага (stream-error/abort paths теряли output, clippy large_enum_variant) и 2 оптимизации (paste O(N·k)→O(N), ThreadedTaskRunner priority throttle 32ms). Миграция критических блокеров: `VoxelBuffer::downscale_to` (mip-map kernel), `VoxelData::update_lods` LOD cascade, `VoxelDataBlock::viewers` + `view_area`/`unview_area` (refcount pinning API для mesh tasks), `VoxelData` generator/stream ownership (`SharedVoxelGenerator`/`SharedVoxelStream`, `with_generator` helper), `VoxelData` copy/paste/paste_masked + area queries (`is_area_loaded`, `has_all_blocks_in_area`, `get_missing_blocks`, `get_blocks_with_voxel_data`). VoxelGenerator trait → `Send + Sync`. 8 коммитов, clippy чист |
 | 2026-07-05 | Фаза 4 meshing pipeline + end-to-end | ✅ total 560 unit + 5 e2e. Meshing pipeline полностью работает headlessly: `generate_single`/`get_voxel` fallback, `Semaphore` + `SpatialLock3D` no-op stub (Option b из аудита), `VoxelMesher` trait + `MesherInput`/`MesherOutput`/`SurfaceArrays` enum (transvoxel/cubes/blocky variants), `MeshingDependency`, `MeshBlockTask` (CPU gather+build алгоритм), `TransvoxelMesher` real adapter. End-to-end тест: generator → VoxelData → MeshBlockTask → mesher → MesherOutput — SDF-сфера даёт non-empty mesh, мирный блок далеко от сферы даёт empty mesh, dependency invalidation даёт dropped output. 7 коммитов, clippy чист |
+| 2026-07-05 | Фаза 4 single-LOD paging terrain | ✅ total 564 unit + 5 e2e. Engine-agnostic port of `terrain/fixed_lod/voxel_terrain.cpp` paging loop: `VoxelTerrainCore` orchestrator со paired viewers, data/mesh box computation с +1 padding для meshing neighbours, view/unview refcount-tracked mesh blocks, `try_schedule_mesh_update` (has_all_blocks_in_area gate), `LoadBlockForTerrainTask` (stream + generator fallback), full `process()` tick — viewers → loads → meshing → outputs. Тест доказывает полный lifecycle: viewer появляется → блоки грузятся и мешаются → viewer уходит → блоки выгружаются. `Box3i::difference` (slab decomposition для box diffs). Без Godot (Node3D/RenderingServer — Phase 5), без instancer/multiplayer/GPU. Multi-LOD (VoxelLodTerrain) — отдельный orchestrator далее |
 
 ### Где остановились (для возобновления)
 
@@ -285,8 +286,9 @@ godot_voxel (fork)
 **Фаза 2 mobile-half — `.so` собран** (aarch64 + x86_64-android через NDK r29).
 **Фаза 3 (compute-слой) — ЗАВЕРШЕНА.** Все engine-agnostic компоненты
 портированы и повторно проверены audit pass'ом (439 unit тестов).
-**Фаза 4 — storage/streaming + meshing pipeline полностью работают headlessly (560 unit + 5 e2e тестов).**
+**Фаза 4 — storage/streaming + meshing pipeline + single-LOD paging terrain работают headlessly (564 unit + 10 e2e тестов).**
 End-to-end: generator → VoxelData → MeshBlockTask → TransvoxelMesher → MesherOutput.
+Paging: VoxelTerrainCore orchestrates viewers → loads → meshing → outputs → unload.
 
 **H1 (partial):** C++ и Rust генерируют идентичные *позиции* вершин (606=606) и
 одинаковое *число* треугольников (1304), но reuse-cache даёт разное число вершин
@@ -303,23 +305,24 @@ End-to-end: generator → VoxelData → MeshBlockTask → TransvoxelMesher → M
    template (нужен custom template `platform=android` + SDK + устройство/эмулятор).
    `.so` собирается локально через `rust/scripts/android-build.sh`; упаковка в APK
    и проверка на устройстве — вне данного окружения.
-3. **Фаза 4 — что осталось (после meshing pipeline):**
-   - **`terrain` (VoxelTerrain, VoxelLodTerrain) Godot-agnostic core** —
-     paging/scheduling loop поверх VoxelData + MeshBlockTask. Сейчас есть
-     все pieces, нужен orchestrator (audit рекомендует clipbox strategy).
+3. **Фаза 4 — что осталось (после single-LOD paging terrain):**
+   - **Multi-LOD paging (VoxelLodTerrain)** — `VoxelLodTerrainUpdateData` +
+     threaded update task (clipbox/octree стратегии). Single-LOD paging
+     (`VoxelTerrainCore`) готов; multi-LOD — отдельный orchestrator.
    - **`VoxelEngine` subset** — volume/viewer registry (`SlotMap`) + `process()`
-     dequeue loop + `sync_viewers_task_priority_data`. Нужен для paged terrain.
-   - **`VoxelLodTerrainUpdateData` + threaded update task** — multi-LOD paging
-     (clipbox/octree стратегии).
-   - **`generators::graph` runtime** (нужен `string::expression_parser` из Фазы 1).
-   - **`VoxelDataGrid`** — terrain meshing query helper (used by mesh_block_task
-     для caching sub-regions; текущий MeshBlockTask обходит это через прямой
-     `voxel_data.get_block` lookup).
+     dequeue loop + `sync_viewers_task_priority_data`. Нужен для multi-volume
+     и centralized viewer tracking.
+   - **`generators::graph` runtime** (нужен `string::expression_parser` из Фазы 1) —
+     ~600 LOC port для parser + runtime execution уже есть pieces.
    - **Cubes/Blocky mesher adapters** — TransvoxelMesher готов; Cubes/Blocky
      wrappers требуют порт colour callbacks из free-function API.
+   - **`VoxelDataGrid`** — terrain meshing query helper (оптимизация; текущий
+     MeshBlockTask обходит это через прямой `voxel_data.get_block` lookup).
    - **`SpatialLock3D` real impl** — пока no-op stub; нужен для concurrent
      mesh thread + edit thread (заменить на Vec<Box<Mode>> + Semaphore).
-   - **ThreadSanitizer end-to-end** — когда `VoxelEngine` + threading land.
+   - **ThreadSanitizer end-to-end** — когда `VoxelEngine` + real threading land.
+   - **Godot binding (Phase 5)** — Node3D wrappers для VoxelTerrainCore +
+     RenderingServer mesh upload + EditorPlugin.
 
 ### Фаза 1 (в работе)
 
@@ -451,7 +454,7 @@ conditions (проверка под ThreadSanitizer/loom).
 git clone https://github.com/sandsaber/godot_voxel.git
 cd godot_voxel && git checkout rust/pilot
 cd rust
-cargo test -p voxel-core       # 560 unit + 10 integration + 1 doc-test; 1 ignored golden-gen
+cargo test -p voxel-core       # 564 unit + 10 integration + 1 doc-test; 1 ignored golden-gen
 cargo build -p voxel-gdext     # GDExtension .so (грузится в Godot 4.7)
 cargo clippy --workspace --all-targets  # должен быть чистый
 cargo bench                    # transvoxel benches (16³=143 / 32³=199 / 64³=249 Melem/s)
