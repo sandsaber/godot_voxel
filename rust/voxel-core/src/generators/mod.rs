@@ -5,7 +5,8 @@
 //! `VoxelGenerator` `Resource` (with its RWLock, GPU hooks, caching and async
 //! task machinery) is split in two here: a thin synchronous [`VoxelGenerator`]
 //! trait (the part generators themselves implement) lives in [`base`], and the
-//! engine/threading layer (streaming, LOD, `VoxelData`) is deferred to Phase 4.
+//! engine/threading layer (streaming, LOD integration and terrain ownership) is
+//! layered in during Phase 4.
 //!
 //! ## Current
 //! - [`base`] — the [`VoxelGenerator`] trait, [`VoxelQueryData`], [`GenResult`],

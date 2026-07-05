@@ -56,6 +56,10 @@ impl VoxelDataBlock {
         self.voxels = Some(voxels);
     }
 
+    pub fn into_voxels(self) -> Option<VoxelBuffer> {
+        self.voxels
+    }
+
     pub fn clear_voxels(&mut self) {
         self.voxels = None;
         self.edited = false;
