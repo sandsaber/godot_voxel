@@ -180,13 +180,15 @@ godot_voxel (fork)
 - **GO-критерий:** ✅ генерация + meshing работают (439 unit тестов); ⏳ end-to-end
   desktop/Android demo — нужен Phase 4 terrain node для интеграции
 
-### Фаза 4: Terrain + threading (8-10 недель) — НАЧАТА
-- `util/thread` wrappers ✅; `util/tasks` value types + thread runner ✅; `io::file_locker` ✅; `VoxelStream` base ✅
-- stream dependency shims ✅; voxel-only load/save block tasks ✅; generator/VoxelData integration — далее
-- `terrain` (VoxelTerrain, VoxelLodTerrain)
-- `generators/graph` (runtime, без редактора)
-- `VoxelStream` base ✅; threaded stream tasks (`*_task.cpp`) — далее
-- `VoxelData` / streaming dependency
+### Фаза 4: Terrain + threading (8-10 недель) — ХРАНЕНИЕ/СТРИМИНГ ЗАВЕРШЕНЫ
+- `util/thread` wrappers ✅; `util/tasks` value types + thread runner ✅ (priority throttle 32ms ✅); `io::file_locker` ✅; `VoxelStream` base ✅
+- stream dependency shims ✅; voxel-only load/save block tasks ✅ (stream-error/abort output fix ✅); generator/VoxelData integration ✅
+- `VoxelBuffer::downscale_to` ✅; `VoxelData::update_lods` LOD cascade ✅
+- `VoxelDataBlock::viewers` + `view_area`/`unview_area` ✅
+- `VoxelData` generator/stream ownership (`SharedVoxelGenerator`/`SharedVoxelStream`) ✅
+- `VoxelData` copy/paste/paste_masked + area queries ✅; `paste_masked` per-block + O(1) writability ✅
+- `terrain` (VoxelTerrain, VoxelLodTerrain) — далее
+- `generators/graph` (runtime, без редактора) — далее
 - **GO-критерий:** стриминг бесконечного terrain'а работает, нет race conditions
   (проверка под ThreadSanitizer/loom)
 
@@ -262,6 +264,7 @@ godot_voxel (fork)
 | 2026-07-04 | Фаза 3: blocky mesher (полный portable core) | ✅ +53 теста, total 391. `constants/cube_tables` + `meshers/blocky/{baked_library,bake,mesher,lod_skirts,shadow_occluders}`. Полный blocky meshing: side-culling bake pass (rasterization + pattern dedup + occlusion matrix), `generate_mesh` с AO + face culling, LOD skirts, shadow occluders. Godot Resource/editor слой → Фаза 5 |
 | 2026-07-04 | Фаза 3: streams cache/memory + HeightmapNoise — **ФАЗА 3 ЗАВЕРШЕНА** | ✅ +20 тестов, total 411. `streams/{stream_cache,stream_memory}` (engine-agnostic, без Mutex), `generators::simple::HeightmapNoise` (2D noise + Curve через `generate_heightmap`). Все engine-agnostic Phase 3 компоненты портированы |
 | 2026-07-05 | Фаза 1-3 audit fixes + старт Фазы 4 | ✅ total 439 unit. Исправлены parity gaps: `shift_up(pos=len)`, `is_uniform([])`, base10 parse без цифр, `%g`-style float formatting, SDF/mixel4 defaults + lower-case channel names, `VoxelFormat::configure_buffer`, region sector compaction, simple-cubes padding coords, Noise frequency, metadata envelope validation, `VoxelBuffer` depth reset/pool-safe channel copy. Фаза 4: `thread::{Mutex,BinaryMutex,RwLock}` + `tasks::{TaskPriority,TaskCancellationToken}` |
+| 2026-07-05 | Фаза 4 audit + fixes + оптимизации + миграция | ✅ total 533 unit. Audit выявил 2 бага (stream-error/abort paths теряли output, clippy large_enum_variant) и 2 оптимизации (paste O(N·k)→O(N), ThreadedTaskRunner priority throttle 32ms). Миграция критических блокеров: `VoxelBuffer::downscale_to` (mip-map kernel), `VoxelData::update_lods` LOD cascade, `VoxelDataBlock::viewers` + `view_area`/`unview_area` (refcount pinning API для mesh tasks), `VoxelData` generator/stream ownership (`SharedVoxelGenerator`/`SharedVoxelStream`, `with_generator` helper), `VoxelData` copy/paste/paste_masked + area queries (`is_area_loaded`, `has_all_blocks_in_area`, `get_missing_blocks`, `get_blocks_with_voxel_data`). VoxelGenerator trait → `Send + Sync`. 8 коммитов, clippy чист |
 
 ### Где остановились (для возобновления)
 
@@ -271,11 +274,8 @@ godot_voxel (fork)
 `VoxelRustHello` виден в GDScript, достигает `voxel_core::VERSION` через FFI.
 **Фаза 2 mobile-half — `.so` собран** (aarch64 + x86_64-android через NDK r29).
 **Фаза 3 (compute-слой) — ЗАВЕРШЕНА.** Все engine-agnostic компоненты
-портированы и повторно проверены audit pass'ом (439 unit тестов): storage (4 модуля), format::vox, streams
-(instance_data, compressed_data, block_serializer, region, stream_cache,
-stream_memory), generators (base, Waves, Flat, Noise, HeightmapNoise),
-meshers (transvoxel, cubes, blocky с полным bake+mesher+skirts+shadow),
-constants::cube_tables, io extensions.
+портированы и повторно проверены audit pass'ом (439 unit тестов).
+**Фаза 4 — миграция хранения/стриминга завершена (533 unit тестов).**
 
 **H1 (partial):** C++ и Rust генерируют идентичные *позиции* вершин (606=606) и
 одинаковое *число* треугольников (1304), но reuse-cache даёт разное число вершин
@@ -292,11 +292,18 @@ constants::cube_tables, io extensions.
    template (нужен custom template `platform=android` + SDK + устройство/эмулятор).
    `.so` собирается локально через `rust/scripts/android-build.sh`; упаковка в APK
    и проверка на устройстве — вне данного окружения.
-3. **Фаза 4** — terrain + threading: стартовый слой `util/thread` и task
-   value-types уже портированы; дальше `task_scheduler`/`threaded_task`,
-   `file_locker`, `VoxelStream` base с Mutex, threaded stream tasks,
-   `VoxelData`/streaming, `terrain` (VoxelTerrain/VoxelLodTerrain),
-   `generators::graph` runtime.
+3. **Фаза 4 — что осталось:**
+   - `VoxelData::get_voxel` generator fallback (`generate_single`) — нужен
+     trait-метод для single-voxel queries.
+   - `terrain` (VoxelTerrain, VoxelLodTerrain) — Godot-agnostic core logic
+     (`terrain_*` без Node3D, фактический meshing + LOD scheduling).
+   - `generators::graph` runtime (нужен `string::expression_parser` из Фазы 1).
+   - `VoxelEngine` singleton (volume registry, callbacks) — для Godot-binding
+     (Фаза 5), сейчас tasks доставляют output через `take_output()`.
+   - `SpatialLock3D` — пока single-threaded через borrow checker; нужен для
+     concurrent mesh thread + edit thread.
+   - End-to-end integration test: generator → VoxelData → mesher → mesh,
+     ThreadSanitizer.
 
 ### Фаза 1 (в работе)
 
@@ -403,7 +410,14 @@ Threading + terrain — самый сложный этап. Порядок по 
 | 4.6e | `storage::{voxel_buffer,voxel_data_map}` region copy/paste | `storage/voxel_buffer.cpp` (`copy_channel_from` area overload), `storage/voxel_data_map.cpp` (`copy`, `paste`) | `copy_3d_region_zxy`, VoxelBuffer, VoxelDataMap | ✅ Area copy helper with uniform/materialized channel handling; unmasked `VoxelDataMap::copy`/`paste` now iterate block regions instead of per voxel. Masked predicate paste remains per-voxel pending a dedicated helper |
 | 4.6f | `storage::voxel_data` aggregate MVP | `storage/voxel_data.{h,cpp}` | VoxelDataMap, VoxelDataBlock, VoxelFormat | ✅ First synchronous VoxelData aggregate: LOD maps, bounds/format/full-load/streaming flags, block/voxel access, block insertion, LOD0 modification flags. Generator pre-generation, LOD downscaling, save/unload consumption and streaming task integration remain pending |
 | 4.6g | `storage::voxel_data` generation/save hooks | `storage/voxel_data.cpp` (`pre_generate_box`, `consume_*modifications`, `unload_blocks`) | VoxelData, VoxelGenerator, VoxelBuffer | ✅ Sync storage subset: generator-backed `pre_generate_box` (non-streaming creates missing blocks; streaming fills existing empty blocks), `BlockToSave`, modification consumption, and unload-with-save handoff. Stream delete persistence, refcounted view/unview and terrain scheduler integration remain pending |
-| 4.6 | `storage::voxel_data` | `storage/voxel_data.{h,cpp}` | VoxelDataMap, streams, generators, LOD | In progress: LOD updates/downscaling, stream delete persistence, view/unview refcounting, terrain streaming task integration |
+| 4.6h | `storage::voxel_buffer::downscale_to` | `storage/voxel_buffer.cpp` (`downscale_to`) | VoxelBuffer | ✅ Nearest-neighbor 2:1 mip-map kernel: ZXY loop order, uniform-channel fast path, source/dst region clamping. Foundation for `update_lods` |
+| 4.6i | `storage::voxel_data::update_lods` | `storage/voxel_data.cpp` (`update_lods`) | VoxelData, downscale_to, generator | ✅ LOD cascade: LOD0 needs_lodding clear + pairwise up-pass (src→dst octant via `rel*half_bs`), generates missing dst blocks in non-streaming mode, marks dst modified, enqueues next LOD. `BlockLocation` out-param |
+| 4.6j | `storage::voxel_data` viewers + view/unview | `storage/voxel_data_block.h` (`RefCount`), `storage/voxel_data.cpp` (`view_area`, `unview_area`) | VoxelDataBlock, VoxelData | ✅ `Viewers` refcount (saturating add/remove) on VoxelDataBlock; `view_area` increments + reports found/missing; `unview_area` decrements + removes zero-count blocks, returns modified for save |
+| 4.6k | `storage::voxel_data` generator/stream ownership | `storage/voxel_data.{h,cpp}` (`set_generator`, `set_stream`) | VoxelData, VoxelGenerator, VoxelStream | ✅ `SharedVoxelGenerator = Arc<Mutex<Box<dyn VoxelGenerator>>>`, `SharedVoxelStream = Arc<dyn VoxelStream>`; `with_generator` helper; `VoxelGenerator: Send + Sync`. `get_voxel` generator fallback (`generate_single`) remains pending |
+| 4.6l | `storage::voxel_data` copy/paste + area queries | `storage/voxel_data.cpp` (`copy`, `paste`, `paste_masked*`, `is_area_loaded`, `has_all_blocks_in_area`, `get_missing_blocks`, `get_blocks_with_voxel_data`) | VoxelData, VoxelDataMap | ✅ VoxelData-level copy (с generator fallback для missing blocks), paste/paste_masked/paste_masked_with_destination_mask делегируют в LOD0 map; area queries: is_area_loaded (streaming-aware), has_all_blocks_in_area, get_missing_blocks, get_blocks_with_voxel_data (ZXY grid) |
+| 4.6m | `paste_masked` per-block + O(1) writability lookup | `storage/voxel_data_map.cpp` (`paste_masked`) | VoxelDataMap | ✅ Audit-driven optimization: per-block iteration (1 hashmap lookup/block вместо per-voxel), `WritabilityLookup` dense `Vec<bool>` для u16-fitting values (как C++ `DynamicBitset`), linear fallback для крупных значений |
+| 4.6n | `ThreadedTaskRunner` priority throttle | `util/tasks/threaded_task_runner.cpp` (`_priority_update_period_ms`) | tasks | ✅ Audit-driven optimization: `priority_update_period` (default 32 ms как C++) + `last_priority_update`; worker вызывает `refresh_priorities_and_complete_cancelled` только когда окно прошло, не на каждом wake |
+| 4.6 | `storage::voxel_data` | `storage/voxel_data.{h,cpp}` | VoxelDataMap, streams, generators, LOD | In progress: `get_voxel` generator fallback (`generate_single`), metadata, `VoxelDataGrid`, `try_set_block` with action_when_exists. SpatialLock3D + per-LOD RWLock отложены (пока single-threaded через borrow checker) |
 | 4.7 | `terrain::voxel_terrain` / `voxel_lod_terrain` | `terrain/*` | VoxelData, meshers, Node3D | VoxelTerrain node (без Godot binding — pure logic) |
 | 4.8 | `generators::graph` (runtime) | `generators/graph/*` | `string::expression_parser` (Phase 1 deferred) | Graph-based procedural gen без редактора |
 | 4.9 | Integration test | — | все выше | End-to-end: generator → VoxelData → mesher → mesh, ThreadSanitizer |
@@ -421,7 +435,7 @@ conditions (проверка под ThreadSanitizer/loom).
 git clone https://github.com/sandsaber/godot_voxel.git
 cd godot_voxel && git checkout rust/pilot
 cd rust
-cargo test -p voxel-core       # 439 unit + 5 integration + 1 doc-test; 1 ignored golden-gen
+cargo test -p voxel-core       # 533 unit + 5 integration + 1 doc-test; 1 ignored golden-gen
 cargo build -p voxel-gdext     # GDExtension .so (грузится в Godot 4.7)
 cargo clippy --workspace --all-targets  # должен быть чистый
 cargo bench                    # transvoxel benches (16³=143 / 32³=199 / 64³=249 Melem/s)
