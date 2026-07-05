@@ -2,6 +2,36 @@
 
 use crate::storage::VoxelBuffer;
 
+/// Reference count for [`VoxelDataBlock::viewers`].
+///
+/// Matches C++ `RefCount` (a thin `uint32_t` wrapper). Used by
+/// [`crate::storage::VoxelData::view_area`] / `unview_area` to keep loaded
+/// blocks alive while one or more viewers (e.g. mesh block tasks) reference
+/// them. A block reaching zero viewers is eligible for unloading.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Viewers(u32);
+
+impl Viewers {
+    pub const fn new() -> Self {
+        Self(0)
+    }
+
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+
+    pub fn add(&mut self) {
+        self.0 = self.0.saturating_add(1);
+    }
+
+    /// Decrements and returns the new value. Saturates at zero so an unpaired
+    /// `remove` cannot underflow. The C++ `RefCount` has the same property.
+    pub fn remove(&mut self) -> u32 {
+        self.0 = self.0.saturating_sub(1);
+        self.0
+    }
+}
+
 #[derive(Debug)]
 pub struct VoxelDataBlock {
     voxels: Option<VoxelBuffer>,
@@ -9,6 +39,10 @@ pub struct VoxelDataBlock {
     needs_lodding: bool,
     modified: bool,
     edited: bool,
+    /// Optional reference count, exposed publicly to mirror the C++ public
+    /// `viewers` field. Owned and mutated by `VoxelData::view_area` /
+    /// `unview_area`.
+    pub viewers: Viewers,
 }
 
 impl VoxelDataBlock {
@@ -19,6 +53,7 @@ impl VoxelDataBlock {
             needs_lodding: false,
             modified: false,
             edited: false,
+            viewers: Viewers::new(),
         }
     }
 
@@ -29,6 +64,7 @@ impl VoxelDataBlock {
             needs_lodding: false,
             modified: false,
             edited: false,
+            viewers: Viewers::new(),
         }
     }
 
@@ -92,7 +128,7 @@ impl VoxelDataBlock {
 
 #[cfg(test)]
 mod tests {
-    use super::VoxelDataBlock;
+    use super::{Viewers, VoxelDataBlock};
     use crate::math::Vector3i;
     use crate::storage::{ChannelId, VoxelBuffer};
 
@@ -105,6 +141,7 @@ mod tests {
         assert!(!block.is_modified());
         assert!(!block.is_edited());
         assert!(!block.needs_lodding());
+        assert_eq!(block.viewers.get(), 0);
     }
 
     #[test]
@@ -132,5 +169,18 @@ mod tests {
         assert!(!block.is_edited());
         assert!(block.is_modified());
         assert!(block.needs_lodding());
+    }
+
+    #[test]
+    fn viewers_refcount_round_trips_and_saturates_below_zero() {
+        let mut viewers = Viewers::new();
+        assert_eq!(viewers.get(), 0);
+        viewers.add();
+        viewers.add();
+        assert_eq!(viewers.get(), 2);
+        assert_eq!(viewers.remove(), 1);
+        assert_eq!(viewers.remove(), 0);
+        // Unpaired remove saturates at zero rather than underflowing.
+        assert_eq!(viewers.remove(), 0);
     }
 }

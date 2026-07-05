@@ -560,6 +560,149 @@ impl VoxelData {
             .get(lod_index)
             .and_then(|lod| lod.map.get_block(block_pos))
     }
+
+    /// Increases the reference count of every loaded block in `blocks_box` at
+    /// `lod_index`, returning the positions of the missing (not-loaded) ones
+    /// and optionally shallow copies of the found blocks / their positions.
+    ///
+    /// Ports `VoxelData::view_area`. The C++ method is used by mesh block
+    /// tasks to pin blocks they will read while the mesher runs on a worker
+    /// thread. `unview_area` is the matching release.
+    pub fn view_area(
+        &mut self,
+        mut blocks_box: Box3i,
+        lod_index: usize,
+        missing_blocks: Option<&mut Vec<Vector3i>>,
+        found_blocks_positions: Option<&mut Vec<Vector3i>>,
+        found_blocks: Option<&mut Vec<VoxelDataBlock>>,
+    ) {
+        let bounds_in_blocks = self.bounds_in_voxels.downscaled(self.block_size() as i32);
+        blocks_box = blocks_box.clipped(bounds_in_blocks);
+
+        let Some(lod) = self.lods.get_mut(lod_index) else {
+            return;
+        };
+
+        let mut missing_local = Vec::new();
+        let mut found_positions_local = Vec::new();
+        let mut found_blocks_local: Vec<VoxelDataBlock> = Vec::new();
+
+        for bpos in blocks_box.iter_cells_zxy() {
+            match lod.map.get_block_mut(bpos) {
+                Some(block) => {
+                    block.viewers.add();
+                    if found_blocks.is_some() {
+                        // Shallow copy: voxels are deep, but the C++ path also
+                        // returns a full copy of the `VoxelDataBlock` value.
+                        found_blocks_local.push(clone_block(block));
+                    }
+                    if found_blocks_positions.is_some() {
+                        found_positions_local.push(bpos);
+                    }
+                }
+                None => {
+                    if missing_blocks.is_some() {
+                        missing_local.push(bpos);
+                    }
+                }
+            }
+        }
+
+        if let Some(out) = missing_blocks {
+            out.extend(missing_local);
+        }
+        if let Some(out) = found_blocks_positions {
+            out.extend(found_positions_local);
+        }
+        if let Some(out) = found_blocks {
+            out.extend(found_blocks_local);
+        }
+    }
+
+    /// Decreases the reference count of every loaded block in `blocks_box` at
+    /// `lod_index`. Blocks reaching zero viewers are removed; if they were
+    /// modified and `to_save` is provided, their voxels are returned for the
+    /// caller to persist. Ports `VoxelData::unview_area`.
+    pub fn unview_area(
+        &mut self,
+        mut blocks_box: Box3i,
+        lod_index: usize,
+        removed_blocks: Option<&mut Vec<Vector3i>>,
+        missing_blocks: Option<&mut Vec<Vector3i>>,
+        mut to_save: Option<&mut Vec<BlockToSave>>,
+    ) {
+        let bounds_in_blocks = self.bounds_in_voxels.downscaled(self.block_size() as i32);
+        blocks_box = blocks_box.clipped(bounds_in_blocks);
+
+        let Some(lod) = self.lods.get_mut(lod_index) else {
+            // Still report every block as missing to mirror C++ behaviour.
+            if let Some(out) = missing_blocks {
+                out.extend(blocks_box.iter_cells_zxy());
+            }
+            return;
+        };
+
+        let mut removed_local = Vec::new();
+        let mut missing_local = Vec::new();
+        let saves_local: Vec<BlockToSave> = Vec::new();
+
+        for bpos in blocks_box.iter_cells_zxy() {
+            // Borrow, decrement, and decide whether to remove. We do this in
+            // two steps because removing the block invalidates any outstanding
+            // borrow of the map.
+            let should_remove = match lod.map.get_block_mut(bpos) {
+                Some(block) => {
+                    block.viewers.remove();
+                    block.viewers.get() == 0
+                }
+                None => {
+                    missing_local.push(bpos);
+                    continue;
+                }
+            };
+
+            if should_remove {
+                if let Some(block) = lod.map.remove_block(bpos) {
+                    if let Some(out) = to_save.as_deref_mut() {
+                        if block.is_modified() {
+                            out.push(BlockToSave {
+                                voxels: block.into_voxels(),
+                                position: bpos,
+                                lod_index: lod_index as u8,
+                            });
+                        }
+                    }
+                    removed_local.push(bpos);
+                }
+            }
+        }
+
+        if let Some(out) = removed_blocks {
+            out.extend(removed_local);
+        }
+        if let Some(out) = missing_blocks {
+            out.extend(missing_local);
+        }
+        if let Some(out) = to_save {
+            out.extend(saves_local);
+        }
+    }
+}
+
+/// Copy a `VoxelDataBlock` for `view_area`'s found-blocks return. The C++
+/// implementation returns a full value copy of the block; we do the same,
+/// deep-copying the underlying `VoxelBuffer`. The refcount is also copied
+/// (post-increment) so the snapshot reflects the live count.
+fn clone_block(block: &VoxelDataBlock) -> VoxelDataBlock {
+    let mut copy = match block.has_voxels() {
+        true => VoxelDataBlock::with_voxels(block.voxels().copy_to_owned(), block.lod_index()),
+        false => VoxelDataBlock::empty(block.lod_index()),
+    };
+    copy.set_modified(block.is_modified());
+    copy.set_edited(block.is_edited());
+    copy.set_needs_lodding(block.needs_lodding());
+    copy.viewers = block.viewers;
+    copy
 }
 
 #[cfg(test)]
@@ -970,5 +1113,124 @@ mod tests {
         assert!(generator.calls.iter().any(|(origin, lod)| {
             *lod == 1 && origin.x == 0 && origin.y == 0 && origin.z == 0
         }));
+    }
+
+    #[test]
+    fn view_area_increments_viewers_and_reports_found_and_missing_blocks() {
+        let mut data = VoxelData::new();
+        // Bounds cover a 4×4×4 block region so view queries can probe blocks
+        // that exist alongside ones that don't, without being clipped out.
+        data.set_bounds(Box3i::new(Vector3i::zero(), Vector3i::splat(64)));
+        data.set_streaming_enabled(false);
+        data.set_full_load_completed(true);
+        let channel = ChannelId::Type.index();
+
+        // Two loaded blocks; (2,0,0) is left empty within the queried area.
+        assert!(data.try_set_voxel(1, Vector3i::new(1, 1, 1), channel));
+        assert!(data.try_set_voxel(2, Vector3i::new(20, 1, 1), channel));
+
+        let mut missing = Vec::new();
+        let mut found_positions = Vec::new();
+        let mut found_blocks: Vec<VoxelDataBlock> = Vec::new();
+        data.view_area(
+            Box3i::new(Vector3i::zero(), Vector3i::new(3, 1, 1)),
+            0,
+            Some(&mut missing),
+            Some(&mut found_positions),
+            Some(&mut found_blocks),
+        );
+
+        assert_eq!(found_positions, vec![Vector3i::zero(), Vector3i::new(1, 0, 0)]);
+        assert_eq!(missing, vec![Vector3i::new(2, 0, 0)]);
+        assert_eq!(found_blocks.len(), 2);
+        // Viewers were incremented on the live blocks.
+        assert_eq!(data.get_block(Vector3i::zero(), 0).unwrap().viewers.get(), 1);
+        assert_eq!(
+            data.get_block(Vector3i::new(1, 0, 0), 0).unwrap().viewers.get(),
+            1
+        );
+    }
+
+    #[test]
+    fn unview_area_releases_viewers_and_removes_blocks_reaching_zero() {
+        let mut data = VoxelData::new();
+        data.set_bounds(Box3i::new(Vector3i::zero(), Vector3i::splat(32)));
+        data.set_streaming_enabled(false);
+        data.set_full_load_completed(true);
+        let channel = ChannelId::Type.index();
+
+        // Block A is unmodified; block B is modified and should be returned
+        // for saving when it is unloaded by the unview.
+        assert!(data.try_set_voxel(1, Vector3i::new(1, 1, 1), channel));
+        assert!(data.try_set_voxel(2, Vector3i::new(20, 1, 1), channel));
+        data.mark_area_modified(
+            Box3i::new(Vector3i::new(16, 0, 0), Vector3i::new(32, 16, 16)),
+            false,
+        );
+
+        // Pin both blocks, then release them.
+        data.view_area(
+            Box3i::new(Vector3i::zero(), Vector3i::new(2, 1, 1)),
+            0,
+            None,
+            None,
+            None,
+        );
+        let mut removed = Vec::new();
+        let mut saves = Vec::new();
+        data.unview_area(
+            Box3i::new(Vector3i::zero(), Vector3i::new(2, 1, 1)),
+            0,
+            Some(&mut removed),
+            None,
+            Some(&mut saves),
+        );
+
+        assert_eq!(removed, vec![Vector3i::zero(), Vector3i::new(1, 0, 0)]);
+        assert!(!data.has_block(Vector3i::zero(), 0));
+        assert!(!data.has_block(Vector3i::new(1, 0, 0), 0));
+        assert_eq!(saves.len(), 1);
+        assert_eq!(saves[0].position, Vector3i::new(1, 0, 0));
+        assert!(saves[0].voxels.is_some());
+    }
+
+    #[test]
+    fn unview_area_keeps_blocks_with_remaining_viewers() {
+        let mut data = VoxelData::new();
+        data.set_bounds(Box3i::new(Vector3i::zero(), Vector3i::splat(32)));
+        data.set_streaming_enabled(false);
+        data.set_full_load_completed(true);
+        let channel = ChannelId::Type.index();
+        assert!(data.try_set_voxel(1, Vector3i::new(1, 1, 1), channel));
+
+        // View the same block twice; a single unview should leave it pinned.
+        data.view_area(
+            Box3i::new(Vector3i::zero(), Vector3i::splat(1)),
+            0,
+            None,
+            None,
+            None,
+        );
+        data.view_area(
+            Box3i::new(Vector3i::zero(), Vector3i::splat(1)),
+            0,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(data.get_block(Vector3i::zero(), 0).unwrap().viewers.get(), 2);
+
+        let mut removed = Vec::new();
+        data.unview_area(
+            Box3i::new(Vector3i::zero(), Vector3i::splat(1)),
+            0,
+            Some(&mut removed),
+            None,
+            None,
+        );
+
+        assert!(removed.is_empty());
+        assert!(data.has_block(Vector3i::zero(), 0));
+        assert_eq!(data.get_block(Vector3i::zero(), 0).unwrap().viewers.get(), 1);
     }
 }
