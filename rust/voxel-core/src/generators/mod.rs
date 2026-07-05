@@ -20,4 +20,5 @@
 //!   deferred from Phase 1).
 
 pub mod base;
+pub mod graph;
 pub mod simple;
