@@ -10,6 +10,13 @@ use super::{TaskPriority, TaskRunOutcome, ThreadedTask, ThreadedTaskContext};
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
+
+/// Default priority-recompute period. Matches the C++ runner
+/// (`_priority_update_period_ms = 32`): cached priorities and cancellation
+/// drains run at most every 32 ms, so a worker wake does no per-task
+/// `priority()`/`is_cancelled()` virtual dispatches in the common case.
+const DEFAULT_PRIORITY_UPDATE_PERIOD: Duration = Duration::from_millis(32);
 
 /// Generic thread pool for owned [`ThreadedTask`] objects.
 pub struct ThreadedTaskRunner {
@@ -25,8 +32,20 @@ impl ThreadedTaskRunner {
             shared: Arc::new(Shared::default()),
             handles: Vec::new(),
         };
+        // Default throttle matches C++ (`_priority_update_period_ms = 32`).
+        runner.shared.lock_state().priority_update_period = DEFAULT_PRIORITY_UPDATE_PERIOD;
         runner.set_thread_count(thread_count);
         runner
+    }
+
+    /// Sets how often cached priorities are recomputed and cancelled tasks
+    /// drained, mirroring `ThreadedTaskRunner::set_priority_update_period`.
+    /// Smaller periods make the runner more responsive to priority changes
+    /// (e.g. a moving viewer); larger periods reduce per-task virtual
+    /// dispatches under heavy queue pressure. Setting to `Duration::ZERO`
+    /// disables throttling and recomputes on every worker wake.
+    pub fn set_priority_update_period(&self, period: Duration) {
+        self.shared.lock_state().priority_update_period = period;
     }
 
     pub fn set_thread_count(&mut self, count: usize) {
@@ -180,11 +199,27 @@ struct RunnerState {
     running_count: usize,
     serial_running: bool,
     prefer_postponed_next: bool,
+    /// Last time priorities were recomputed and cancelled tasks were drained.
+    /// Mirrors `_last_priority_update_time_ms` in the C++ runner.
+    last_priority_update: Option<Instant>,
+    /// Period of the priority/cancellation refresh. Defaults to 32 ms (matching
+    /// C++); exposed via [`ThreadedTaskRunner::set_priority_update_period`].
+    priority_update_period: Duration,
 }
 
 impl RunnerState {
     fn has_pending_or_running_tasks(&self) -> bool {
         !self.tasks.is_empty() || !self.spinning_tasks.is_empty() || self.running_count != 0
+    }
+
+    /// Returns true when the throttle window has elapsed since the last
+    /// priority refresh. Always true on the first refresh so initial picks
+    /// don't run with stale `TaskPriority::min()` cache values.
+    fn priority_refresh_due(&self, now: Instant) -> bool {
+        match self.last_priority_update {
+            None => true,
+            Some(last) => now.duration_since(last) >= self.priority_update_period,
+        }
     }
 }
 
@@ -203,8 +238,12 @@ fn worker_loop(shared: Arc<Shared>, thread_index: u8) {
                     return;
                 }
 
-                if refresh_priorities_and_complete_cancelled(&mut state) {
-                    shared.cvar.notify_all();
+                let now = Instant::now();
+                if state.priority_refresh_due(now) {
+                    if refresh_priorities_and_complete_cancelled(&mut state) {
+                        shared.cvar.notify_all();
+                    }
+                    state.last_priority_update = Some(now);
                 }
 
                 if let Some(item) = pick_next_task(&mut state) {
@@ -646,5 +685,48 @@ mod tests {
         assert_eq!(counter.completed.load(Ordering::SeqCst), 1);
         apply_all(runner.drain_completed_tasks());
         assert_eq!(counter.applied.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn priority_recompute_is_throttled_within_the_update_period() {
+        // With a long priority-update period, the runner must NOT call
+        // `priority()` on every worker wake: cached priorities are reused
+        // across wakes until the period elapses. This mirrors the C++
+        // `_priority_update_period_ms` throttle.
+        struct PriorityCountTask {
+            priority_calls: Arc<AtomicUsize>,
+        }
+        impl ThreadedTask for PriorityCountTask {
+            fn run(self: Box<Self>, _ctx: ThreadedTaskContext) -> TaskRunOutcome {
+                TaskRunOutcome::Complete(self)
+            }
+            fn priority(&mut self) -> TaskPriority {
+                self.priority_calls.fetch_add(1, Ordering::SeqCst);
+                TaskPriority::max()
+            }
+        }
+
+        let runner = ThreadedTaskRunner::new(2);
+        // 1 second window is much longer than the test will take, so only the
+        // initial refresh (one priority() call per task) should happen.
+        runner.set_priority_update_period(Duration::from_secs(1));
+
+        let priority_calls = Arc::new(AtomicUsize::new(0));
+        for _ in 0..16 {
+            runner.enqueue(
+                Box::new(PriorityCountTask {
+                    priority_calls: priority_calls.clone(),
+                }),
+                false,
+            );
+        }
+
+        runner.wait_for_all_tasks();
+        apply_all(runner.drain_completed_tasks());
+
+        // Without throttling each wake would call priority() at least once per
+        // task per worker iteration; with throttling it should be exactly one
+        // call per task (the initial refresh).
+        assert_eq!(priority_calls.load(Ordering::SeqCst), 16);
     }
 }
