@@ -5,6 +5,7 @@
 
 use super::PriorityViewersData;
 use crate::math::Vector3f;
+use crate::tasks::{ThreadedTask, ThreadedTaskRunner};
 use std::marker::PhantomData;
 use std::sync::Arc;
 
@@ -226,6 +227,7 @@ pub struct VoxelEngine {
     volumes: GenerationalSlotMap<Volume, VolumeId>,
     viewers: GenerationalSlotMap<Viewer, ViewerId>,
     shared_priority_dependency: Arc<PriorityViewersData>,
+    task_runner: ThreadedTaskRunner,
 }
 
 impl Default for VoxelEngine {
@@ -236,10 +238,15 @@ impl Default for VoxelEngine {
 
 impl VoxelEngine {
     pub fn new() -> Self {
+        Self::with_thread_count(default_thread_count())
+    }
+
+    pub fn with_thread_count(thread_count: usize) -> Self {
         Self {
             volumes: GenerationalSlotMap::default(),
             viewers: GenerationalSlotMap::default(),
             shared_priority_dependency: Arc::new(PriorityViewersData::new(Vec::new())),
+            task_runner: ThreadedTaskRunner::new(thread_count),
         }
     }
 
@@ -371,6 +378,49 @@ impl VoxelEngine {
         self.shared_priority_dependency.clone()
     }
 
+    pub fn set_thread_count(&mut self, thread_count: usize) {
+        self.task_runner.set_thread_count(thread_count);
+    }
+
+    pub fn thread_count(&self) -> usize {
+        self.task_runner.thread_count()
+    }
+
+    pub fn push_async_task(&self, task: Box<dyn ThreadedTask>) {
+        self.task_runner.enqueue(task, false);
+    }
+
+    pub fn push_async_tasks<I>(&self, tasks: I)
+    where
+        I: IntoIterator<Item = Box<dyn ThreadedTask>>,
+    {
+        self.task_runner.enqueue_many(tasks, false);
+    }
+
+    pub fn push_async_io_task(&self, task: Box<dyn ThreadedTask>) {
+        self.task_runner.enqueue(task, true);
+    }
+
+    pub fn push_async_io_tasks<I>(&self, tasks: I)
+    where
+        I: IntoIterator<Item = Box<dyn ThreadedTask>>,
+    {
+        self.task_runner.enqueue_many(tasks, true);
+    }
+
+    pub fn wait_for_all_tasks(&self) {
+        self.task_runner.wait_for_all_tasks();
+    }
+
+    pub fn wait_and_clear_all_tasks(&self) {
+        self.task_runner.wait_for_all_tasks();
+        drop(self.task_runner.drain_completed_tasks());
+    }
+
+    pub fn pending_threaded_task_count(&self) -> usize {
+        self.task_runner.remaining_task_count()
+    }
+
     pub fn sync_viewers_task_priority_data(&self) {
         let mut max_distance = 0u32;
         let viewers: Vec<Vector3f> = self
@@ -388,14 +438,100 @@ impl VoxelEngine {
     }
 
     pub fn process(&self) {
+        let completed = self
+            .task_runner
+            .drain_completed_tasks_and_enqueue_followups(false);
+        for task in completed {
+            task.apply_result();
+        }
         self.sync_viewers_task_priority_data();
     }
+}
+
+fn default_thread_count() -> usize {
+    let n = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    n.min(4)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{ViewerDistances, VoxelEngine};
     use crate::math::Vector3f;
+    use crate::tasks::{TaskRunOutcome, ThreadedTask, ThreadedTaskContext};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::Duration;
+
+    struct FlagTask {
+        ran: Arc<AtomicBool>,
+        applied: Arc<AtomicBool>,
+    }
+
+    impl ThreadedTask for FlagTask {
+        fn run(self: Box<Self>, _ctx: ThreadedTaskContext) -> TaskRunOutcome {
+            self.ran.store(true, Ordering::SeqCst);
+            TaskRunOutcome::Complete(self)
+        }
+
+        fn apply_result(self: Box<Self>) {
+            self.applied.store(true, Ordering::SeqCst);
+        }
+    }
+
+    struct SerialCounterTask {
+        current: Arc<AtomicUsize>,
+        max: Arc<AtomicUsize>,
+        completed: Arc<AtomicUsize>,
+        applied: Arc<AtomicUsize>,
+    }
+
+    impl ThreadedTask for SerialCounterTask {
+        fn run(self: Box<Self>, _ctx: ThreadedTaskContext) -> TaskRunOutcome {
+            let current = self.current.fetch_add(1, Ordering::SeqCst) + 1;
+            let mut previous = self.max.load(Ordering::SeqCst);
+            while previous < current {
+                match self.max.compare_exchange_weak(
+                    previous,
+                    current,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                ) {
+                    Ok(_) => break,
+                    Err(next) => previous = next,
+                }
+            }
+            thread::sleep(Duration::from_millis(5));
+            self.current.fetch_sub(1, Ordering::SeqCst);
+            self.completed.fetch_add(1, Ordering::SeqCst);
+            TaskRunOutcome::Complete(self)
+        }
+
+        fn apply_result(self: Box<Self>) {
+            self.applied.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    struct FollowUpParentTask {
+        parent_applied: Arc<AtomicBool>,
+        follow_up_tasks: Vec<Box<dyn ThreadedTask>>,
+    }
+
+    impl ThreadedTask for FollowUpParentTask {
+        fn run(self: Box<Self>, _ctx: ThreadedTaskContext) -> TaskRunOutcome {
+            TaskRunOutcome::Complete(self)
+        }
+
+        fn take_follow_up_tasks(&mut self) -> Vec<Box<dyn ThreadedTask>> {
+            std::mem::take(&mut self.follow_up_tasks)
+        }
+
+        fn apply_result(self: Box<Self>) {
+            self.parent_applied.store(true, Ordering::SeqCst);
+        }
+    }
 
     #[test]
     fn viewer_ids_are_generational_after_remove_and_reuse() {
@@ -527,5 +663,104 @@ mod tests {
         let shared = engine.shared_viewers_data();
         assert_eq!(shared.viewers_count(), 1);
         assert_eq!(shared.viewers(), vec![Vector3f::new(7.0, 8.0, 9.0)]);
+    }
+
+    #[test]
+    fn process_applies_completed_async_tasks_and_syncs_viewers() {
+        let mut engine = VoxelEngine::with_thread_count(1);
+        let viewer = engine.add_viewer();
+        assert!(engine.set_viewer_position(viewer, Vector3f::new(1.0, 2.0, 3.0)));
+
+        let ran = Arc::new(AtomicBool::new(false));
+        let applied = Arc::new(AtomicBool::new(false));
+        engine.push_async_task(Box::new(FlagTask {
+            ran: ran.clone(),
+            applied: applied.clone(),
+        }));
+
+        engine.wait_for_all_tasks();
+        assert!(ran.load(Ordering::SeqCst));
+        assert!(!applied.load(Ordering::SeqCst));
+        assert_eq!(engine.shared_viewers_data().viewers_count(), 0);
+
+        engine.process();
+
+        assert!(applied.load(Ordering::SeqCst));
+        let shared = engine.shared_viewers_data();
+        assert_eq!(shared.viewers_count(), 1);
+        assert_eq!(shared.viewers(), vec![Vector3f::new(1.0, 2.0, 3.0)]);
+    }
+
+    #[test]
+    fn async_io_tasks_run_serially_through_engine() {
+        let engine = VoxelEngine::with_thread_count(4);
+        let current = Arc::new(AtomicUsize::new(0));
+        let max = Arc::new(AtomicUsize::new(0));
+        let completed = Arc::new(AtomicUsize::new(0));
+        let applied = Arc::new(AtomicUsize::new(0));
+
+        for _ in 0..8 {
+            engine.push_async_io_task(Box::new(SerialCounterTask {
+                current: current.clone(),
+                max: max.clone(),
+                completed: completed.clone(),
+                applied: applied.clone(),
+            }));
+        }
+
+        engine.wait_for_all_tasks();
+        engine.process();
+
+        assert_eq!(completed.load(Ordering::SeqCst), 8);
+        assert_eq!(applied.load(Ordering::SeqCst), 8);
+        assert_eq!(max.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn process_enqueues_and_applies_follow_up_tasks() {
+        let engine = VoxelEngine::with_thread_count(1);
+        let parent_applied = Arc::new(AtomicBool::new(false));
+        let child_ran = Arc::new(AtomicBool::new(false));
+        let child_applied = Arc::new(AtomicBool::new(false));
+
+        engine.push_async_task(Box::new(FollowUpParentTask {
+            parent_applied: parent_applied.clone(),
+            follow_up_tasks: vec![Box::new(FlagTask {
+                ran: child_ran.clone(),
+                applied: child_applied.clone(),
+            })],
+        }));
+
+        engine.wait_for_all_tasks();
+        engine.process();
+
+        assert!(parent_applied.load(Ordering::SeqCst));
+        assert!(!child_applied.load(Ordering::SeqCst));
+
+        engine.wait_for_all_tasks();
+        assert!(child_ran.load(Ordering::SeqCst));
+        engine.process();
+
+        assert!(child_applied.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn wait_and_clear_all_tasks_drops_completed_tasks_without_applying_results() {
+        let engine = VoxelEngine::with_thread_count(1);
+        let ran = Arc::new(AtomicBool::new(false));
+        let applied = Arc::new(AtomicBool::new(false));
+        engine.push_async_task(Box::new(FlagTask {
+            ran: ran.clone(),
+            applied: applied.clone(),
+        }));
+
+        engine.wait_and_clear_all_tasks();
+
+        assert!(ran.load(Ordering::SeqCst));
+        assert!(!applied.load(Ordering::SeqCst));
+
+        engine.process();
+
+        assert!(!applied.load(Ordering::SeqCst));
     }
 }

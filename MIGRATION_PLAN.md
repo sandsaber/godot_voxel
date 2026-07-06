@@ -200,7 +200,7 @@ godot_voxel (fork)
 - **`string::expression_parser` ✅** (closure Фазы 1, открывает generators::graph compilation)
 - **`generators::graph` runtime minimal ✅** (AST-walker: InputX/Y/Z, Constant, Add/Sub/Mul/Div, Sin/Cos/Abs/Sqrt, Min/Max, Remap, OutputSdf + GraphGenerator impl VoxelGenerator)
 - Multi-LOD paging (VoxelLodTerrain) — далее (clipbox/octree стратегии)
-- `VoxelEngine` foundation (volume/viewer registry + shared priority viewers) ✅; task dequeue loop — далее
+- `VoxelEngine` foundation + task drain loop (volume/viewer registry + shared priority viewers + threaded task ownership/dequeue) ✅
 - generators::graph extensions: Curve/Image/Noise/SDF nodes, FastNoise2, range analysis, Expression node, bytecode VM — частично (SDF/Curve/Noise/math nodes готовы; Image/FastNoise2/range analysis/Expression/bytecode VM — далее)
 - Cubes/Blocky mesher adapters ✅ (TransvoxelMesher + CubesMesher + BlockyMesher — все три impl VoxelMesher)
 - `VoxelDataGrid`, real `SpatialLock3D` — далее
@@ -287,6 +287,7 @@ godot_voxel (fork)
 | 2026-07-05 | Фаза 4: graph extensions + Cubes/Blocky mesher adapters | ✅ total 610 unit + 5 e2e. (1) `generators::graph` расширен 16 узлами: SDF (Plane/Box/Sphere/Torus/Union/Subtract/SmoothUnion/SmoothSubtract), Curve (baked lookup), Noise2D/3D (fastnoise-lite через NoiseConfig), math (Floor/Fract/Pow/Mix/Clamp/Distance2D/3D/Normalize3D). Все используют существующие `math::sdf` функции + `simple::Curve`/`NoiseConfig`. (2) `CubesMesher` adapter (VoxelMesher trait) — оборачивает greedy/simple cubes free functions, palette + opaque/transparent material split. (3) `BlockyMesher` adapter — оборачивает `blocky::mesher::generate_mesh`, shared `Arc<BakedLibrary>`, AO. Трио mesher adapters (Transvoxel/Cubes/Blocky) полностью готовы. 17 тестов (9 graph extensions + 4 CubesMesher + 3 BlockyMesher + empty-library edge) |
 | 2026-07-06 | H1 full regular-mesh parity closed on macOS | ✅ C++ `transvoxel_sphere_16/32` goldens committed (`godot_voxel-cpp`): sphere_16 888 verts / 3912 idx, sphere_32 3696 verts / 18600 idx. Rust `transvoxel_parity` now passes against C++ goldens with exact structural fields and float tolerance. Root cause: C++ early-out uses raw SDF comparison, while case/interpolation use `sdf_as_float`; Rust now mirrors that split. `build_mesh.sh` fixed for macOS (`./build_mesh.sh`, BSD-sed-safe) |
 | 2026-07-06 | Фаза 4: `VoxelEngine` foundation | ✅ total 631 unit + 10 integration. Engine-agnostic subset of `engine/voxel_engine.*`: generational `VolumeId`/`ViewerId`, volume/viewer registry, viewer position/distances/visual/collision/data-notification/network-peer metadata, `sync_viewers_task_priority_data` → shared `PriorityViewersData` (`highest_view_distance = max_distance * 2`, computed in `f32` to avoid `u32` overflow) and minimal `process()` sync. Task runners/dequeue loop/GPU/main-thread queues остаются следующим engine slice |
+| 2026-07-06 | Фаза 4: `VoxelEngine` task loop | ✅ total 635 unit + 10 integration. `VoxelEngine` now owns `ThreadedTaskRunner`, exposes Rust-owned `push_async_task(s)` / `push_async_io_task(s)` wrappers, `wait_for_all_tasks`, `wait_and_clear_all_tasks`, thread-count controls, and `process()` drains completed tasks, enqueues follow-ups, applies `ThreadedTask::apply_result`, then syncs shared viewer priority data. Async-IO uses serial runner mode. Main-thread time-spread/progressive queues, GPU queue, file locker, stats/profiling and volume callback dispatch remain deferred |
 
 ### Где остановились (для возобновления)
 
@@ -300,7 +301,7 @@ godot_voxel (fork)
 **Фаза 2 mobile-half — `.so` собран** (aarch64 + x86_64-android через NDK r29).
 **Фаза 3 (compute-слой) — ЗАВЕРШЕНА.** Все engine-agnostic компоненты
 портированы и повторно проверены audit pass'ом (439 unit тестов).
-**Фаза 4 — storage/streaming + meshing pipeline + single-LOD paging terrain + VoxelEngine foundation работают headlessly (631 unit + 10 integration тестов).**
+**Фаза 4 — storage/streaming + meshing pipeline + single-LOD paging terrain + VoxelEngine foundation/task loop работают headlessly (635 unit + 10 integration тестов).**
 End-to-end: generator → VoxelData → MeshBlockTask → TransvoxelMesher → MesherOutput.
 Paging: VoxelTerrainCore orchestrates viewers → loads → meshing → outputs → unload.
 
@@ -322,9 +323,10 @@ empty-cell early-out по raw SDF, а case/interpolation/normals — после
    - **Multi-LOD paging (VoxelLodTerrain)** — `VoxelLodTerrainUpdateData` +
      threaded update task (clipbox/octree стратегии). Single-LOD paging
      (`VoxelTerrainCore`) готов; multi-LOD — отдельный orchestrator.
-   - **`VoxelEngine` remaining subset** — task-runner ownership + `process()`
-     dequeue loop for multi-volume scenes. Volume/viewer registry and shared
-     priority viewer sync are done.
+   - **`VoxelEngine` remaining subset** — main-thread time-spread/progressive
+     queues, GPU queue, file locker, stats/profiling and volume callback
+     dispatch. Volume/viewer registry, shared priority viewer sync and threaded
+     task drain loop are done.
    - **`generators::graph` runtime** — AST-walker + SDF/Curve/Noise/math nodes
      готовы; Image node, FastNoise2, range analysis, Expression node и bytecode
      VM — отложены.
@@ -469,7 +471,7 @@ conditions (проверка под ThreadSanitizer/loom).
 git clone https://github.com/sandsaber/godot_voxel.git
 cd godot_voxel && git checkout rust/pilot
 cd rust
-cargo test -p voxel-core       # 631 unit + 10 integration + 1 doc-test; 1 ignored diagnostic snapshot
+cargo test -p voxel-core       # 635 unit + 10 integration + 1 doc-test; 1 ignored diagnostic snapshot
 cargo build -p voxel-gdext     # GDExtension .so (грузится в Godot 4.7)
 cargo clippy --workspace --all-targets  # должен быть чистый
 cargo bench                    # transvoxel benches (16³=143 / 32³=199 / 64³=249 Melem/s)
