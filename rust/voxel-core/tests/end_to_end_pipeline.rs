@@ -56,7 +56,7 @@ impl VoxelGenerator for SphereGenerator {
 struct ThresholdMesher;
 
 impl VoxelMesher for ThresholdMesher {
-    fn build(&mut self, output: &mut MesherOutput, input: &voxel_core::meshers::MesherInput<'_>) {
+    fn build(&self, output: &mut MesherOutput, input: &voxel_core::meshers::MesherInput<'_>) {
         let voxels = input.voxels;
         let channel = ChannelId::Sdf.index();
         let mut arrays = voxel_core::meshers::transvoxel::structures::MeshArrays::default();
@@ -137,7 +137,7 @@ fn sphere_pipeline(radius: f32, mesh_block_pos: Vector3i) -> BlockMeshOutput {
     // 2) Build the meshing dependency with the sphere generator + threshold
     //    mesher.
     let generator: Arc<dyn VoxelGenerator> = Arc::new(SphereGenerator { radius });
-    let mesher: Arc<Mutex<Box<dyn VoxelMesher>>> = Arc::new(Mutex::new(Box::new(ThresholdMesher)));
+    let mesher: Arc<dyn VoxelMesher> = Arc::new(ThresholdMesher);
     let meshing_dependency = MeshingDependency::new(mesher, Some(generator));
 
     // 3) Run a MeshBlockTask at the requested position.
@@ -193,7 +193,7 @@ fn pipeline_dropped_output_when_dependency_invalidated() {
     data.try_set_voxel(1, Vector3i::new(1, 1, 1), ChannelId::Type.index());
 
     let data_handle = Arc::new(Mutex::new(data));
-    let mesher: Arc<Mutex<Box<dyn VoxelMesher>>> = Arc::new(Mutex::new(Box::new(ThresholdMesher)));
+    let mesher: Arc<dyn VoxelMesher> = Arc::new(ThresholdMesher);
     let meshing_dependency = MeshingDependency::new(mesher, None);
 
     let mut task = MeshBlockTask::new(MeshBlockTaskParams {

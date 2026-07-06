@@ -819,13 +819,12 @@ mod tests {
     use crate::storage::{ChannelId, VoxelData};
     use crate::streams::LoadResult;
     use crate::tasks::{TaskRunOutcome, ThreadedTask, ThreadedTaskContext};
-    use std::sync::Mutex;
 
     /// A mesher that always emits one triangle, so we can tell from
     /// `mesh_blocks()[pos].is_loaded` whether the paging loop ran end-to-end.
     struct AlwaysOneTriangleMesher;
     impl VoxelMesher for AlwaysOneTriangleMesher {
-        fn build(&mut self, output: &mut MesherOutput, _input: &crate::meshers::MesherInput<'_>) {
+        fn build(&self, output: &mut MesherOutput, _input: &crate::meshers::MesherInput<'_>) {
             let mut arrays = crate::meshers::transvoxel::structures::MeshArrays::default();
             let a = arrays.add_vertex(
                 crate::math::Vector3f::zero(),
@@ -867,8 +866,7 @@ mod tests {
         };
         let generator: Arc<dyn crate::generators::base::VoxelGenerator> = Arc::new(flat);
         data.set_generator(Some(generator));
-        let mesher: Arc<Mutex<Box<dyn VoxelMesher>>> =
-            Arc::new(Mutex::new(Box::new(AlwaysOneTriangleMesher)));
+        let mesher: Arc<dyn VoxelMesher> = Arc::new(AlwaysOneTriangleMesher);
         let meshing_dependency = MeshingDependency::new(mesher, None);
         VoxelTerrainCore::new(data, stream, meshing_dependency)
     }

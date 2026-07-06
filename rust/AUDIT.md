@@ -283,10 +283,9 @@ so we can get rid of abstraction layers and conditionals»*):
 
 ### 9.5 Приоритеты фиксов
 
-> Обновление 2026-07-06: первая часть пункта #1 закрыта — `VoxelGenerator`
-> переведён на shared immutable contract (`&self` + `Arc<dyn VoxelGenerator>`)
-> без внешнего generator-mutex. Оставшаяся часть #1: `VoxelMesher::build(&self)`
-> со scratch-ownership и `VoxelData` per-LOD locking.
+> Обновление 2026-07-06: trait-level часть пункта #1 закрыта — `VoxelGenerator`
+> и `VoxelMesher` переведены на shared immutable contract (`&self` + `Arc<dyn ...>`)
+> без внешних generator/mesher mutex. Оставшаяся часть #1: `VoxelData` per-LOD locking.
 
 | # | Что | Эффект | Стоимость |
 |---|---|---|---|
@@ -546,11 +545,12 @@ clippy/fmt чистые; каждый шаг сверяется с соотве�
 | Дата | Пункт аудита | Статус | Проверка |
 |---|---|---|---|
 | 2026-07-06 | A1, часть generator: `VoxelGenerator::generate_block(&self)` / `generate_single(&self)` + `SharedVoxelGenerator = Arc<dyn VoxelGenerator>` | ✅ закрыто. Внешний generator-mutex удалён из `VoxelData`, `MeshingDependency`, `MeshBlockTask`, `LoadBlockForTerrainTask`; `GraphGenerator` синхронизирует только собственный scratch локально | `cargo test -p voxel-core` → 635 unit + 10 integration + 1 doc-test, 0 failed |
+| 2026-07-06 | A2, часть mesher: `VoxelMesher::build(&self)` + `SharedVoxelMesher = Arc<dyn VoxelMesher>` | ✅ закрыто. Внешний mesher-mutex удалён из `MeshingDependency`/`MeshBlockTask`; `TransvoxelMesher` использует thread-local `Cache`, поэтому shared mesher не сериализует build через внутренний глобальный lock | `cargo test -p voxel-core` → 635 unit + 10 integration + 1 doc-test, 0 failed |
 
-Остаток A1 не закрыт этим шагом: `VoxelMesher::build(&self)` + scratch ownership и
-`VoxelData` per-LOD `RwLock`/real `SpatialLock3D` остаются следующими отдельными этапами.
-ABBA-риск с внешним generator lock снят, но правило “не держать data lock через generator/mesher/stream”
-ещё нужно закрепить и довести в A4/A3.
+Остаток пункта #1: `VoxelData` per-LOD `RwLock`/real `SpatialLock3D`.
+ABBA-риск с внешним generator/mesher lock снят, но правило “не держать data lock через
+generator/mesher/stream” ещё нужно закрепить и довести в A4/A3. Переиспользование
+`MeshArrays`/`MesherOutput` остаётся отдельной perf-частью B3.
 
 ## 10. Вывод
 
@@ -560,14 +560,15 @@ ABBA-риск с внешним generator lock снят, но правило “
 и идиоматика на высоте** (порт не механический: Option вместо сентинелей, RAII-пул, точные
 byte-parity тесты), но **два системных долга** требуют внимания до продолжения Фазы 4/5:
 
-1. **Конкурентная модель** (§9.1): текущие `&mut self`-сигнатуры трейтов навязали Mutex-сериализацию
-   генерации, мешинга и доступа к данным — пул потоков пока не даёт масштабирования, есть
-   потенциальный дедлок. Это дешевле всего исправить сейчас, пока на API не наросли multi-LOD и биндинг.
+1. **Конкурентная модель** (§9.1): trait-level сериализация генерации и мешинга уже снята
+   после аудита, но `VoxelData` всё ещё стоит за одним глобальным mutex. Пул потоков
+   начнёт масштабироваться полноценно только после per-LOD `RwLock`/real `SpatialLock3D`
+   и закрепления порядка замков.
 2. **Горячий путь мешинга** (§9.2): адаптерный слой вернул абстракционные издержки, которые C++
    целенаправленно устранял; заявление H2 о 1.5× преимуществе не распространяется на end-to-end конвейер.
 
-План действий — три волны из §9.6: (1) волна 1 — оставшийся `&self`-трейт мешера + быстрые
-фиксы (B2/C2/D1/D2), (2) волна 2 — per-LOD RwLock + реальный SpatialLock3D + TSan/stress
+План действий — три волны из §9.6: (1) остаток волны 1 — A4 + быстрые
+фиксы (B2/C2/D1/D2/D5), (2) волна 2 — per-LOD RwLock + реальный SpatialLock3D + TSan/stress
 (закрывает GO-критерий Фазы 4), (3) волна 3 — перф-фиксы горячего пути и graph runtime
 с перемером H2 end-to-end. Параллельно: настроить upstream-tracking (`cpp-reference`) и
 CI для `rust/` — сейчас Rust не собирается ни одним workflow.

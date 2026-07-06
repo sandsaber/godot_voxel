@@ -1,9 +1,9 @@
 //! Meshing lifetime dependency ported from `engine/meshing_dependency.h`.
 
-use crate::meshers::VoxelMesher;
+use crate::meshers::SharedVoxelMesher;
 use crate::storage::SharedVoxelGenerator;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// Shared dependency needed by mesh block tasks.
 ///
@@ -13,20 +13,14 @@ use std::sync::{Arc, Mutex};
 /// invalid, rather than mutating in place (the C++ comment explains this is
 /// cheaper than fine-grained mutexes given how rarely these swap).
 ///
-/// `mesher` lives behind an `Arc<Mutex<>>` because `VoxelMesher::build` takes
-/// `&mut self` (matching the C++ non-const `build`). The mutex is held only
-/// for the duration of a single mesh task's `build` call.
 pub struct MeshingDependency {
-    mesher: Arc<Mutex<Box<dyn VoxelMesher>>>,
+    mesher: SharedVoxelMesher,
     generator: Option<SharedVoxelGenerator>,
     valid: AtomicBool,
 }
 
 impl MeshingDependency {
-    pub fn new(
-        mesher: Arc<Mutex<Box<dyn VoxelMesher>>>,
-        generator: Option<SharedVoxelGenerator>,
-    ) -> Arc<Self> {
+    pub fn new(mesher: SharedVoxelMesher, generator: Option<SharedVoxelGenerator>) -> Arc<Self> {
         Arc::new(Self {
             mesher,
             generator,
@@ -38,7 +32,7 @@ impl MeshingDependency {
     /// fresh one. Mirrors `MeshingDependency::reset`.
     pub fn reset(
         slot: &mut Option<Arc<Self>>,
-        mesher: Arc<Mutex<Box<dyn VoxelMesher>>>,
+        mesher: SharedVoxelMesher,
         generator: Option<SharedVoxelGenerator>,
     ) -> Arc<Self> {
         if let Some(previous) = slot.take() {
@@ -49,7 +43,7 @@ impl MeshingDependency {
         dependency
     }
 
-    pub fn mesher(&self) -> Arc<Mutex<Box<dyn VoxelMesher>>> {
+    pub fn mesher(&self) -> SharedVoxelMesher {
         self.mesher.clone()
     }
 
@@ -72,11 +66,11 @@ mod tests {
     use crate::generators::base::{GenResult, VoxelGenerator, VoxelQueryData};
     use crate::meshers::{MesherInput, MesherOutput, VoxelMesher};
     use crate::storage::SharedVoxelGenerator;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     struct NoOpMesher;
     impl VoxelMesher for NoOpMesher {
-        fn build(&mut self, _output: &mut MesherOutput, _input: &MesherInput<'_>) {}
+        fn build(&self, _output: &mut MesherOutput, _input: &MesherInput<'_>) {}
     }
 
     struct NoOpGenerator;
@@ -86,8 +80,8 @@ mod tests {
         }
     }
 
-    fn mesher_handle() -> Arc<Mutex<Box<dyn VoxelMesher>>> {
-        Arc::new(Mutex::new(Box::new(NoOpMesher)))
+    fn mesher_handle() -> Arc<dyn VoxelMesher> {
+        Arc::new(NoOpMesher)
     }
 
     fn generator_handle() -> SharedVoxelGenerator {

@@ -217,7 +217,7 @@ impl MesherOutput {
 /// it themselves when appropriate).
 pub trait VoxelMesher: Send + Sync {
     /// Build mesh surfaces from `input.voxels`, appending to `output`.
-    fn build(&mut self, output: &mut MesherOutput, input: &MesherInput<'_>);
+    fn build(&self, output: &mut MesherOutput, input: &MesherInput<'_>);
 
     /// How many neighbor voxels the mesher needs to access toward the
     /// negative axes. If callers don't provide this much padding, the mesher
@@ -251,6 +251,10 @@ pub trait VoxelMesher: Send + Sync {
     }
 }
 
+/// Shared mesher storage. Implementations own any scratch storage they need,
+/// so worker tasks can call `build` concurrently through one shared handle.
+pub type SharedVoxelMesher = std::sync::Arc<dyn VoxelMesher>;
+
 #[cfg(test)]
 mod tests {
     use super::{CollisionSurface, MesherInput, MesherOutput, Surface, SurfaceArrays, VoxelMesher};
@@ -263,7 +267,7 @@ mod tests {
     /// to exercise the trait plumbing without depending on real meshing math.
     struct StubMesher;
     impl VoxelMesher for StubMesher {
-        fn build(&mut self, output: &mut MesherOutput, _input: &MesherInput<'_>) {
+        fn build(&self, output: &mut MesherOutput, _input: &MesherInput<'_>) {
             let mut arrays = MeshArrays::default();
             let a = arrays.add_vertex(
                 Vector3f::new(0.0, 0.0, 0.0),
@@ -302,7 +306,7 @@ mod tests {
 
     #[test]
     fn build_appends_a_surface_with_geometry() {
-        let mut mesher = StubMesher;
+        let mesher = StubMesher;
         let voxels = VoxelBuffer::with_size(Vector3i::splat(2));
         let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
 
@@ -318,7 +322,7 @@ mod tests {
 
     #[test]
     fn clear_resets_output_for_reuse() {
-        let mut mesher = StubMesher;
+        let mesher = StubMesher;
         let voxels = VoxelBuffer::with_size(Vector3i::splat(2));
         let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
 
@@ -365,7 +369,7 @@ mod tests {
     /// which is how the mesh block task will hold a `Box<dyn VoxelMesher>`.
     #[test]
     fn boxed_dyn_dispatch_works() {
-        let mut mesher: Box<dyn VoxelMesher> = Box::new(StubMesher);
+        let mesher: Box<dyn VoxelMesher> = Box::new(StubMesher);
         let voxels = VoxelBuffer::with_size(Vector3i::splat(2));
         let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
         let mut output = MesherOutput::default();
@@ -378,12 +382,10 @@ mod tests {
     /// Verify the input's generator slot round-trips through the build call.
     #[test]
     fn input_generator_is_reachable_inside_build() {
-        struct ProbingMesher {
-            saw_generator: bool,
-        }
+        struct ProbingMesher;
         impl VoxelMesher for ProbingMesher {
-            fn build(&mut self, _output: &mut MesherOutput, input: &MesherInput<'_>) {
-                self.saw_generator = input.generator.is_some();
+            fn build(&self, _output: &mut MesherOutput, input: &MesherInput<'_>) {
+                assert!(input.generator.is_some());
             }
         }
         struct DummyGen;
@@ -393,9 +395,7 @@ mod tests {
             }
         }
 
-        let mut mesher = ProbingMesher {
-            saw_generator: false,
-        };
+        let mesher = ProbingMesher;
         let voxels = VoxelBuffer::with_size(Vector3i::splat(2));
         let gen = DummyGen;
         let input = MesherInput {
@@ -404,6 +404,5 @@ mod tests {
         };
         let mut output = MesherOutput::default();
         mesher.build(&mut output, &input);
-        assert!(mesher.saw_generator);
     }
 }

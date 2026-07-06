@@ -34,7 +34,7 @@ VoxelData
    ▼
 MeshBlockTask
    • gather_voxels_cpu (3×3×3 neighbours + generator gap-fill)
-   • VoxelMesher trait dispatch
+   • SharedVoxelMesher = Arc<dyn VoxelMesher>, no outer mesher mutex
    ▼
 VoxelMesher  ◂─── TransvoxelMesher  (smooth SDF, regular cells)
             ◂─── CubesMesher       (greedy/simple, palette)
@@ -63,7 +63,7 @@ VoxelEngine foundation
 
 - **Multi-LOD paging** (`VoxelLodTerrain`): `VoxelLodTerrainUpdateData` + threaded update task + clipbox/octree strategy (~4k lines C++).
 - **`VoxelEngine` remaining subset**: main-thread time-spread/progressive queues, GPU queue, file locker, stats/profiling and volume callback dispatch.
-- **Concurrency audit follow-ups**: `VoxelMesher::build(&self)` + per-worker scratch, `VoxelData` per-LOD `RwLock` + real `SpatialLock3D`, and the rule that data locks are not held through generator/mesher/stream calls.
+- **Concurrency audit follow-ups**: `VoxelData` per-LOD `RwLock` + real `SpatialLock3D`, and the rule that data locks are not held through generator/mesher/stream calls.
 - **Graph extensions**: Curve/Image range analysis, FastNoise2, Expression node (parser is ported, not wired), bytecode VM optimisation.
 - **`VoxelDataGrid`**, **real `SpatialLock3D`** (currently a no-op stub; `&mut self` enforces exclusivity today), **ThreadSanitizer** end-to-end.
 - **Phase 5 Godot binding**: `Node3D` wrappers for `VoxelTerrainCore` + `RenderingServer` mesh upload + `EditorPlugin`.

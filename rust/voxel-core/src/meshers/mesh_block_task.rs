@@ -118,12 +118,8 @@ impl MeshBlockTask {
             return;
         }
 
-        // Acquire all locks up front and hold them for the whole gather+build
-        // so the mesher/generator can't be swapped mid-run. The C++ contract
-        // is single-threaded for these resources per task.
         let mesher_handle = self.meshing_dependency.mesher();
-        let mut mesher_guard = mesher_handle.lock().expect("mesher mutex poisoned");
-        let mesher: &mut dyn VoxelMesher = &mut **mesher_guard;
+        let mesher: &dyn VoxelMesher = mesher_handle.as_ref();
         let min_padding = mesher.minimum_padding() as i32;
         let max_padding = mesher.maximum_padding() as i32;
         let channels_mask = mesher.used_channels_mask();
@@ -337,7 +333,7 @@ mod tests {
         build_calls: Arc<Mutex<usize>>,
     }
     impl VoxelMesher for DummyMesher {
-        fn build(&mut self, output: &mut MesherOutput, _input: &MesherInput<'_>) {
+        fn build(&self, output: &mut MesherOutput, _input: &MesherInput<'_>) {
             *self.build_calls.lock().unwrap() += 1;
             let mut arrays = crate::meshers::transvoxel::structures::MeshArrays::default();
             let a = arrays.add_vertex(
@@ -421,10 +417,9 @@ mod tests {
     fn mesh_block_task_produces_non_empty_output_for_resident_central_block() {
         let data = shared_data_with_central_block(16);
         let build_calls = Arc::new(Mutex::new(0));
-        let mesher: Arc<Mutex<Box<dyn VoxelMesher>>> =
-            Arc::new(Mutex::new(Box::new(DummyMesher {
-                build_calls: build_calls.clone(),
-            })));
+        let mesher: Arc<dyn VoxelMesher> = Arc::new(DummyMesher {
+            build_calls: build_calls.clone(),
+        });
         let generator: Arc<dyn VoxelGenerator> = Arc::new(ConstantSdfGenerator { value: -1.0 });
         let meshing_dep = MeshingDependency::new(mesher, Some(generator));
 
@@ -451,10 +446,9 @@ mod tests {
     fn mesh_block_task_emits_dropped_output_when_dependency_invalidated() {
         let data = shared_data_with_central_block(16);
         let build_calls = Arc::new(Mutex::new(0));
-        let mesher: Arc<Mutex<Box<dyn VoxelMesher>>> =
-            Arc::new(Mutex::new(Box::new(DummyMesher {
-                build_calls: build_calls.clone(),
-            })));
+        let mesher: Arc<dyn VoxelMesher> = Arc::new(DummyMesher {
+            build_calls: build_calls.clone(),
+        });
         let meshing_dep = MeshingDependency::new(mesher, None);
 
         let mut task = MeshBlockTask::new(MeshBlockTaskParams {
@@ -480,10 +474,9 @@ mod tests {
     #[test]
     fn mesh_block_task_implements_threaded_task_contract() {
         let data = shared_data_with_central_block(16);
-        let mesher: Arc<Mutex<Box<dyn VoxelMesher>>> =
-            Arc::new(Mutex::new(Box::new(DummyMesher {
-                build_calls: Arc::new(Mutex::new(0)),
-            })));
+        let mesher: Arc<dyn VoxelMesher> = Arc::new(DummyMesher {
+            build_calls: Arc::new(Mutex::new(0)),
+        });
         let meshing_dep = MeshingDependency::new(mesher, None);
 
         let mut task = MeshBlockTask::new(MeshBlockTaskParams {
@@ -523,9 +516,9 @@ mod tests {
             lod_index: 2,
             data: shared_data_with_central_block(16),
             meshing_dependency: MeshingDependency::new(
-                Arc::new(Mutex::new(Box::new(DummyMesher {
+                Arc::new(DummyMesher {
                     build_calls: Arc::new(Mutex::new(0)),
-                }))),
+                }),
                 None,
             ),
             collision_hint: true,

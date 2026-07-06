@@ -15,5 +15,6 @@ pub mod voxel_mesher;
 pub use builtin::{BlockyMesher, CubesMesher, TransvoxelMesher};
 pub use mesh_block_task::{gather_voxels_cpu, BlockMeshOutput, MeshBlockTask, MeshBlockTaskParams};
 pub use voxel_mesher::{
-    CollisionSurface, MesherInput, MesherOutput, Surface, SurfaceArrays, VoxelMesher,
+    CollisionSurface, MesherInput, MesherOutput, SharedVoxelMesher, Surface, SurfaceArrays,
+    VoxelMesher,
 };

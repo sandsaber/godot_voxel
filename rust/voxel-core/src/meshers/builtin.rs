@@ -18,6 +18,11 @@ use crate::meshers::transvoxel::{
 };
 use crate::meshers::{MesherInput, MesherOutput, Surface, SurfaceArrays, VoxelMesher};
 use crate::storage::{ChannelId, VoxelBuffer};
+use std::cell::RefCell;
+
+thread_local! {
+    static TRANSVOXEL_CACHE: RefCell<Cache> = RefCell::new(Cache::default());
+}
 
 /// `RegularMesherInput` adapter over a [`VoxelBuffer`]'s SDF channel.
 ///
@@ -74,7 +79,6 @@ impl<'a> RegularMesherInput for VoxelBufferTransvoxelInput<'a> {
 /// algorithm's `MIN_PADDING=1` / `MAX_PADDING=2` requirement.
 pub struct TransvoxelMesher {
     sdf_channel: usize,
-    cache: Cache,
 }
 
 impl Default for TransvoxelMesher {
@@ -87,7 +91,6 @@ impl TransvoxelMesher {
     pub fn new() -> Self {
         Self {
             sdf_channel: ChannelId::Sdf.index(),
-            cache: Cache::default(),
         }
     }
 
@@ -99,14 +102,21 @@ impl TransvoxelMesher {
 }
 
 impl VoxelMesher for TransvoxelMesher {
-    fn build(&mut self, output: &mut MesherOutput, input: &MesherInput<'_>) {
+    fn build(&self, output: &mut MesherOutput, input: &MesherInput<'_>) {
         let transvoxel_input = VoxelBufferTransvoxelInput::new(input.voxels, self.sdf_channel);
         let params = BuildRegularMeshParams {
             lod_index: u32::from(input.lod_index),
             edge_clamp_margin: 0.0,
         };
         let mut arrays = MeshArrays::default();
-        build_regular_mesh(&transvoxel_input, &params, &mut self.cache, &mut arrays);
+        TRANSVOXEL_CACHE.with(|cache| {
+            build_regular_mesh(
+                &transvoxel_input,
+                &params,
+                &mut cache.borrow_mut(),
+                &mut arrays,
+            );
+        });
         if input.collision_hint && !arrays.indices.is_empty() {
             output.collision_surface.submesh_vertex_end = arrays.vertices.len() as i32;
             output.collision_surface.submesh_index_end = arrays.indices.len() as i32;
@@ -198,7 +208,7 @@ impl CubesMesher {
 }
 
 impl VoxelMesher for CubesMesher {
-    fn build(&mut self, output: &mut MesherOutput, input: &MesherInput<'_>) {
+    fn build(&self, output: &mut MesherOutput, input: &MesherInput<'_>) {
         use crate::meshers::cubes::greedy::MATERIAL_COUNT;
         let voxels = Self::extract_voxel_slice(input.voxels, self.type_channel);
         let size = input.voxels.size();
@@ -314,7 +324,7 @@ impl BlockyMesher {
 }
 
 impl VoxelMesher for BlockyMesher {
-    fn build(&mut self, output: &mut MesherOutput, input: &MesherInput<'_>) {
+    fn build(&self, output: &mut MesherOutput, input: &MesherInput<'_>) {
         use crate::meshers::blocky::mesher::{generate_mesh, generate_mesh_with_collision};
         let voxels = Self::extract_voxel_slice(input.voxels, self.type_channel);
         let size = input.voxels.size();
@@ -414,7 +424,7 @@ mod tests {
 
     #[test]
     fn transvoxel_mesher_produces_substantial_geometry_for_sphere() {
-        let mut mesher = TransvoxelMesher::new();
+        let mesher = TransvoxelMesher::new();
         let voxels = sphere_buffer(16, 6.0);
         let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
 
@@ -436,7 +446,7 @@ mod tests {
     fn transvoxel_mesher_emits_empty_surface_for_uniform_outside_volume() {
         // A buffer filled entirely with SDF_FAR_OUTSIDE (all air) has no
         // surface-crossing cells and produces an empty mesh.
-        let mut mesher = TransvoxelMesher::new();
+        let mesher = TransvoxelMesher::new();
         let mut voxels = VoxelBuffer::with_size(Vector3i::splat(16));
         let mut format = VoxelFormat::new();
         format.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
@@ -459,7 +469,7 @@ mod tests {
     }
 
     /// Verify the mesher is `Send + Sync` (required by `VoxelMesher`) so it
-    /// can live behind `Arc<Mutex<Box<dyn VoxelMesher>>>` in MeshingDependency.
+    /// can live behind `Arc<dyn VoxelMesher>` in MeshingDependency.
     #[test]
     fn transvoxel_mesher_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
@@ -468,7 +478,7 @@ mod tests {
 
     #[test]
     fn transvoxel_collision_hint_populates_collision_submesh_range() {
-        let mut mesher = TransvoxelMesher::new();
+        let mesher = TransvoxelMesher::new();
         let voxels = sphere_buffer(16, 6.0);
         let mut input = MesherInput::new(&voxels, Vector3i::zero(), 0);
         input.collision_hint = true;
@@ -488,7 +498,7 @@ mod tests {
     /// a zero origin, positions should still be non-negative within the block.
     #[test]
     fn transvoxel_mesher_vertex_positions_are_within_block_for_zero_origin() {
-        let mut mesher = TransvoxelMesher::new();
+        let mesher = TransvoxelMesher::new();
         let voxels = sphere_buffer(16, 6.0);
         let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
 
@@ -531,7 +541,7 @@ mod tests {
 
     #[test]
     fn cubes_mesher_produces_two_surfaces_for_a_solid_block() {
-        let mut mesher = CubesMesher::new();
+        let mesher = CubesMesher::new();
         let voxels = cubes_input_buffer();
         let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
 
@@ -553,7 +563,7 @@ mod tests {
 
     #[test]
     fn cubes_mesher_emits_empty_surfaces_for_air_block() {
-        let mut mesher = CubesMesher::new();
+        let mesher = CubesMesher::new();
         // All-zero Type channel → no solid voxels → no faces.
         let voxels = VoxelBuffer::with_size(Vector3i::splat(4));
         let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
@@ -584,7 +594,7 @@ mod tests {
 
     #[test]
     fn cubes_mesher_supports_non_greedy_simple_path() {
-        let mut mesher = CubesMesher::new().with_greedy(false);
+        let mesher = CubesMesher::new().with_greedy(false);
         let voxels = cubes_input_buffer();
         let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
 
@@ -661,7 +671,7 @@ mod tests {
 
     #[test]
     fn blocky_mesher_with_empty_library_emits_no_geometry() {
-        let mut mesher = BlockyMesher::new(empty_blocky_library());
+        let mesher = BlockyMesher::new(empty_blocky_library());
         // Solid block of voxel id 1 — but the library has no model for it,
         // so nothing gets emitted.
         let mut voxels = VoxelBuffer::with_size(Vector3i::splat(4));
@@ -690,7 +700,7 @@ mod tests {
 
     #[test]
     fn blocky_collision_hint_emits_enabled_surface_geometry() {
-        let mut mesher = BlockyMesher::new(full_cube_blocky_library(true));
+        let mesher = BlockyMesher::new(full_cube_blocky_library(true));
         let voxels = blocky_input_buffer();
         let mut input = MesherInput::new(&voxels, Vector3i::zero(), 0);
         input.collision_hint = true;
@@ -706,7 +716,7 @@ mod tests {
 
     #[test]
     fn blocky_collision_hint_skips_surfaces_with_collision_disabled() {
-        let mut mesher = BlockyMesher::new(full_cube_blocky_library(false));
+        let mesher = BlockyMesher::new(full_cube_blocky_library(false));
         let voxels = blocky_input_buffer();
         let mut input = MesherInput::new(&voxels, Vector3i::zero(), 0);
         input.collision_hint = true;

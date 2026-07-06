@@ -192,7 +192,7 @@ godot_voxel (fork)
 - `VoxelData` copy/paste/paste_masked + area queries ✅; `paste_masked` per-block + O(1) writability ✅
 - `VoxelGenerator::generate_single` + `get_voxel` generator fallback ✅
 - `Semaphore` + `SpatialLock3D` no-op stub ✅ (реальный порт когда threads land)
-- **`VoxelMesher` trait + MesherInput/MesherOutput/SurfaceArrays enum ✅**
+- **`VoxelMesher` trait + MesherInput/MesherOutput/SurfaceArrays enum ✅** (`build(&self)`, shared via `Arc<dyn VoxelMesher>`)
 - **`MeshingDependency` ✅; `MeshBlockTask` (gather_voxels_cpu + build) ✅**
 - **`TransvoxelMesher` real adapter ✅ (обёртка над build_regular_mesh)**
 - **End-to-end test: generator → VoxelData → MeshBlockTask → TransvoxelMesher → mesh ✅**
@@ -288,7 +288,8 @@ godot_voxel (fork)
 | 2026-07-06 | H1 full regular-mesh parity closed on macOS | ✅ C++ `transvoxel_sphere_16/32` goldens committed (`godot_voxel-cpp`): sphere_16 888 verts / 3912 idx, sphere_32 3696 verts / 18600 idx. Rust `transvoxel_parity` now passes against C++ goldens with exact structural fields and float tolerance. Root cause: C++ early-out uses raw SDF comparison, while case/interpolation use `sdf_as_float`; Rust now mirrors that split. `build_mesh.sh` fixed for macOS (`./build_mesh.sh`, BSD-sed-safe) |
 | 2026-07-06 | Фаза 4: `VoxelEngine` foundation | ✅ total 631 unit + 10 integration. Engine-agnostic subset of `engine/voxel_engine.*`: generational `VolumeId`/`ViewerId`, volume/viewer registry, viewer position/distances/visual/collision/data-notification/network-peer metadata, `sync_viewers_task_priority_data` → shared `PriorityViewersData` (`highest_view_distance = max_distance * 2`, computed in `f32` to avoid `u32` overflow) and minimal `process()` sync. Task runners/dequeue loop/GPU/main-thread queues остаются следующим engine slice |
 | 2026-07-06 | Фаза 4: `VoxelEngine` task loop | ✅ total 635 unit + 10 integration. `VoxelEngine` now owns `ThreadedTaskRunner`, exposes Rust-owned `push_async_task(s)` / `push_async_io_task(s)` wrappers, `wait_for_all_tasks`, `wait_and_clear_all_tasks`, thread-count controls, and `process()` drains completed tasks, enqueues follow-ups, applies `ThreadedTask::apply_result`, then syncs shared viewer priority data. Async-IO uses serial runner mode. Main-thread time-spread/progressive queues, GPU queue, file locker, stats/profiling and volume callback dispatch remain deferred |
-| 2026-07-06 | Audit wave 1A: generator mutex removal | ✅ total 635 unit + 10 integration. `VoxelGenerator::generate_block`/`generate_single` now take `&self`; `SharedVoxelGenerator = Arc<dyn VoxelGenerator>`; external generator mutex removed from `VoxelData`, `MeshingDependency`, `MeshBlockTask`, `LoadBlockForTerrainTask`; `GraphGenerator` keeps synchronization local to its scratch. Remaining audit concurrency work: `VoxelMesher::build(&self)` + scratch ownership, `VoxelData` per-LOD locks/real `SpatialLock3D`, and data-lock ordering rule |
+| 2026-07-06 | Audit wave 1A: generator mutex removal | ✅ total 635 unit + 10 integration. `VoxelGenerator::generate_block`/`generate_single` now take `&self`; `SharedVoxelGenerator = Arc<dyn VoxelGenerator>`; external generator mutex removed from `VoxelData`, `MeshingDependency`, `MeshBlockTask`, `LoadBlockForTerrainTask`; `GraphGenerator` keeps synchronization local to its scratch. Remaining audit concurrency work after this step: `VoxelMesher::build(&self)` + scratch ownership, `VoxelData` per-LOD locks/real `SpatialLock3D`, and data-lock ordering rule |
+| 2026-07-06 | Audit wave 1B: mesher mutex removal | ✅ total 635 unit + 10 integration. `VoxelMesher::build` now takes `&self`; `SharedVoxelMesher = Arc<dyn VoxelMesher>`; external mesher mutex removed from `MeshingDependency` and `MeshBlockTask`; `TransvoxelMesher` moved its reuse `Cache` to thread-local scratch instead of serializing shared builds through an internal mutex. Remaining audit concurrency work: `VoxelData` per-LOD locks/real `SpatialLock3D`, data-lock ordering rule, and perf reuse for `MeshArrays`/`MesherOutput` |
 
 ### Где остановились (для возобновления)
 
@@ -305,6 +306,9 @@ godot_voxel (fork)
 **Фаза 4 — storage/streaming + meshing pipeline + single-LOD paging terrain + VoxelEngine foundation/task loop работают headlessly (635 unit + 10 integration тестов).**
 Audit wave 1A after the 2026-07-06 audit removed the outer generator mutex:
 `VoxelGenerator` is shared via `Arc<dyn VoxelGenerator>` and called through `&self`.
+Audit wave 1B removed the outer mesher mutex:
+`VoxelMesher` is shared via `Arc<dyn VoxelMesher>` and called through `&self`;
+`TransvoxelMesher` uses thread-local `Cache` scratch.
 End-to-end: generator → VoxelData → MeshBlockTask → TransvoxelMesher → MesherOutput.
 Paging: VoxelTerrainCore orchestrates viewers → loads → meshing → outputs → unload.
 
@@ -338,9 +342,9 @@ empty-cell early-out по raw SDF, а case/interpolation/normals — после
      mesh для variable LOD остаётся отдельным пунктом.
    - **`VoxelDataGrid`** — terrain meshing query helper (оптимизация; текущий
      MeshBlockTask обходит это через прямой `voxel_data.get_block` lookup).
-   - **Concurrency audit follow-ups** — `VoxelMesher::build(&self)` + scratch
-     ownership, `VoxelData` per-LOD `RwLock` + real `SpatialLock3D`, and the
-     lock-order rule that data locks are not held through generator/mesher/stream.
+   - **Concurrency audit follow-ups** — `VoxelData` per-LOD `RwLock` +
+     real `SpatialLock3D`, and the lock-order rule that data locks are not held
+     through generator/mesher/stream.
    - **ThreadSanitizer end-to-end** — когда `VoxelEngine` + real threading land.
    - **Godot binding (Phase 5)** — Node3D wrappers для VoxelTerrainCore +
      RenderingServer mesh upload + EditorPlugin.
