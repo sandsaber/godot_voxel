@@ -135,6 +135,8 @@ pub fn generate_block_with_graph(
             write_sdf_slice(input.buffer, sdf_channel, size, y, slice);
         }
     }
+
+    input.buffer.compress_uniform_channels();
 }
 
 fn write_sdf_slice(
@@ -157,7 +159,7 @@ mod tests {
     use super::*;
     use crate::generators::graph::{GraphPort, NodeKind};
     use crate::math::Vector3i;
-    use crate::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
+    use crate::storage::{ChannelDepth, ChannelId, Compression, VoxelBuffer, VoxelFormat};
 
     /// Build a graph that computes `sin(x) + 1` and writes the result to the
     /// SDF channel. With a constant offset, every voxel of the resulting
@@ -285,6 +287,34 @@ mod tests {
 
         assert_eq!(buffer.get_voxel_f(0, 0, 0, ChannelId::Sdf.index()), 10.0);
         assert_eq!(buffer.get_voxel_f(1, 0, 0, ChannelId::Sdf.index()), 12.0);
+    }
+
+    #[test]
+    fn generate_block_compresses_uniform_sdf_output() {
+        let mut graph = Graph::new();
+        let value = graph.push(NodeKind::Constant(2.0));
+        graph.push(NodeKind::OutputSdf {
+            a: Some(GraphPort::new(value)),
+        });
+        let generator = GraphGenerator::new(graph);
+
+        let mut buffer = VoxelBuffer::with_size(Vector3i::new(4, 4, 4));
+        let mut format = VoxelFormat::new();
+        format.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+        format.configure_buffer(&mut buffer);
+
+        let _ = generator.generate_block(VoxelQueryData {
+            buffer: &mut buffer,
+            origin_in_voxels: Vector3i::zero(),
+            lod: 0,
+        });
+
+        assert_eq!(
+            buffer.channel_compression(ChannelId::Sdf.index()),
+            Compression::Uniform
+        );
+        assert!(buffer.is_uniform(ChannelId::Sdf.index()));
+        assert_eq!(buffer.get_voxel_f(0, 0, 0, ChannelId::Sdf.index()), 2.0);
     }
 
     #[test]

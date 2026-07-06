@@ -237,8 +237,9 @@ so we can get rid of abstraction layers and conditionals»*):
 - **Нет XZ outer-group кэширования** из C++ (`voxel_generator_graph.cpp:905`): Y-независимая часть
   графа (для террейна — почти весь граф) пересчитывается на каждом из 16 Y-слайсов — до ~16× лишней работы.
 - `GraphScratch` заявляет reuse аллокаций в doc-комментарии, но `HashMap::clear()` дропает все `Vec` — N×16 свежих аллокаций на блок.
-- **Нет `compress_uniform_channels()`** в конце генерации (C++ зовёт всегда, `voxel_generator_graph.cpp:968`;
-  соседний `HeightmapNoise` в Rust делает правильно) — однородные блоки остаются развёрнутыми. Фикс — 1 строка.
+- **`compress_uniform_channels()` после аудита закрыт 2026-07-06**: в исходном состоянии его не было в конце
+  генерации (C++ зовёт всегда, `voxel_generator_graph.cpp:968`; соседний `HeightmapNoise` в Rust уже делал
+  правильно), поэтому однородные блоки оставались развёрнутыми.
 - `math::interval` портирован, но генераторами не используется (range-skip нет) — задокументированный дефер.
 - `HeightmapNoise` клонирует `Curve` (Vec из 256 f32) на каждый блок до early-exit'ов (`simple.rs:472`) — нужен `Arc<Curve>`.
 
@@ -479,8 +480,9 @@ C++ `inner_group_start_index` / `skip_outer_group` (`voxel_generator_graph.cpp:9
 констант сворачиваются в готовые значения (симметрия с уже портированным
 `expression_parser::precompute_constants`; C++-компилятор графа делает то же).
 
-**C2. `compress_uniform_channels()`** в конце `generate_block_with_graph` — 1 строка (зеркало
-`voxel_generator_graph.cpp:968`, сосед `HeightmapNoise` уже делает).
+**C2. `compress_uniform_channels()`** в конце `generate_block_with_graph` — ✅ закрыто 2026-07-06:
+`GraphGenerator` сжимает uniform-каналы после послайсовой записи (зеркало `voxel_generator_graph.cpp:968`,
+сосед `HeightmapNoise` уже делал).
 
 **C3. Range analysis (после C1):** `analyze_range(&self, box) -> Interval` по компилированному
 порядку на портированном `math::interval` (сейчас не используется вообще); если интервал SDF
@@ -507,11 +509,11 @@ C++ `inner_group_start_index` / `skip_outer_group` (`voxel_generator_graph.cpp:9
 `tasks`; B3 естественно делается вместе с A2.
 
 **Волна 1 — дешёвое и разблокирующее (каждый пункт — отдельный коммит):**
-A1 (генератор `&self`) → A2 (мешер `&self` + scratch) → A4 (правило замков) + параллельно B2, C2, D1, D2, D5.
+A1 (генератор `&self`) → A2 (мешер `&self` + scratch) → A4 (правило замков) + параллельно B2, D1, D2, D5.
 Уже после этой волны mesh-build'ы и генерация исполняются параллельно (глобальный замок
 `VoxelData` остаётся только на gather — короткая секция).
 **DoD:** новый тест «N воркеров мешат M блоков» показывает масштабирование по потокам
-(время ~1/N, загрузка >1 ядра); 636+10 тестов и golden-парити зелёные.
+(время ~1/N, загрузка >1 ядра); 637+10 тестов и golden-парити зелёные.
 
 **Волна 2 — конкурентность до конца:**
 A3 (`Arc<VoxelData>` + per-LOD RwLock + реальный SpatialLock3D) → A5 (semaphore + staging +
@@ -535,7 +537,7 @@ paging-сценарий (движущийся viewer), сравнение с р�
 - **cargo-fuzz таргеты на парсеры** (`.vox`, `block_serializer`, `region`): C++-сторона уже
   фаззится (`fuzzer.yml`), Rust-парсеры — нет; баг D2 — ровно тот класс, который находит фаззер.
 
-Инварианты на всём протяжении: 636 unit + 10 integration + golden-парити остаются зелёными;
+Инварианты на всём протяжении: 637 unit + 10 integration + golden-парити остаются зелёными;
 clippy/fmt чистые; каждый шаг сверяется с соответствующим C++-файлом (ссылки в §9.1-9.3).
 
 ---
@@ -547,6 +549,7 @@ clippy/fmt чистые; каждый шаг сверяется с соотве�
 | 2026-07-06 | A1, часть generator: `VoxelGenerator::generate_block(&self)` / `generate_single(&self)` + `SharedVoxelGenerator = Arc<dyn VoxelGenerator>` | ✅ закрыто. Внешний generator-mutex удалён из `VoxelData`, `MeshingDependency`, `MeshBlockTask`, `LoadBlockForTerrainTask`; `GraphGenerator` синхронизирует только собственный scratch локально | `cargo test -p voxel-core` → 635 unit + 10 integration + 1 doc-test, 0 failed |
 | 2026-07-06 | A2, часть mesher: `VoxelMesher::build(&self)` + `SharedVoxelMesher = Arc<dyn VoxelMesher>` | ✅ закрыто. Внешний mesher-mutex удалён из `MeshingDependency`/`MeshBlockTask`; `TransvoxelMesher` использует thread-local `Cache`, поэтому shared mesher не сериализует build через внутренний глобальный lock | `cargo test -p voxel-core` → 635 unit + 10 integration + 1 doc-test, 0 failed |
 | 2026-07-06 | D2: `.vox` negative model-size guard | ✅ закрыто. `SIZE` dimensions now must be in `0..=MAX_MODEL_SIZE`, so `0xFFFFFFFF`/`-1` returns `InvalidData` before model allocation | `cargo test -p voxel-core` → 636 unit + 10 integration + 1 doc-test, 0 failed |
+| 2026-07-06 | C2: graph uniform-channel compression | ✅ закрыто. `GraphGenerator` calls `VoxelBuffer::compress_uniform_channels()` after generation; constant SDF output remains `Compression::Uniform` instead of a materialized channel | `cargo test -p voxel-core` → 637 unit + 10 integration + 1 doc-test, 0 failed |
 
 Остаток пункта #1: `VoxelData` per-LOD `RwLock`/real `SpatialLock3D`.
 ABBA-риск с внешним generator/mesher lock снят, но правило “не держать data lock через
@@ -569,7 +572,7 @@ byte-parity тесты), но **два системных долга** треб�
    целенаправленно устранял; заявление H2 о 1.5× преимуществе не распространяется на end-to-end конвейер.
 
 План действий — три волны из §9.6: (1) остаток волны 1 — A4 + быстрые
-фиксы (B2/C2/D1/D5), (2) волна 2 — per-LOD RwLock + реальный SpatialLock3D + TSan/stress
+фиксы (B2/D1/D5), (2) волна 2 — per-LOD RwLock + реальный SpatialLock3D + TSan/stress
 (закрывает GO-критерий Фазы 4), (3) волна 3 — перф-фиксы горячего пути и graph runtime
 с перемером H2 end-to-end. Параллельно: настроить upstream-tracking (`cpp-reference`) и
 CI для `rust/` — сейчас Rust не собирается ни одним workflow.

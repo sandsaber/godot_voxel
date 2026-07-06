@@ -11,17 +11,17 @@
 | 1 — Pure core (`util/{math,string,memory,io,testing}` + `expression_parser`) | ✅ COMPLETE | (cumulative) |
 | 2 — Mobile validation (gdext `.so` desktop + Android) | ✅ desktop+Android `.so` (on-device: pending SDK) | — |
 | 3 — Compute layer (storage, streams, meshers, generators, format) | ✅ COMPLETE | (cumulative) |
-| 4 — Terrain + threading (storage/streaming/meshing/paging/graph) | 🟡 IN PROGRESS | 636 unit + 10 integration |
+| 4 — Terrain + threading (storage/streaming/meshing/paging/graph) | 🟡 IN PROGRESS | 637 unit + 10 integration |
 | 5 — Godot binding + editor | ⏳ not started | — |
 
-**Total:** 636 unit tests + 10 integration + 1 doc-test, clippy clean.
+**Total:** 637 unit tests + 10 integration + 1 doc-test, clippy clean.
 
 ## Phase 4 — what works headlessly (no Godot)
 
 The full pipeline runs end-to-end in pure Rust, no engine dependency:
 
 ```
-GraphGenerator (24+ node kinds: SDF/Curve/Noise/math/IO)
+GraphGenerator (24+ node kinds: SDF/Curve/Noise/math/IO; uniform output compression)
    │  or  Waves / Flat / Noise / HeightmapNoise (simple generators)
    ▼
 VoxelData
@@ -103,7 +103,7 @@ rust/
 
 ```bash
 cd rust
-cargo test -p voxel-core       # 636 unit + 10 integration + 1 doc-test
+cargo test -p voxel-core       # 637 unit + 10 integration + 1 doc-test
 cargo build -p voxel-gdext     # GDExtension .so (loads in Godot 4.7)
 cargo clippy --workspace --all-targets   # clean
 cargo bench                    # transvoxel benches
