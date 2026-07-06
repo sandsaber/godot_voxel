@@ -18,10 +18,17 @@ use crate::meshers::transvoxel::{
 };
 use crate::meshers::{MesherInput, MesherOutput, Surface, SurfaceArrays, VoxelMesher};
 use crate::storage::{ChannelId, VoxelBuffer};
+#[cfg(test)]
+use std::cell::Cell;
 use std::cell::RefCell;
 
 thread_local! {
     static TRANSVOXEL_CACHE: RefCell<Cache> = RefCell::new(Cache::default());
+}
+
+#[cfg(test)]
+thread_local! {
+    static TRANSVOXEL_SAMPLE_COUNT: Cell<usize> = const { Cell::new(0) };
 }
 
 /// `RegularMesherInput` adapter over a [`VoxelBuffer`]'s SDF channel.
@@ -56,6 +63,9 @@ impl<'a> RegularMesherInput for VoxelBufferTransvoxelInput<'a> {
     }
 
     fn sample_f32(&self, data_index: usize) -> f32 {
+        #[cfg(test)]
+        TRANSVOXEL_SAMPLE_COUNT.with(|samples| samples.set(samples.get() + 1));
+
         // ZXY layout: index = y + sy*(x + sx*z). Y innermost. Matches the
         // C++ VoxelBuffer memory layout documented in transvoxel/regular.rs.
         let sx = self.size.x as usize;
@@ -103,6 +113,14 @@ impl TransvoxelMesher {
 
 impl VoxelMesher for TransvoxelMesher {
     fn build(&self, output: &mut MesherOutput, input: &MesherInput<'_>) {
+        if input.voxels.is_uniform(self.sdf_channel) {
+            output.surfaces.push(Surface::new(
+                SurfaceArrays::Transvoxel(MeshArrays::default()),
+                0,
+            ));
+            return;
+        }
+
         let transvoxel_input = VoxelBufferTransvoxelInput::new(input.voxels, self.sdf_channel);
         let params = BuildRegularMeshParams {
             lod_index: u32::from(input.lod_index),
@@ -385,7 +403,7 @@ impl VoxelMesher for BlockyMesher {
 
 #[cfg(test)]
 mod tests {
-    use super::{BlockyMesher, CubesMesher, TransvoxelMesher};
+    use super::{BlockyMesher, CubesMesher, TransvoxelMesher, TRANSVOXEL_SAMPLE_COUNT};
     use crate::constants::cube_tables::{Side, CORNER_POSITION, SIDE_CORNERS, SIDE_QUAD_TRIANGLES};
     use crate::math::{Vector2f, Vector3f, Vector3i};
     use crate::meshers::blocky::baked_library::{BakedLibrary, BakedModel};
@@ -456,6 +474,27 @@ mod tests {
         let mut output = MesherOutput::default();
         mesher.build(&mut output, &input);
 
+        assert_eq!(output.surfaces.len(), 1);
+        assert_eq!(output.total_triangle_count(), 0);
+    }
+
+    #[test]
+    fn transvoxel_mesher_fast_paths_uniform_sdf_without_sampling() {
+        TRANSVOXEL_SAMPLE_COUNT.with(|samples| samples.set(0));
+
+        let mesher = TransvoxelMesher::new();
+        let mut voxels = VoxelBuffer::with_size(Vector3i::splat(16));
+        let mut format = VoxelFormat::new();
+        format.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+        format.configure_buffer(&mut voxels);
+        assert!(voxels.is_uniform(ChannelId::Sdf.index()));
+
+        let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+        let mut output = MesherOutput::default();
+        mesher.build(&mut output, &input);
+
+        let sample_count = TRANSVOXEL_SAMPLE_COUNT.with(|samples| samples.get());
+        assert_eq!(sample_count, 0);
         assert_eq!(output.surfaces.len(), 1);
         assert_eq!(output.total_triangle_count(), 0);
     }

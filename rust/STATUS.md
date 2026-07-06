@@ -11,10 +11,10 @@
 | 1 — Pure core (`util/{math,string,memory,io,testing}` + `expression_parser`) | ✅ COMPLETE | (cumulative) |
 | 2 — Mobile validation (gdext `.so` desktop + Android) | ✅ desktop+Android `.so` (on-device: pending SDK) | — |
 | 3 — Compute layer (storage, streams, meshers, generators, format) | ✅ COMPLETE | (cumulative) |
-| 4 — Terrain + threading (storage/streaming/meshing/paging/graph) | 🟡 IN PROGRESS | 637 unit + 10 integration |
+| 4 — Terrain + threading (storage/streaming/meshing/paging/graph) | 🟡 IN PROGRESS | 638 unit + 10 integration |
 | 5 — Godot binding + editor | ⏳ not started | — |
 
-**Total:** 637 unit tests + 10 integration + 1 doc-test, clippy clean.
+**Total:** 638 unit tests + 10 integration + 1 doc-test, clippy clean.
 
 ## Phase 4 — what works headlessly (no Godot)
 
@@ -36,7 +36,7 @@ MeshBlockTask
    • gather_voxels_cpu (3×3×3 neighbours + generator gap-fill)
    • SharedVoxelMesher = Arc<dyn VoxelMesher>, no outer mesher mutex
    ▼
-VoxelMesher  ◂─── TransvoxelMesher  (smooth SDF, regular cells)
+VoxelMesher  ◂─── TransvoxelMesher  (smooth SDF, regular cells, uniform fast-path)
             ◂─── CubesMesher       (greedy/simple, palette)
             ◂─── BlockyMesher      (voxel-model library + AO)
    ▼
@@ -103,7 +103,7 @@ rust/
 
 ```bash
 cd rust
-cargo test -p voxel-core       # 637 unit + 10 integration + 1 doc-test
+cargo test -p voxel-core       # 638 unit + 10 integration + 1 doc-test
 cargo build -p voxel-gdext     # GDExtension .so (loads in Godot 4.7)
 cargo clippy --workspace --all-targets   # clean
 cargo bench                    # transvoxel benches

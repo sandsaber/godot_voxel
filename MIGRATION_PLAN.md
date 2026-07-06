@@ -292,6 +292,7 @@ godot_voxel (fork)
 | 2026-07-06 | Audit wave 1B: mesher mutex removal | ✅ total 635 unit + 10 integration. `VoxelMesher::build` now takes `&self`; `SharedVoxelMesher = Arc<dyn VoxelMesher>`; external mesher mutex removed from `MeshingDependency` and `MeshBlockTask`; `TransvoxelMesher` moved its reuse `Cache` to thread-local scratch instead of serializing shared builds through an internal mutex. Remaining audit concurrency work: `VoxelData` per-LOD locks/real `SpatialLock3D`, data-lock ordering rule, and perf reuse for `MeshArrays`/`MesherOutput` |
 | 2026-07-06 | Audit wave 1C: `.vox` negative model-size guard | ✅ total 636 unit + 10 integration. `format::vox` now rejects `SIZE` dimensions outside `0..=MAX_MODEL_SIZE`, including `0xFFFFFFFF`/`-1`, before model allocation. Added regression test `parse_rejects_negative_model_size` |
 | 2026-07-06 | Audit wave 1D: graph uniform-channel compression | ✅ total 637 unit + 10 integration. `GraphGenerator` now calls `VoxelBuffer::compress_uniform_channels()` after generation, matching C++ post-pass behavior and `HeightmapNoise`. Added regression test `generate_block_compresses_uniform_sdf_output` |
+| 2026-07-06 | Audit wave 1E: Transvoxel uniform fast-path | ✅ total 638 unit + 10 integration. `TransvoxelMesher` now skips the full transvoxel O(n³) sampler path when the SDF channel is uniform, while preserving Rust's current one-empty-surface contract. Added regression test `transvoxel_mesher_fast_paths_uniform_sdf_without_sampling` |
 
 ### Где остановились (для возобновления)
 
@@ -305,7 +306,7 @@ godot_voxel (fork)
 **Фаза 2 mobile-half — `.so` собран** (aarch64 + x86_64-android через NDK r29).
 **Фаза 3 (compute-слой) — ЗАВЕРШЕНА.** Все engine-agnostic компоненты
 портированы и повторно проверены audit pass'ом (439 unit тестов).
-**Фаза 4 — storage/streaming + meshing pipeline + single-LOD paging terrain + VoxelEngine foundation/task loop работают headlessly (637 unit + 10 integration тестов).**
+**Фаза 4 — storage/streaming + meshing pipeline + single-LOD paging terrain + VoxelEngine foundation/task loop работают headlessly (638 unit + 10 integration тестов).**
 Audit wave 1A after the 2026-07-06 audit removed the outer generator mutex:
 `VoxelGenerator` is shared via `Arc<dyn VoxelGenerator>` and called through `&self`.
 Audit wave 1B removed the outer mesher mutex:
@@ -481,7 +482,7 @@ conditions (проверка под ThreadSanitizer/loom).
 git clone https://github.com/sandsaber/godot_voxel.git
 cd godot_voxel && git checkout rust/pilot
 cd rust
-cargo test -p voxel-core       # 637 unit + 10 integration + 1 doc-test; 1 ignored diagnostic snapshot
+cargo test -p voxel-core       # 638 unit + 10 integration + 1 doc-test; 1 ignored diagnostic snapshot
 cargo build -p voxel-gdext     # GDExtension .so (грузится в Godot 4.7)
 cargo clippy --workspace --all-targets  # должен быть чистый
 cargo bench                    # transvoxel benches (16³=143 / 32³=199 / 64³=249 Melem/s)

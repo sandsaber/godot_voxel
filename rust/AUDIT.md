@@ -212,9 +212,10 @@ so we can get rid of abstraction layers and conditionals»*):
   пересчитывает тот же индекс обратно + ветвится по Compression и дважды по ChannelDepth — и всё
   это за vtable. Десятки таких вызовов на ячейку. C++ диспетчеризует по depth один раз и ходит по
   `Span<const T>` напрямую. Фикс: enum над `&[i8]/&[i16]/&[f32]`, полученный до цикла.
-- **Нет `is_uniform` fast-path** (`builtin.rs:101`): C++ отсекает однородные блоки (воздух/массив)
-  за O(1) до цикла (`voxel_mesher_transvoxel.cpp:296`); Rust всегда гоняет полный O(n³) обход.
-  Для реального террейна (глубоко под землёй / высоко в небе) это большинство блоков. Фикс — 3 строки.
+- **`is_uniform` fast-path после аудита закрыт 2026-07-06**: в исходном состоянии C++ отсекал
+  однородные блоки (воздух/массив) за O(1) до цикла (`voxel_mesher_transvoxel.cpp:296`), а Rust
+  всегда гонял полный O(n³) обход. Для реального террейна (глубоко под землёй / высоко в небе)
+  это большинство блоков.
 - **`MeshArrays`/`MesherOutput` аллоцируются заново на каждый блок** (`builtin.rs:108`,
   `mesh_block_task.rs:164`): C++ использует `thread_local` переиспользуемые массивы («once capacity
   is big enough, no more memory should be allocated»). Doc-комментарий на `MesherOutput` заявляет reuse,
@@ -432,7 +433,7 @@ align 8 (например, поверх `Vec<u64>`), касты всегда у�
 (`build_regular_mesh_dispatch_sd`). Уходят: vtable-вызов, div/mod-раскрутка индекса, ветки
 Compression/Depth на каждый сэмпл. Golden-тесты (sphere_16/32) поймают любой регресс парити.
 
-**B2. `is_uniform` fast-path** — в начало `TransvoxelMesher::build`:
+**B2. `is_uniform` fast-path** — ✅ закрыто 2026-07-06: в начале `TransvoxelMesher::build`:
 
 ```rust
 if input.voxels.is_uniform(self.sdf_channel) { /* пустая Surface, см. ниже */ return; }
@@ -442,7 +443,8 @@ if input.voxels.is_uniform(self.sdf_channel) { /* пустая Surface, см. н
 вовсе (`voxel_mesher_transvoxel.cpp:296`); текущий Rust-адаптер всегда эмитит (пустую) Surface,
 и на это может опираться state-machine `VoxelTerrainCore`. Безопасный фикс — сохранить текущий
 Rust-контракт (пустая Surface, но без O(n³) обхода); сведение к C++-семантике «нет сёрфейса» —
-отдельным шагом с проверкой обработчика output'ов.
+отдельным шагом с проверкой обработчика output'ов. Regression-тест подтверждает, что uniform SDF
+возвращает пустую surface без единого sample-вызова.
 
 **B3. Переиспользование мешевых массивов.** `MeshArrays` — в thread-local scratch из A2-варианта-1
 (C++ делает именно так). Для `MesherOutput`/`Surface`, которые уходят из таска по move, — free-list
@@ -509,11 +511,11 @@ C++ `inner_group_start_index` / `skip_outer_group` (`voxel_generator_graph.cpp:9
 `tasks`; B3 естественно делается вместе с A2.
 
 **Волна 1 — дешёвое и разблокирующее (каждый пункт — отдельный коммит):**
-A1 (генератор `&self`) → A2 (мешер `&self` + scratch) → A4 (правило замков) + параллельно B2, D1, D2, D5.
+A1 (генератор `&self`) → A2 (мешер `&self` + scratch) → A4 (правило замков) + параллельно D1, D2, D5.
 Уже после этой волны mesh-build'ы и генерация исполняются параллельно (глобальный замок
 `VoxelData` остаётся только на gather — короткая секция).
 **DoD:** новый тест «N воркеров мешат M блоков» показывает масштабирование по потокам
-(время ~1/N, загрузка >1 ядра); 637+10 тестов и golden-парити зелёные.
+(время ~1/N, загрузка >1 ядра); 638+10 тестов и golden-парити зелёные.
 
 **Волна 2 — конкурентность до конца:**
 A3 (`Arc<VoxelData>` + per-LOD RwLock + реальный SpatialLock3D) → A5 (semaphore + staging +
@@ -537,7 +539,7 @@ paging-сценарий (движущийся viewer), сравнение с р�
 - **cargo-fuzz таргеты на парсеры** (`.vox`, `block_serializer`, `region`): C++-сторона уже
   фаззится (`fuzzer.yml`), Rust-парсеры — нет; баг D2 — ровно тот класс, который находит фаззер.
 
-Инварианты на всём протяжении: 637 unit + 10 integration + golden-парити остаются зелёными;
+Инварианты на всём протяжении: 638 unit + 10 integration + golden-парити остаются зелёными;
 clippy/fmt чистые; каждый шаг сверяется с соответствующим C++-файлом (ссылки в §9.1-9.3).
 
 ---
@@ -550,6 +552,7 @@ clippy/fmt чистые; каждый шаг сверяется с соотве�
 | 2026-07-06 | A2, часть mesher: `VoxelMesher::build(&self)` + `SharedVoxelMesher = Arc<dyn VoxelMesher>` | ✅ закрыто. Внешний mesher-mutex удалён из `MeshingDependency`/`MeshBlockTask`; `TransvoxelMesher` использует thread-local `Cache`, поэтому shared mesher не сериализует build через внутренний глобальный lock | `cargo test -p voxel-core` → 635 unit + 10 integration + 1 doc-test, 0 failed |
 | 2026-07-06 | D2: `.vox` negative model-size guard | ✅ закрыто. `SIZE` dimensions now must be in `0..=MAX_MODEL_SIZE`, so `0xFFFFFFFF`/`-1` returns `InvalidData` before model allocation | `cargo test -p voxel-core` → 636 unit + 10 integration + 1 doc-test, 0 failed |
 | 2026-07-06 | C2: graph uniform-channel compression | ✅ закрыто. `GraphGenerator` calls `VoxelBuffer::compress_uniform_channels()` after generation; constant SDF output remains `Compression::Uniform` instead of a materialized channel | `cargo test -p voxel-core` → 637 unit + 10 integration + 1 doc-test, 0 failed |
+| 2026-07-06 | B2: Transvoxel uniform SDF fast-path | ✅ закрыто. `TransvoxelMesher` skips `build_regular_mesh` when the SDF channel is uniform, preserves the current Rust contract of one empty `Transvoxel` surface, and avoids all sampler calls | `cargo test -p voxel-core` → 638 unit + 10 integration + 1 doc-test, 0 failed |
 
 Остаток пункта #1: `VoxelData` per-LOD `RwLock`/real `SpatialLock3D`.
 ABBA-риск с внешним generator/mesher lock снят, но правило “не держать data lock через
@@ -572,7 +575,7 @@ byte-parity тесты), но **два системных долга** треб�
    целенаправленно устранял; заявление H2 о 1.5× преимуществе не распространяется на end-to-end конвейер.
 
 План действий — три волны из §9.6: (1) остаток волны 1 — A4 + быстрые
-фиксы (B2/D1/D5), (2) волна 2 — per-LOD RwLock + реальный SpatialLock3D + TSan/stress
+фиксы (D1/D5), (2) волна 2 — per-LOD RwLock + реальный SpatialLock3D + TSan/stress
 (закрывает GO-критерий Фазы 4), (3) волна 3 — перф-фиксы горячего пути и graph runtime
 с перемером H2 end-to-end. Параллельно: настроить upstream-tracking (`cpp-reference`) и
 CI для `rust/` — сейчас Rust не собирается ни одним workflow.
