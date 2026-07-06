@@ -84,6 +84,8 @@ pub struct RegionFile<F: VoxelFile = StdVoxelFile> {
     /// Reverse map: `_sectors[i]` is the block position whose data lives at
     /// sector `i`. Rebuilt on open. Not persisted.
     sectors: Vec<Vector3i>,
+    /// Whether the in-memory header/LUT needs to be persisted.
+    header_dirty: bool,
     /// Byte offset where block data begins (end of header + LUT).
     blocks_begin_offset: u64,
 }
@@ -107,6 +109,7 @@ impl<F: VoxelFile> RegionFile<F> {
                 blocks: vec![RegionBlockInfo::EMPTY; block_count],
             },
             sectors: Vec::new(),
+            header_dirty: false,
             blocks_begin_offset: 0,
         }
     }
@@ -215,6 +218,7 @@ impl<F: VoxelFile> RegionFile<F> {
 
         debug_assert_eq!(buf.len(), self.header.format.header_size_v3());
         file.write(&buf).map_err(io)?;
+        self.header_dirty = false;
         Ok(())
     }
 
@@ -307,6 +311,7 @@ impl<F: VoxelFile> RegionFile<F> {
 
         // Rebuild the reverse sector map by scanning present blocks in order.
         self.rebuild_sectors();
+        self.header_dirty = false;
 
         Ok(())
     }
@@ -543,13 +548,16 @@ impl<F: VoxelFile> RegionFile<F> {
             }
         }
 
-        // Persist the updated LUT.
-        self.save_header()?;
+        // Persist the updated LUT lazily in flush()/close()/Drop.
+        self.header_dirty = true;
         Ok(())
     }
 
     /// Flush pending writes to the OS.
     pub fn flush(&mut self) -> Result<(), RegionError> {
+        if self.header_dirty && self.file.is_some() {
+            self.save_header()?;
+        }
         if let Some(f) = &mut self.file {
             f.flush().map_err(io)?;
         }
@@ -558,9 +566,8 @@ impl<F: VoxelFile> RegionFile<F> {
 
     /// Close the file (flushing first). No-op if already closed.
     pub fn close(&mut self) -> Result<(), RegionError> {
-        if let Some(mut f) = self.file.take() {
-            f.flush().map_err(io)?;
-        }
+        self.flush()?;
+        self.file.take();
         Ok(())
     }
 }
@@ -653,6 +660,76 @@ mod tests {
         rf
     }
 
+    struct HeaderWriteCountingFile {
+        data: Vec<u8>,
+        pos: u64,
+        header_len: u64,
+        header_write_count: usize,
+    }
+
+    impl HeaderWriteCountingFile {
+        fn new(header_len: u64) -> Self {
+            Self {
+                data: Vec::new(),
+                pos: 0,
+                header_len,
+                header_write_count: 0,
+            }
+        }
+
+        fn header_write_count(&self) -> usize {
+            self.header_write_count
+        }
+    }
+
+    impl VoxelFile for HeaderWriteCountingFile {
+        fn seek(&mut self, pos: u64) -> std::io::Result<()> {
+            self.pos = pos;
+            Ok(())
+        }
+
+        fn position(&mut self) -> std::io::Result<u64> {
+            Ok(self.pos)
+        }
+
+        fn len(&self) -> std::io::Result<u64> {
+            Ok(self.data.len() as u64)
+        }
+
+        fn read(&mut self, dst: &mut [u8]) -> std::io::Result<usize> {
+            let avail = self.data.len().saturating_sub(self.pos as usize);
+            let n = avail.min(dst.len());
+            dst[..n].copy_from_slice(&self.data[self.pos as usize..self.pos as usize + n]);
+            self.pos += n as u64;
+            Ok(n)
+        }
+
+        fn write(&mut self, src: &[u8]) -> std::io::Result<()> {
+            let start = self.pos;
+            let end = start + src.len() as u64;
+            if start < self.header_len && end > 0 {
+                self.header_write_count += 1;
+            }
+
+            let end = end as usize;
+            if end > self.data.len() {
+                self.data.resize(end, 0);
+            }
+            self.data[self.pos as usize..end].copy_from_slice(src);
+            self.pos = end as u64;
+            Ok(())
+        }
+
+        fn set_len(&mut self, len: u64) -> std::io::Result<()> {
+            self.data.resize(len as usize, 0);
+            Ok(())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     /// A small voxel buffer matching the test format (2³, 8-bit channels).
     fn sample_block(value: u8) -> VoxelBuffer {
         let mut b = VoxelBuffer::with_size(Vector3i::new(2, 2, 2));
@@ -692,6 +769,36 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn save_block_defers_header_rewrite_until_flush() {
+        let format = small_format();
+        let header_len = format.header_size_v3() as u64;
+        let mut rf = RegionFile::<HeaderWriteCountingFile>::with_format(format);
+        rf.file = Some(HeaderWriteCountingFile::new(header_len));
+        rf.blocks_begin_offset = rf.header.format.header_size_v3() as u64;
+        rf.save_header().unwrap();
+
+        let header_writes_after_create = rf.file.as_ref().unwrap().header_write_count();
+        rf.save_block(
+            Vector3i::new(0, 0, 0),
+            &sample_block(42),
+            compressed_data::Compression::None,
+        )
+        .unwrap();
+        assert_eq!(
+            rf.file.as_ref().unwrap().header_write_count(),
+            header_writes_after_create,
+            "save_block should only mark the header dirty"
+        );
+
+        rf.flush().unwrap();
+        assert_eq!(
+            rf.file.as_ref().unwrap().header_write_count(),
+            header_writes_after_create + 1,
+            "flush should persist the pending header once"
+        );
     }
 
     #[test]

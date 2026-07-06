@@ -265,7 +265,8 @@ so we can get rid of abstraction layers and conditionals»*):
   но Rust-эквивалента оптимизированного `write_box_template` (dispatch once) нет вовсе.
 
 **streams/io/format:**
-- **`RegionFile::save_block` переписывает весь header+LUT (~16 KiB) на диск на каждое сохранение блока**
+- **`RegionFile` deferred header write после аудита закрыт 2026-07-06**: в исходном состоянии
+  `save_block` переписывал весь header+LUT (~16 KiB) на диск на каждое сохранение блока
   (`region_file.rs:547`); C++ держит `_header_modified` и пишет header один раз в `flush()/close()`.
   N сохранений = N перезаписей заголовка — прямое усиление I/O при save-штормах.
 - **`.vox`-парсер не проверяет отрицательные размеры модели** (`parser.rs:287`): `0xFFFFFFFF` → `-1i32`
@@ -497,7 +498,7 @@ C++ `inner_group_start_index` / `skip_outer_group` (`voxel_generator_graph.cpp:9
 
 | # | Фикс | Суть |
 |---|---|---|
-| D1 | `RegionFile`: поле `header_dirty: bool` | `save_block` только метит; физическая запись header'а в `flush()`/`close()`/`Drop` (зеркало C++ `_header_modified`). Пока latent — RegionFile ещё не подключён к террейну (forest-wrapper не портирован), но фикс дёшев сейчас |
+| D1 | `RegionFile`: поле `header_dirty: bool` | ✅ закрыто 2026-07-06: `save_block` только метит; физическая запись header'а в `flush()`/`close()`/`Drop` (зеркало C++ `_header_modified`) |
 | D2 | `.vox`: `(0..=MAX_MODEL_SIZE).contains(&size.{x,y,z})` | закрывает abort на отрицательных размерах; заодно строже C++ |
 | D3 | `VoxelBuffer::create(size, format: Option<&VoxelFormat>)` | либо сохранять текущие depth при `None` (C++ семантика) + поправить doc-комментарий |
 | D4 | `#[inline]` на `get_voxel`/`set_voxel`/`get_voxel_f`/`set_voxel_f` ×2 типа; `fill_area` — база строки за внутренний цикл (образец: свой же `fill_3d_region_zxy`); depth-hoisted helper для `downscale_to`/`paste_masked*` (аналог C++ `write_box_template`) | |
@@ -513,11 +514,11 @@ C++ `inner_group_start_index` / `skip_outer_group` (`voxel_generator_graph.cpp:9
 `tasks`; B3 естественно делается вместе с A2.
 
 **Волна 1 — дешёвое и разблокирующее (каждый пункт — отдельный коммит):**
-A1 (генератор `&self`) → A2 (мешер `&self` + scratch) → A4 (правило замков) + параллельно D1, D2.
+A1 (генератор `&self`) → A2 (мешер `&self` + scratch) → A4 (правило замков).
 Уже после этой волны mesh-build'ы и генерация исполняются параллельно (глобальный замок
 `VoxelData` остаётся только на gather — короткая секция).
 **DoD:** новый тест «N воркеров мешат M блоков» показывает масштабирование по потокам
-(время ~1/N, загрузка >1 ядра); 639+10 тестов и golden-парити зелёные.
+(время ~1/N, загрузка >1 ядра); 640+10 тестов и golden-парити зелёные.
 
 **Волна 2 — конкурентность до конца:**
 A3 (`Arc<VoxelData>` + per-LOD RwLock + реальный SpatialLock3D) → A5 (semaphore + staging +
@@ -541,7 +542,7 @@ paging-сценарий (движущийся viewer), сравнение с р�
 - **cargo-fuzz таргеты на парсеры** (`.vox`, `block_serializer`, `region`): C++-сторона уже
   фаззится (`fuzzer.yml`), Rust-парсеры — нет; баг D2 — ровно тот класс, который находит фаззер.
 
-Инварианты на всём протяжении: 639 unit + 10 integration + golden-парити остаются зелёными;
+Инварианты на всём протяжении: 640 unit + 10 integration + golden-парити остаются зелёными;
 clippy/fmt чистые; каждый шаг сверяется с соответствующим C++-файлом (ссылки в §9.1-9.3).
 
 ---
@@ -556,6 +557,7 @@ clippy/fmt чистые; каждый шаг сверяется с соотве�
 | 2026-07-06 | C2: graph uniform-channel compression | ✅ закрыто. `GraphGenerator` calls `VoxelBuffer::compress_uniform_channels()` after generation; constant SDF output remains `Compression::Uniform` instead of a materialized channel | `cargo test -p voxel-core` → 637 unit + 10 integration + 1 doc-test, 0 failed |
 | 2026-07-06 | B2: Transvoxel uniform SDF fast-path | ✅ закрыто. `TransvoxelMesher` skips `build_regular_mesh` when the SDF channel is uniform, preserves the current Rust contract of one empty `Transvoxel` surface, and avoids all sampler calls | `cargo test -p voxel-core` → 638 unit + 10 integration + 1 doc-test, 0 failed |
 | 2026-07-06 | D5: HeightmapNoise shared curve | ✅ закрыто. `HeightmapNoise::curve` is now `Option<Arc<Curve>>`; `set_curve` preserves owned-curve compatibility and `set_curve_arc` supports shared storage without cloning baked points | `cargo test -p voxel-core` → 639 unit + 10 integration + 1 doc-test, 0 failed |
+| 2026-07-06 | D1: RegionFile deferred header write | ✅ закрыто. `RegionFile` keeps a `header_dirty` flag; `save_block` only marks the LUT dirty, while `flush()`/`close()`/`Drop` persist the header once | `cargo test -p voxel-core` → 640 unit + 10 integration + 1 doc-test, 0 failed |
 
 Остаток пункта #1: `VoxelData` per-LOD `RwLock`/real `SpatialLock3D`.
 ABBA-риск с внешним generator/mesher lock снят, но правило “не держать data lock через
@@ -577,8 +579,8 @@ byte-parity тесты), но **два системных долга** треб�
 2. **Горячий путь мешинга** (§9.2): адаптерный слой вернул абстракционные издержки, которые C++
    целенаправленно устранял; заявление H2 о 1.5× преимуществе не распространяется на end-to-end конвейер.
 
-План действий — три волны из §9.6: (1) остаток волны 1 — A4 + быстрый
-фикс D1, (2) волна 2 — per-LOD RwLock + реальный SpatialLock3D + TSan/stress
+План действий — три волны из §9.6: (1) остаток волны 1 — A4,
+(2) волна 2 — per-LOD RwLock + реальный SpatialLock3D + TSan/stress
 (закрывает GO-критерий Фазы 4), (3) волна 3 — перф-фиксы горячего пути и graph runtime
 с перемером H2 end-to-end. Параллельно: настроить upstream-tracking (`cpp-reference`) и
 CI для `rust/` — сейчас Rust не собирается ни одним workflow.
