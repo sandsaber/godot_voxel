@@ -295,6 +295,7 @@ godot_voxel (fork)
 | 2026-07-06 | Audit wave 1E: Transvoxel uniform fast-path | ✅ total 638 unit + 10 integration. `TransvoxelMesher` now skips the full transvoxel O(n³) sampler path when the SDF channel is uniform, while preserving Rust's current one-empty-surface contract. Added regression test `transvoxel_mesher_fast_paths_uniform_sdf_without_sampling` |
 | 2026-07-06 | Audit wave 1F: HeightmapNoise shared curve | ✅ total 639 unit + 10 integration. `HeightmapNoise::curve` now stores `Option<Arc<Curve>>`; `set_curve` wraps owned curves and `set_curve_arc` supports shared curve storage. Added regression test `heightmap_noise_curve_can_be_arc_shared` |
 | 2026-07-06 | Audit wave 1G: RegionFile deferred header write | ✅ total 640 unit + 10 integration. `RegionFile` now tracks `header_dirty`: `save_block` marks the LUT dirty and `flush()`/`close()`/`Drop` persist the header once. Added regression test `save_block_defers_header_rewrite_until_flush` |
+| 2026-07-06 | Audit wave 1H: data-lock ordering rule | ✅ total 645 unit + 10 integration. `LoadBlockForTerrainTask` snapshots stream/generator settings under `VoxelData` lock and performs stream/generator work after drop; `MeshBlockTask` queues missing gather regions under lock, fills them outside the critical section, then calls the mesher after lock release. Added four `try_lock()` guard tests covering generator/mesher/stream callbacks plus a deterministic shared-mesher overlap test |
 
 ### Где остановились (для возобновления)
 
@@ -308,12 +309,14 @@ godot_voxel (fork)
 **Фаза 2 mobile-half — `.so` собран** (aarch64 + x86_64-android через NDK r29).
 **Фаза 3 (compute-слой) — ЗАВЕРШЕНА.** Все engine-agnostic компоненты
 портированы и повторно проверены audit pass'ом (439 unit тестов).
-**Фаза 4 — storage/streaming + meshing pipeline + single-LOD paging terrain + VoxelEngine foundation/task loop работают headlessly (640 unit + 10 integration тестов).**
+**Фаза 4 — storage/streaming + meshing pipeline + single-LOD paging terrain + VoxelEngine foundation/task loop работают headlessly (645 unit + 10 integration тестов).**
 Audit wave 1A after the 2026-07-06 audit removed the outer generator mutex:
 `VoxelGenerator` is shared via `Arc<dyn VoxelGenerator>` and called through `&self`.
 Audit wave 1B removed the outer mesher mutex:
 `VoxelMesher` is shared via `Arc<dyn VoxelMesher>` and called through `&self`;
 `TransvoxelMesher` uses thread-local `Cache` scratch.
+Audit wave 1H closed the current data-lock ordering rule: stream, generator and
+mesher callbacks are not invoked while holding the outer `VoxelData` mutex.
 End-to-end: generator → VoxelData → MeshBlockTask → TransvoxelMesher → MesherOutput.
 Paging: VoxelTerrainCore orchestrates viewers → loads → meshing → outputs → unload.
 
@@ -348,8 +351,8 @@ empty-cell early-out по raw SDF, а case/interpolation/normals — после
    - **`VoxelDataGrid`** — terrain meshing query helper (оптимизация; текущий
      MeshBlockTask обходит это через прямой `voxel_data.get_block` lookup).
    - **Concurrency audit follow-ups** — `VoxelData` per-LOD `RwLock` +
-     real `SpatialLock3D`, and the lock-order rule that data locks are not held
-     through generator/mesher/stream.
+     real `SpatialLock3D`, plus stress/ThreadSanitizer coverage for the threaded
+     edit/load/mesh path.
    - **ThreadSanitizer end-to-end** — когда `VoxelEngine` + real threading land.
    - **Godot binding (Phase 5)** — Node3D wrappers для VoxelTerrainCore +
      RenderingServer mesh upload + EditorPlugin.
@@ -484,7 +487,7 @@ conditions (проверка под ThreadSanitizer/loom).
 git clone https://github.com/sandsaber/godot_voxel.git
 cd godot_voxel && git checkout rust/pilot
 cd rust
-cargo test -p voxel-core       # 640 unit + 10 integration + 1 doc-test; 1 ignored diagnostic snapshot
+cargo test -p voxel-core       # 645 unit + 10 integration + 1 doc-test; 1 ignored diagnostic snapshot
 cargo build -p voxel-gdext     # GDExtension .so (грузится в Godot 4.7)
 cargo clippy --workspace --all-targets  # должен быть чистый
 cargo bench                    # transvoxel benches (16³=143 / 32³=199 / 64³=249 Melem/s)

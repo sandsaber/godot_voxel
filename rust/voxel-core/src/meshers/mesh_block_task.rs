@@ -127,19 +127,21 @@ impl MeshBlockTask {
         let generator_handle = self.meshing_dependency.generator();
 
         let mut voxels = VoxelBuffer::with_size(Vector3i::zero());
-        {
+        let gather_plan = {
             let data = self.data.lock().expect("voxel data mutex poisoned");
-            data.format().configure_buffer(&mut voxels);
-            gather_voxels_cpu(
+            gather_voxels_cpu_snapshot(
                 &mut voxels,
                 min_padding,
                 max_padding,
                 channels_mask,
-                generator_handle.as_deref(),
+                generator_handle.is_some(),
                 &data,
                 self.lod_index,
                 self.position_in_blocks,
-            );
+            )
+        };
+        if let Some(generator) = generator_handle.as_deref() {
+            generate_missing_voxel_regions(&mut voxels, generator, &gather_plan, self.lod_index);
         }
 
         // Build the mesh. The padded buffer is what the mesher sees; the
@@ -198,8 +200,8 @@ impl ThreadedTask for MeshBlockTask {
 ///
 /// Ported from C++ `copy_block_and_neighbors` for `mesh_block_size_factor == 1`.
 /// `dst` is configured to `(block_size + min_padding + max_padding)³` with the
-/// caller's [`VoxelFormat`] (done by the caller before invoking this helper,
-/// matching C++ which configures the buffer before calling). The function:
+/// caller's [`VoxelFormat`], matching C++ which configures the buffer before
+/// copying/generating the neighbour regions. The function:
 ///
 /// 1. Copies each neighbour's channel data into the matching sub-region of
 ///    `dst` (skipping empty/missing blocks).
@@ -220,22 +222,66 @@ pub fn gather_voxels_cpu(
     lod_index: u8,
     mesh_block_pos: Vector3i,
 ) -> Vector3i {
+    let gather_plan = gather_voxels_cpu_snapshot(
+        dst,
+        min_padding,
+        max_padding,
+        channels_mask,
+        generator.is_some(),
+        voxel_data,
+        lod_index,
+        mesh_block_pos,
+    );
+    if let Some(generator) = generator {
+        generate_missing_voxel_regions(dst, generator, &gather_plan, lod_index);
+    }
+    gather_plan.origin_in_voxels
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MissingVoxelRegion {
+    dst_offset: Vector3i,
+    origin_in_voxels: Vector3i,
+}
+
+#[derive(Debug)]
+struct GatherVoxelPlan {
+    origin_in_voxels: Vector3i,
+    format: crate::storage::VoxelFormat,
+    data_block_size: i32,
+    channels: Vec<usize>,
+    missing_regions: Vec<MissingVoxelRegion>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn gather_voxels_cpu_snapshot(
+    dst: &mut VoxelBuffer,
+    min_padding: i32,
+    max_padding: i32,
+    channels_mask: u32,
+    queue_missing_regions: bool,
+    voxel_data: &VoxelData,
+    lod_index: u8,
+    mesh_block_pos: Vector3i,
+) -> GatherVoxelPlan {
     let data_block_size = voxel_data.block_size() as i32;
     let mesh_block_size = data_block_size; // factor == 1
     let padded_size = mesh_block_size + min_padding + max_padding;
+    let format = voxel_data.format();
 
     // (Re)create `dst` at the padded size and configure channels. The C++
     // path calls `dst.create(size, &format)`; our caller already configured
     // the format, so we just resize.
     if dst.size() != Vector3i::splat(padded_size) {
         *dst = VoxelBuffer::with_size(Vector3i::splat(padded_size));
-        voxel_data.format().configure_buffer(dst);
     }
+    format.configure_buffer(dst);
 
     let channels: Vec<usize> = (0..8u32)
         .filter(|ci| (channels_mask & (1u32 << ci)) != 0)
         .map(|ci| ci as usize)
         .collect();
+    let mut missing_regions = Vec::new();
 
     // Padded buffer's world origin (corner of the halo, not the block).
     let origin_in_voxels_without_padding = mesh_block_pos * mesh_block_size;
@@ -268,29 +314,16 @@ pub fn gather_voxels_cpu(
                             channel_index,
                         );
                     }
-                } else if let Some(generator) = generator {
-                    // Missing neighbour inside bounds: generate directly into
-                    // the matching sub-region of `dst`. We use a scratch
-                    // buffer for the generator output (which expects a
-                    // standalone VoxelBuffer) then copy across.
-                    let mut scratch = VoxelBuffer::with_size(Vector3i::splat(data_block_size));
-                    voxel_data.format().configure_buffer(&mut scratch);
+                } else if queue_missing_regions {
+                    // Missing neighbour inside bounds: queue the generator
+                    // work so callers holding VoxelData's lock can drop it
+                    // before running the heavy generator.
                     let neighbour_origin =
                         (neighbour_block_pos * data_block_size) << u32::from(lod_index);
-                    generator.generate_block(VoxelQueryData {
-                        buffer: &mut scratch,
+                    missing_regions.push(MissingVoxelRegion {
+                        dst_offset,
                         origin_in_voxels: neighbour_origin,
-                        lod: lod_index as u32,
                     });
-                    for &channel_index in &channels {
-                        dst.copy_channel_from_area(
-                            &scratch,
-                            Vector3i::zero(),
-                            scratch.size(),
-                            dst_offset,
-                            channel_index,
-                        );
-                    }
                 }
                 // Else: no generator and missing block — `dst` keeps the
                 // format default for that region (matches C++ behaviour
@@ -299,7 +332,41 @@ pub fn gather_voxels_cpu(
         }
     }
 
-    origin_in_voxels
+    GatherVoxelPlan {
+        origin_in_voxels,
+        format,
+        data_block_size,
+        channels,
+        missing_regions,
+    }
+}
+
+fn generate_missing_voxel_regions(
+    dst: &mut VoxelBuffer,
+    generator: &dyn VoxelGenerator,
+    gather_plan: &GatherVoxelPlan,
+    lod_index: u8,
+) {
+    for region in &gather_plan.missing_regions {
+        // The generator expects a standalone block-sized buffer. Copy the
+        // requested channels back into the padded mesh buffer afterwards.
+        let mut scratch = VoxelBuffer::with_size(Vector3i::splat(gather_plan.data_block_size));
+        gather_plan.format.configure_buffer(&mut scratch);
+        generator.generate_block(VoxelQueryData {
+            buffer: &mut scratch,
+            origin_in_voxels: region.origin_in_voxels,
+            lod: lod_index as u32,
+        });
+        for &channel_index in &gather_plan.channels {
+            dst.copy_channel_from_area(
+                &scratch,
+                Vector3i::zero(),
+                scratch.size(),
+                region.dst_offset,
+                channel_index,
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -310,7 +377,9 @@ mod tests {
     use crate::math::{Box3i, Vector3i};
     use crate::meshers::{MesherInput, MesherOutput, Surface, SurfaceArrays, VoxelMesher};
     use crate::storage::{ChannelId, VoxelBuffer, VoxelData};
-    use std::sync::{Arc, Mutex};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Condvar, Mutex, Weak};
+    use std::time::{Duration, Instant};
 
     /// A generator that writes a constant raw value into the SDF channel of
     /// every voxel it sees. Lets us verify the gather step fills missing
@@ -324,6 +393,90 @@ mod tests {
                 .buffer
                 .clear_channel_f(ChannelId::Sdf.index(), self.value);
             GenResult::default()
+        }
+    }
+
+    struct VoxelDataLockProbeGenerator {
+        data: Weak<Mutex<VoxelData>>,
+    }
+
+    impl VoxelGenerator for VoxelDataLockProbeGenerator {
+        fn generate_block(&self, input: VoxelQueryData<'_>) -> GenResult {
+            let data = self.data.upgrade().expect("voxel data still alive");
+            let guard = data
+                .try_lock()
+                .expect("VoxelData lock must be released before generator calls");
+            drop(guard);
+
+            input.buffer.clear_channel_f(ChannelId::Sdf.index(), -0.25);
+            GenResult::default()
+        }
+    }
+
+    struct VoxelDataLockProbeMesher {
+        data: Weak<Mutex<VoxelData>>,
+        build_calls: Arc<Mutex<usize>>,
+    }
+
+    impl VoxelMesher for VoxelDataLockProbeMesher {
+        fn build(&self, _output: &mut MesherOutput, _input: &MesherInput<'_>) {
+            let data = self.data.upgrade().expect("voxel data still alive");
+            let guard = data
+                .try_lock()
+                .expect("VoxelData lock must be released before mesher calls");
+            drop(guard);
+            *self.build_calls.lock().unwrap() += 1;
+        }
+
+        fn used_channels_mask(&self) -> u32 {
+            1 << ChannelId::Sdf.index()
+        }
+    }
+
+    struct OverlapProbeMesher {
+        entered: Arc<(Mutex<usize>, Condvar)>,
+        inside: Arc<AtomicUsize>,
+        max_inside: Arc<AtomicUsize>,
+    }
+
+    struct InsideBuildGuard<'a>(&'a AtomicUsize);
+
+    impl Drop for InsideBuildGuard<'_> {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    impl VoxelMesher for OverlapProbeMesher {
+        fn build(&self, _output: &mut MesherOutput, _input: &MesherInput<'_>) {
+            let current = self.inside.fetch_add(1, Ordering::SeqCst) + 1;
+            let _guard = InsideBuildGuard(&self.inside);
+            self.max_inside.fetch_max(current, Ordering::SeqCst);
+
+            let (lock, cvar) = &*self.entered;
+            let mut entered = lock.lock().unwrap();
+            *entered += 1;
+            cvar.notify_all();
+
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while *entered < 2 {
+                let now = Instant::now();
+                assert!(
+                    now < deadline,
+                    "mesh tasks did not overlap inside the shared mesher"
+                );
+                let timeout = deadline.saturating_duration_since(now);
+                let (next, wait) = cvar.wait_timeout(entered, timeout).unwrap();
+                entered = next;
+                assert!(
+                    !wait.timed_out() || *entered >= 2,
+                    "mesh tasks did not overlap inside the shared mesher"
+                );
+            }
+        }
+
+        fn used_channels_mask(&self) -> u32 {
+            0
         }
     }
 
@@ -440,6 +593,104 @@ mod tests {
         assert_eq!(output.lod_index, 0);
         assert!(output.surfaces.total_triangle_count() > 0);
         assert_eq!(*build_calls.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn mesh_block_task_releases_data_lock_before_generator_fallback() {
+        let data = shared_data_with_central_block(16);
+        let build_calls = Arc::new(Mutex::new(0));
+        let mesher: Arc<dyn VoxelMesher> = Arc::new(DummyMesher {
+            build_calls: build_calls.clone(),
+        });
+        let generator: Arc<dyn VoxelGenerator> = Arc::new(VoxelDataLockProbeGenerator {
+            data: Arc::downgrade(&data),
+        });
+        let meshing_dep = MeshingDependency::new(mesher, Some(generator));
+
+        let mut task = MeshBlockTask::new(MeshBlockTaskParams {
+            position_in_blocks: Vector3i::zero(),
+            lod_index: 0,
+            data,
+            meshing_dependency: meshing_dep,
+            collision_hint: false,
+            lod_hint: false,
+        });
+
+        task.run_meshing();
+        let output = task.take_output().expect("task produced output");
+
+        assert!(!output.dropped);
+        assert_eq!(*build_calls.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn mesh_block_task_releases_data_lock_before_mesher_build() {
+        let data = shared_data_with_central_block(16);
+        let build_calls = Arc::new(Mutex::new(0));
+        let mesher: Arc<dyn VoxelMesher> = Arc::new(VoxelDataLockProbeMesher {
+            data: Arc::downgrade(&data),
+            build_calls: build_calls.clone(),
+        });
+        let generator: Arc<dyn VoxelGenerator> = Arc::new(ConstantSdfGenerator { value: -1.0 });
+        let meshing_dep = MeshingDependency::new(mesher, Some(generator));
+
+        let mut task = MeshBlockTask::new(MeshBlockTaskParams {
+            position_in_blocks: Vector3i::zero(),
+            lod_index: 0,
+            data,
+            meshing_dependency: meshing_dep,
+            collision_hint: false,
+            lod_hint: false,
+        });
+
+        task.run_meshing();
+        let output = task.take_output().expect("task produced output");
+
+        assert!(!output.dropped);
+        assert_eq!(*build_calls.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn mesh_block_tasks_can_overlap_inside_shared_mesher() {
+        let data = shared_data_with_central_block(16);
+        let entered = Arc::new((Mutex::new(0), Condvar::new()));
+        let inside = Arc::new(AtomicUsize::new(0));
+        let max_inside = Arc::new(AtomicUsize::new(0));
+        let mesher: Arc<dyn VoxelMesher> = Arc::new(OverlapProbeMesher {
+            entered,
+            inside,
+            max_inside: max_inside.clone(),
+        });
+        let meshing_dep = MeshingDependency::new(mesher, None);
+
+        let make_task = |position_in_blocks| {
+            MeshBlockTask::new(MeshBlockTaskParams {
+                position_in_blocks,
+                lod_index: 0,
+                data: data.clone(),
+                meshing_dependency: meshing_dep.clone(),
+                collision_hint: false,
+                lod_hint: false,
+            })
+        };
+        let mut first = make_task(Vector3i::zero());
+        let mut second = make_task(Vector3i::new(1, 0, 0));
+
+        let first = std::thread::spawn(move || {
+            first.run_meshing();
+            first.take_output().expect("first task produced output")
+        });
+        let second = std::thread::spawn(move || {
+            second.run_meshing();
+            second.take_output().expect("second task produced output")
+        });
+
+        let first = first.join().expect("first mesh task completed");
+        let second = second.join().expect("second mesh task completed");
+
+        assert!(!first.dropped);
+        assert!(!second.dropped);
+        assert_eq!(max_inside.load(Ordering::SeqCst), 2);
     }
 
     #[test]

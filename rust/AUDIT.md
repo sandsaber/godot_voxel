@@ -290,7 +290,9 @@ so we can get rid of abstraction layers and conditionals»*):
 
 > Обновление 2026-07-06: trait-level часть пункта #1 закрыта — `VoxelGenerator`
 > и `VoxelMesher` переведены на shared immutable contract (`&self` + `Arc<dyn ...>`)
-> без внешних generator/mesher mutex. Оставшаяся часть #1: `VoxelData` per-LOD locking.
+> без внешних generator/mesher mutex. A4 lock-order rule тоже закрыт: текущие
+> generator/mesher/stream callbacks выполняются после выхода из `VoxelData` lock.
+> Оставшаяся часть #1: `VoxelData` per-LOD locking.
 
 | # | Что | Эффект | Стоимость |
 |---|---|---|---|
@@ -397,9 +399,14 @@ pub struct VoxelData { lods: Box<[Lod]>, /* bounds, format, ... — иммута
   зафиксировать правило «замки LOD берутся строго по возрастанию индекса», иначе появится
   новый ABBA между LOD-каскадом и редактированием.
 
-**A4. Порядок замков.** После A1 замок генератора исчезает — ABBA-дедлок уходит сам.
-Дополнительно зафиксировать правило в doc-комментарии `VoxelData`: *замок данных никогда
-не держится через вызов generator/mesher/stream* (сейчас нарушается в `LoadBlockForTerrainTask`).
+**A4. Порядок замков — ✅ закрыто 2026-07-06.** После A1 замок генератора исчез,
+а A4 дополнительно закрепил правило: `VoxelData` lock не держится через вызовы
+generator/mesher/stream. `LoadBlockForTerrainTask` снимает snapshot `block_size`/`format`/
+`generator` под lock и вызывает fallback-генератор после drop; `MeshBlockTask`
+копирует resident-соседей под lock, выносит missing-регионы в план и генерирует их
+после выхода из критической секции. Regression-тесты проверяют это через
+`try_lock()` внутри generator/mesher/stream callbacks и через overlap двух mesh-task'ов
+внутри одного shared mesher.
 
 **A5. Task runner (после A1-A3, отдельными коммитами):**
 - будить воркеров через готовый `thread::Semaphore` (post на каждый enqueue, как C++
@@ -514,11 +521,12 @@ C++ `inner_group_start_index` / `skip_outer_group` (`voxel_generator_graph.cpp:9
 `tasks`; B3 естественно делается вместе с A2.
 
 **Волна 1 — дешёвое и разблокирующее (каждый пункт — отдельный коммит):**
-A1 (генератор `&self`) → A2 (мешер `&self` + scratch) → A4 (правило замков).
+✅ закрыта 2026-07-06: A1 (генератор `&self`) → A2 (мешер `&self` + scratch) →
+A4 (правило замков).
 Уже после этой волны mesh-build'ы и генерация исполняются параллельно (глобальный замок
 `VoxelData` остаётся только на gather — короткая секция).
 **DoD:** новый тест «N воркеров мешат M блоков» показывает масштабирование по потокам
-(время ~1/N, загрузка >1 ядра); 640+10 тестов и golden-парити зелёные.
+(время ~1/N, загрузка >1 ядра); 645+10 тестов и golden-парити зелёные.
 
 **Волна 2 — конкурентность до конца:**
 A3 (`Arc<VoxelData>` + per-LOD RwLock + реальный SpatialLock3D) → A5 (semaphore + staging +
@@ -542,7 +550,7 @@ paging-сценарий (движущийся viewer), сравнение с р�
 - **cargo-fuzz таргеты на парсеры** (`.vox`, `block_serializer`, `region`): C++-сторона уже
   фаззится (`fuzzer.yml`), Rust-парсеры — нет; баг D2 — ровно тот класс, который находит фаззер.
 
-Инварианты на всём протяжении: 640 unit + 10 integration + golden-парити остаются зелёными;
+Инварианты на всём протяжении: 645 unit + 10 integration + golden-парити остаются зелёными;
 clippy/fmt чистые; каждый шаг сверяется с соответствующим C++-файлом (ссылки в §9.1-9.3).
 
 ---
@@ -558,11 +566,13 @@ clippy/fmt чистые; каждый шаг сверяется с соотве�
 | 2026-07-06 | B2: Transvoxel uniform SDF fast-path | ✅ закрыто. `TransvoxelMesher` skips `build_regular_mesh` when the SDF channel is uniform, preserves the current Rust contract of one empty `Transvoxel` surface, and avoids all sampler calls | `cargo test -p voxel-core` → 638 unit + 10 integration + 1 doc-test, 0 failed |
 | 2026-07-06 | D5: HeightmapNoise shared curve | ✅ закрыто. `HeightmapNoise::curve` is now `Option<Arc<Curve>>`; `set_curve` preserves owned-curve compatibility and `set_curve_arc` supports shared storage without cloning baked points | `cargo test -p voxel-core` → 639 unit + 10 integration + 1 doc-test, 0 failed |
 | 2026-07-06 | D1: RegionFile deferred header write | ✅ закрыто. `RegionFile` keeps a `header_dirty` flag; `save_block` only marks the LUT dirty, while `flush()`/`close()`/`Drop` persist the header once | `cargo test -p voxel-core` → 640 unit + 10 integration + 1 doc-test, 0 failed |
+| 2026-07-06 | A4: data-lock ordering rule | ✅ закрыто. `LoadBlockForTerrainTask` snapshots stream/generator settings under `VoxelData` lock and runs stream/generator work after drop; `MeshBlockTask` now queues missing gather regions under lock, fills them outside the critical section, then calls the mesher after lock release. Regression tests assert `try_lock()` succeeds inside generator/mesher/stream callbacks, plus two mesh tasks can overlap inside one shared mesher | `cargo test -p voxel-core` → 645 unit + 10 integration + 1 doc-test, 0 failed |
 
 Остаток пункта #1: `VoxelData` per-LOD `RwLock`/real `SpatialLock3D`.
-ABBA-риск с внешним generator/mesher lock снят, но правило “не держать data lock через
-generator/mesher/stream” ещё нужно закрепить и довести в A4/A3. Переиспользование
-`MeshArrays`/`MesherOutput` остаётся отдельной perf-частью B3.
+ABBA-риск с внешним generator/mesher lock снят; правило “не держать data lock через
+generator/mesher/stream” закреплено A4 для текущих load/gather путей. Переиспользование
+`MeshArrays`/`MesherOutput` остаётся отдельной perf-частью B3, а полный per-region locking —
+волной 2/A3.
 
 ## 10. Вывод
 
@@ -573,13 +583,14 @@ generator/mesher/stream” ещё нужно закрепить и довест�
 byte-parity тесты), но **два системных долга** требуют внимания до продолжения Фазы 4/5:
 
 1. **Конкурентная модель** (§9.1): trait-level сериализация генерации и мешинга уже снята
-   после аудита, но `VoxelData` всё ещё стоит за одним глобальным mutex. Пул потоков
+   после аудита, и текущие generator/mesher/stream callbacks больше не выполняются под `VoxelData`
+   mutex, но `VoxelData` всё ещё стоит за одним глобальным mutex. Пул потоков
    начнёт масштабироваться полноценно только после per-LOD `RwLock`/real `SpatialLock3D`
-   и закрепления порядка замков.
+   и stress/TSan-проверки.
 2. **Горячий путь мешинга** (§9.2): адаптерный слой вернул абстракционные издержки, которые C++
    целенаправленно устранял; заявление H2 о 1.5× преимуществе не распространяется на end-to-end конвейер.
 
-План действий — три волны из §9.6: (1) остаток волны 1 — A4,
+План действий — три волны из §9.6: (1) волна 1 закрыта,
 (2) волна 2 — per-LOD RwLock + реальный SpatialLock3D + TSan/stress
 (закрывает GO-критерий Фазы 4), (3) волна 3 — перф-фиксы горячего пути и graph runtime
 с перемером H2 end-to-end. Параллельно: настроить upstream-tracking (`cpp-reference`) и

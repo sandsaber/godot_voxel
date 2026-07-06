@@ -57,6 +57,13 @@ pub type SharedVoxelGenerator = Arc<dyn VoxelGenerator>;
 /// lets multiple task instances reach the same stream.
 pub type SharedVoxelStream = Arc<dyn VoxelStream>;
 
+/// Aggregate voxel storage.
+///
+/// Locking invariant for task code using `Arc<Mutex<VoxelData>>`: clone shared
+/// generator/stream handles and copy cheap settings while holding the data
+/// lock, then release the lock before calling generator, mesher or stream
+/// methods. This mirrors the C++ contract where those shared resources are
+/// thread-safe and not protected by the voxel-data map lock.
 pub struct VoxelData {
     lods: Vec<VoxelDataLod>,
     format: VoxelFormat,

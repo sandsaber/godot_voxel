@@ -745,16 +745,10 @@ impl ThreadedTask for LoadBlockForTerrainTask {
         _ctx: crate::tasks::ThreadedTaskContext,
     ) -> crate::tasks::TaskRunOutcome {
         // Try the stream first. If it has nothing, ask the generator.
-        let bs = self
-            .data
-            .lock()
-            .expect("voxel data mutex poisoned")
-            .block_size() as i32;
-        let format = self
-            .data
-            .lock()
-            .expect("voxel data mutex poisoned")
-            .format();
+        let (bs, format, generator) = {
+            let data = self.data.lock().expect("voxel data mutex poisoned");
+            (data.block_size() as i32, data.format(), data.generator())
+        };
         let mut voxels = VoxelBuffer::with_size(Vector3i::splat(bs));
         format.configure_buffer(&mut voxels);
         let query = crate::streams::VoxelLoadQuery::new(&mut voxels, self.position, 0);
@@ -764,18 +758,15 @@ impl ThreadedTask for LoadBlockForTerrainTask {
             }
             Ok(crate::streams::LoadResult::NotFound) => {
                 // Fall back to the generator if installed.
-                let data = self.data.lock().expect("voxel data mutex poisoned");
-                if let Some(gen) = data.generator() {
+                if let Some(gen) = generator {
                     use crate::generators::base::VoxelQueryData;
                     gen.generate_block(VoxelQueryData {
                         buffer: &mut voxels,
                         origin_in_voxels: self.position * bs,
                         lod: 0,
                     });
-                    drop(data);
                     self.output = Some(BlockDataOutput::loaded(self.position, 0, voxels, false));
                 } else {
-                    drop(data);
                     self.output = Some(BlockDataOutput::not_found(self.position, 0));
                 }
             }
@@ -814,11 +805,12 @@ fn try_take_mesh_output(mut task: Box<dyn ThreadedTask>) -> Option<BlockMeshOutp
 mod tests {
     use super::*;
     use crate::engine::MeshingDependency;
+    use crate::generators::base::{GenResult, VoxelGenerator, VoxelQueryData};
     use crate::generators::simple::Flat;
     use crate::meshers::{MesherOutput, Surface, SurfaceArrays, VoxelMesher};
     use crate::storage::{ChannelId, VoxelData};
     use crate::streams::LoadResult;
-    use crate::tasks::{TaskRunOutcome, ThreadedTask, ThreadedTaskContext};
+    use crate::tasks::{TaskPriority, TaskRunOutcome, ThreadedTask, ThreadedTaskContext};
 
     /// A mesher that always emits one triangle, so we can tell from
     /// `mesh_blocks()[pos].is_loaded` whether the paging loop ran end-to-end.
@@ -853,6 +845,41 @@ mod tests {
         }
     }
 
+    struct VoxelDataLockProbeGenerator {
+        data: std::sync::Weak<Mutex<VoxelData>>,
+    }
+
+    impl VoxelGenerator for VoxelDataLockProbeGenerator {
+        fn generate_block(&self, input: VoxelQueryData<'_>) -> GenResult {
+            let data = self.data.upgrade().expect("voxel data still alive");
+            let guard = data
+                .try_lock()
+                .expect("VoxelData lock must be released before generator calls");
+            drop(guard);
+
+            input.buffer.clear_channel_f(ChannelId::Sdf.index(), -0.5);
+            GenResult::default()
+        }
+    }
+
+    struct VoxelDataLockProbeStream {
+        data: std::sync::Weak<Mutex<VoxelData>>,
+    }
+
+    impl VoxelStream for VoxelDataLockProbeStream {
+        fn load_voxel_block(
+            &self,
+            _query: crate::streams::VoxelLoadQuery<'_>,
+        ) -> crate::streams::StreamResult<LoadResult> {
+            let data = self.data.upgrade().expect("voxel data still alive");
+            let guard = data
+                .try_lock()
+                .expect("VoxelData lock must be released before stream calls");
+            drop(guard);
+            Ok(LoadResult::NotFound)
+        }
+    }
+
     fn build_core() -> VoxelTerrainCore {
         build_core_with_stream(Arc::new(MemoryStream::new()))
     }
@@ -869,6 +896,47 @@ mod tests {
         let mesher: Arc<dyn VoxelMesher> = Arc::new(AlwaysOneTriangleMesher);
         let meshing_dependency = MeshingDependency::new(mesher, None);
         VoxelTerrainCore::new(data, stream, meshing_dependency)
+    }
+
+    #[test]
+    fn load_task_releases_data_lock_before_generator_fallback() {
+        let data = Arc::new(Mutex::new(VoxelData::new()));
+        {
+            let mut guard = data.lock().expect("voxel data mutex poisoned");
+            guard.set_generator(Some(Arc::new(VoxelDataLockProbeGenerator {
+                data: Arc::downgrade(&data),
+            })));
+        }
+
+        let task =
+            LoadBlockForTerrainTask::new(Vector3i::zero(), data, Arc::new(MemoryStream::new()));
+        let outcome = Box::new(task).run(ThreadedTaskContext::new(0, TaskPriority::max()));
+        let mut completed = match outcome {
+            TaskRunOutcome::Complete(task) => task,
+            _ => panic!("load task must complete"),
+        };
+        let output = try_take_load_output(completed.as_mut()).expect("load output");
+
+        assert!(!output.dropped);
+    }
+
+    #[test]
+    fn load_task_releases_data_lock_before_stream_load() {
+        let data = Arc::new(Mutex::new(VoxelData::new()));
+        let stream: Arc<dyn VoxelStream> = Arc::new(VoxelDataLockProbeStream {
+            data: Arc::downgrade(&data),
+        });
+
+        let task = LoadBlockForTerrainTask::new(Vector3i::zero(), data, stream);
+        let outcome = Box::new(task).run(ThreadedTaskContext::new(0, TaskPriority::max()));
+        let mut completed = match outcome {
+            TaskRunOutcome::Complete(task) => task,
+            _ => panic!("load task must complete"),
+        };
+        let output = try_take_load_output(completed.as_mut()).expect("load output");
+
+        assert!(!output.dropped);
+        assert!(output.voxels.is_none());
     }
 
     #[test]
