@@ -29,7 +29,7 @@ VoxelData
    • view_area / unview_area (refcount-pinned block residency)
    • copy / paste / paste_masked (per-block, O(1) writability)
    • update_lods LOD cascade (downscale_to mip-map kernel)
-   • generator/stream ownership (SharedVoxelGenerator / SharedVoxelStream)
+   • generator/stream ownership (SharedVoxelGenerator = Arc<dyn VoxelGenerator>, no outer mutex; SharedVoxelStream)
    • get_voxel generator fallback (generate_single)
    ▼
 MeshBlockTask
@@ -63,6 +63,7 @@ VoxelEngine foundation
 
 - **Multi-LOD paging** (`VoxelLodTerrain`): `VoxelLodTerrainUpdateData` + threaded update task + clipbox/octree strategy (~4k lines C++).
 - **`VoxelEngine` remaining subset**: main-thread time-spread/progressive queues, GPU queue, file locker, stats/profiling and volume callback dispatch.
+- **Concurrency audit follow-ups**: `VoxelMesher::build(&self)` + per-worker scratch, `VoxelData` per-LOD `RwLock` + real `SpatialLock3D`, and the rule that data locks are not held through generator/mesher/stream calls.
 - **Graph extensions**: Curve/Image range analysis, FastNoise2, Expression node (parser is ported, not wired), bytecode VM optimisation.
 - **`VoxelDataGrid`**, **real `SpatialLock3D`** (currently a no-op stub; `&mut self` enforces exclusivity today), **ThreadSanitizer** end-to-end.
 - **Phase 5 Godot binding**: `Node3D` wrappers for `VoxelTerrainCore` + `RenderingServer` mesh upload + `EditorPlugin`.

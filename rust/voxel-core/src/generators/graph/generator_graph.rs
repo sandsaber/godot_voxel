@@ -20,11 +20,10 @@ use std::sync::Mutex;
 /// least one `OutputSdf` node; otherwise `generate_block` is a no-op.
 pub struct GraphGenerator {
     graph: Graph,
-    /// Per-instance scratch — `generate_block` takes `&mut self`, so we don't
-    /// need a `Mutex` here. Kept as a struct field (not `thread_local!`) so a
-    /// future worker-pool integration can give each worker its own generator
-    /// without contention.
-    scratch: GraphScratch,
+    /// Per-instance scratch. The generator trait is shared (`&self`) so the
+    /// scratch owns its synchronization locally instead of forcing every
+    /// generator call through an outer engine-wide mutex.
+    scratch: Mutex<GraphScratch>,
     /// Optional scaling applied to world coordinates before they're fed into
     /// the graph (mirrors C++ `lod` stride handling). `1.0` is the identity.
     coordinate_scale: f32,
@@ -34,7 +33,7 @@ impl GraphGenerator {
     pub fn new(graph: Graph) -> Self {
         Self {
             graph,
-            scratch: GraphScratch::new(),
+            scratch: Mutex::new(GraphScratch::new()),
             coordinate_scale: 1.0,
         }
     }
@@ -62,8 +61,12 @@ impl GraphGenerator {
 }
 
 impl VoxelGenerator for GraphGenerator {
-    fn generate_block(&mut self, input: VoxelQueryData<'_>) -> GenResult {
-        generate_block_with_graph(&self.graph, input, &mut self.scratch, self.coordinate_scale);
+    fn generate_block(&self, input: VoxelQueryData<'_>) -> GenResult {
+        let mut scratch = self
+            .scratch
+            .lock()
+            .expect("graph generator scratch poisoned");
+        generate_block_with_graph(&self.graph, input, &mut scratch, self.coordinate_scale);
         GenResult::default()
     }
 
@@ -149,12 +152,6 @@ fn write_sdf_slice(
     }
 }
 
-// A trivial Mutex import shim — kept here so the module compiles standalone
-// even if a future caller wants to share a `GraphGenerator` across threads
-// via the same `Arc<Mutex<>>` pattern used for `SharedVoxelGenerator`.
-#[allow(dead_code)]
-type _SharedGraphGenerator = Mutex<GraphGenerator>;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,7 +182,7 @@ mod tests {
     #[test]
     fn generate_block_writes_sin_plus_one_into_sdf_channel() {
         let graph = sin_plus_one_graph();
-        let mut generator = GraphGenerator::new(graph);
+        let generator = GraphGenerator::new(graph);
 
         let mut buffer = VoxelBuffer::with_size(Vector3i::new(4, 2, 4));
         let mut format = VoxelFormat::new();
@@ -220,7 +217,7 @@ mod tests {
     fn generate_block_skips_silently_when_the_graph_has_no_output() {
         let mut graph = Graph::new();
         let _ = graph.push(NodeKind::InputX); // no OutputSdf
-        let mut generator = GraphGenerator::new(graph);
+        let generator = GraphGenerator::new(graph);
 
         let mut buffer = VoxelBuffer::with_size(Vector3i::new(2, 2, 2));
         let mut format = VoxelFormat::new();
@@ -247,7 +244,7 @@ mod tests {
         graph.push(NodeKind::OutputSdf {
             a: Some(GraphPort::new(x)),
         });
-        let mut generator = GraphGenerator::new(graph).with_coordinate_scale(2.0);
+        let generator = GraphGenerator::new(graph).with_coordinate_scale(2.0);
 
         let mut buffer = VoxelBuffer::with_size(Vector3i::new(2, 1, 1));
         let mut format = VoxelFormat::new();
@@ -273,7 +270,7 @@ mod tests {
         graph.push(NodeKind::OutputSdf {
             a: Some(GraphPort::new(x)),
         });
-        let mut generator = GraphGenerator::new(graph);
+        let generator = GraphGenerator::new(graph);
 
         let mut buffer = VoxelBuffer::with_size(Vector3i::new(2, 1, 1));
         let mut format = VoxelFormat::new();
@@ -312,8 +309,8 @@ mod tests {
         assert!(empty_gen.first_sdf_output().is_none());
     }
 
-    /// `Send + Sync` is required by `VoxelGenerator` (so the graph generator
-    /// can live behind `Arc<Mutex<Box<dyn VoxelGenerator>>>`).
+    /// `Send + Sync` is required by `VoxelGenerator` so the graph generator
+    /// can live behind `Arc<dyn VoxelGenerator>`.
     #[test]
     fn graph_generator_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}

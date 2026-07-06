@@ -26,10 +26,7 @@ struct SphereGenerator {
 }
 
 impl VoxelGenerator for SphereGenerator {
-    fn generate_block(
-        &mut self,
-        input: VoxelQueryData<'_>,
-    ) -> voxel_core::generators::base::GenResult {
+    fn generate_block(&self, input: VoxelQueryData<'_>) -> voxel_core::generators::base::GenResult {
         let bs = input.buffer.size().x as f32;
         for z in 0..input.buffer.size().z {
             for x in 0..input.buffer.size().x {
@@ -139,8 +136,7 @@ fn sphere_pipeline(radius: f32, mesh_block_pos: Vector3i) -> BlockMeshOutput {
 
     // 2) Build the meshing dependency with the sphere generator + threshold
     //    mesher.
-    let generator: Arc<Mutex<Box<dyn VoxelGenerator>>> =
-        Arc::new(Mutex::new(Box::new(SphereGenerator { radius })));
+    let generator: Arc<dyn VoxelGenerator> = Arc::new(SphereGenerator { radius });
     let mesher: Arc<Mutex<Box<dyn VoxelMesher>>> = Arc::new(Mutex::new(Box::new(ThresholdMesher)));
     let meshing_dependency = MeshingDependency::new(mesher, Some(generator));
 

@@ -21,13 +21,13 @@ use crate::meshers::transvoxel::structures::MeshArrays;
 use crate::storage::VoxelBuffer;
 
 /// Input handed to [`VoxelMesher::build`]. Mirrors `VoxelMesher::Input`.
-// Manual `Debug` because `&mut dyn VoxelGenerator` is not `Debug`.
+// Manual `Debug` because `&dyn VoxelGenerator` is not `Debug`.
 pub struct MesherInput<'a> {
     /// Voxels to be used as the primary source of data.
     pub voxels: &'a VoxelBuffer,
     /// When using LOD, some meshers can use the generator and edited voxels
     /// to refine results. If `None`, the mesher only uses `voxels`.
-    pub generator: Option<&'a mut dyn VoxelGenerator>,
+    pub generator: Option<&'a dyn VoxelGenerator>,
     /// Origin of the block, required when doing deep sampling.
     pub origin_in_voxels: Vector3i,
     /// LOD index. 0 means highest detail; 1 means half detail, etc.
@@ -388,7 +388,7 @@ mod tests {
         }
         struct DummyGen;
         impl VoxelGenerator for DummyGen {
-            fn generate_block(&mut self, _input: VoxelQueryData<'_>) -> GenResult {
+            fn generate_block(&self, _input: VoxelQueryData<'_>) -> GenResult {
                 GenResult::default()
             }
         }
@@ -397,9 +397,9 @@ mod tests {
             saw_generator: false,
         };
         let voxels = VoxelBuffer::with_size(Vector3i::splat(2));
-        let mut gen = DummyGen;
+        let gen = DummyGen;
         let input = MesherInput {
-            generator: Some(&mut gen),
+            generator: Some(&gen),
             ..MesherInput::new(&voxels, Vector3i::zero(), 0)
         };
         let mut output = MesherOutput::default();

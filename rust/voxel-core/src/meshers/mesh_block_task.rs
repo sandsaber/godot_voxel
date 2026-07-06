@@ -129,25 +129,17 @@ impl MeshBlockTask {
         let channels_mask = mesher.used_channels_mask();
 
         let generator_handle = self.meshing_dependency.generator();
-        let mut generator_guard = generator_handle
-            .as_ref()
-            .map(|g| g.lock().expect("generator mutex poisoned"));
 
         let mut voxels = VoxelBuffer::with_size(Vector3i::zero());
         {
             let data = self.data.lock().expect("voxel data mutex poisoned");
             data.format().configure_buffer(&mut voxels);
-            // Re-borrow the generator mutably for the gather pass only.
-            let generator_ref: Option<&mut dyn VoxelGenerator> = match &mut generator_guard {
-                Some(g) => Some(&mut ***g),
-                None => None,
-            };
             gather_voxels_cpu(
                 &mut voxels,
                 min_padding,
                 max_padding,
                 channels_mask,
-                generator_ref,
+                generator_handle.as_deref(),
                 &data,
                 self.lod_index,
                 self.position_in_blocks,
@@ -162,14 +154,9 @@ impl MeshBlockTask {
             self.position_in_blocks * (mesh_block_size << u32::from(self.lod_index));
 
         let mut surfaces = MesherOutput::default();
-        // Re-borrow the same guard for the build pass.
-        let generator_ref: Option<&mut dyn VoxelGenerator> = match &mut generator_guard {
-            Some(g) => Some(&mut ***g),
-            None => None,
-        };
         let input = MesherInput {
             voxels: &voxels,
-            generator: generator_ref,
+            generator: generator_handle.as_deref(),
             origin_in_voxels: block_world_origin,
             lod_index: self.lod_index,
             collision_hint: self.collision_hint,
@@ -232,7 +219,7 @@ pub fn gather_voxels_cpu(
     min_padding: i32,
     max_padding: i32,
     channels_mask: u32,
-    mut generator: Option<&mut dyn VoxelGenerator>,
+    generator: Option<&dyn VoxelGenerator>,
     voxel_data: &VoxelData,
     lod_index: u8,
     mesh_block_pos: Vector3i,
@@ -285,7 +272,7 @@ pub fn gather_voxels_cpu(
                             channel_index,
                         );
                     }
-                } else if let Some(generator) = generator.as_deref_mut() {
+                } else if let Some(generator) = generator {
                     // Missing neighbour inside bounds: generate directly into
                     // the matching sub-region of `dst`. We use a scratch
                     // buffer for the generator output (which expects a
@@ -336,7 +323,7 @@ mod tests {
         value: f32,
     }
     impl VoxelGenerator for ConstantSdfGenerator {
-        fn generate_block(&mut self, input: VoxelQueryData<'_>) -> GenResult {
+        fn generate_block(&self, input: VoxelQueryData<'_>) -> GenResult {
             input
                 .buffer
                 .clear_channel_f(ChannelId::Sdf.index(), self.value);
@@ -398,7 +385,7 @@ mod tests {
         // Materialise the central block with a recognisable raw value.
         data.try_set_voxel(7, Vector3i::new(1, 1, 1), ChannelId::Type.index());
 
-        let mut generator = ConstantSdfGenerator { value: -0.5 };
+        let generator = ConstantSdfGenerator { value: -0.5 };
 
         let mut dst = VoxelBuffer::with_size(Vector3i::zero());
         gather_voxels_cpu(
@@ -406,7 +393,7 @@ mod tests {
             1,
             1,
             1u32 << ChannelId::Type.index() | 1u32 << ChannelId::Sdf.index(),
-            Some(&mut generator),
+            Some(&generator),
             &data,
             0,
             Vector3i::zero(),
@@ -438,8 +425,7 @@ mod tests {
             Arc::new(Mutex::new(Box::new(DummyMesher {
                 build_calls: build_calls.clone(),
             })));
-        let generator: Arc<Mutex<Box<dyn VoxelGenerator>>> =
-            Arc::new(Mutex::new(Box::new(ConstantSdfGenerator { value: -1.0 })));
+        let generator: Arc<dyn VoxelGenerator> = Arc::new(ConstantSdfGenerator { value: -1.0 });
         let meshing_dep = MeshingDependency::new(mesher, Some(generator));
 
         let mut task = MeshBlockTask::new(MeshBlockTaskParams {

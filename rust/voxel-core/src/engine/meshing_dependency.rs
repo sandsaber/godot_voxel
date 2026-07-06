@@ -81,7 +81,7 @@ mod tests {
 
     struct NoOpGenerator;
     impl VoxelGenerator for NoOpGenerator {
-        fn generate_block(&mut self, _input: VoxelQueryData<'_>) -> GenResult {
+        fn generate_block(&self, _input: VoxelQueryData<'_>) -> GenResult {
             GenResult::default()
         }
     }
@@ -91,9 +91,7 @@ mod tests {
     }
 
     fn generator_handle() -> SharedVoxelGenerator {
-        Arc::new(Mutex::new(
-            Box::new(NoOpGenerator) as Box<dyn VoxelGenerator>
-        ))
+        Arc::new(NoOpGenerator)
     }
 
     #[test]

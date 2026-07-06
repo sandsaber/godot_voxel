@@ -73,7 +73,7 @@ impl Waves {
 }
 
 impl VoxelGenerator for Waves {
-    fn generate_block(&mut self, input: VoxelQueryData<'_>) -> GenResult {
+    fn generate_block(&self, input: VoxelQueryData<'_>) -> GenResult {
         let ps = self.pattern_size;
         let po = self.pattern_offset;
         let hp = self.heightmap;
@@ -143,7 +143,7 @@ impl Flat {
 }
 
 impl VoxelGenerator for Flat {
-    fn generate_block(&mut self, input: VoxelQueryData<'_>) -> GenResult {
+    fn generate_block(&self, input: VoxelQueryData<'_>) -> GenResult {
         let channel = self.channel.index();
         let origin = input.origin_in_voxels;
         let bs = input.buffer.size();
@@ -288,7 +288,7 @@ impl Noise {
 }
 
 impl VoxelGenerator for Noise {
-    fn generate_block(&mut self, input: VoxelQueryData<'_>) -> GenResult {
+    fn generate_block(&self, input: VoxelQueryData<'_>) -> GenResult {
         let channel = self.channel.index();
         let origin = input.origin_in_voxels;
         let bs = input.buffer.size();
@@ -466,7 +466,7 @@ impl HeightmapNoise {
 }
 
 impl VoxelGenerator for HeightmapNoise {
-    fn generate_block(&mut self, input: VoxelQueryData<'_>) -> GenResult {
+    fn generate_block(&self, input: VoxelQueryData<'_>) -> GenResult {
         // Rebuild a fresh sampler from the config (FastNoiseLite isn't Clone).
         let noise = self.noise_config.build();
         let curve = self.curve.clone();
@@ -812,7 +812,7 @@ mod tests {
 
     #[test]
     fn noise_early_exit_above_slab_is_far_outside() {
-        let mut gen = configured_noise();
+        let gen = configured_noise();
         // Slab is [0, 10]; place the block well above it.
         let mut buf = VoxelBuffer::with_size(Vector3i::new(2, 2, 2));
         buf.set_channel_depth(ChannelId::Sdf.index(), crate::storage::ChannelDepth::Bit32);
@@ -828,7 +828,7 @@ mod tests {
 
     #[test]
     fn noise_early_exit_below_slab_is_far_inside() {
-        let mut gen = configured_noise();
+        let gen = configured_noise();
         let mut buf = VoxelBuffer::with_size(Vector3i::new(2, 2, 2));
         buf.set_channel_depth(ChannelId::Sdf.index(), crate::storage::ChannelDepth::Bit32);
         let result = gen.generate_block(VoxelQueryData {
@@ -844,8 +844,8 @@ mod tests {
     #[test]
     fn noise_deterministic_for_same_seed() {
         // Same seed + params must produce identical SDF at the same voxel.
-        let mut gen_a = configured_noise();
-        let mut gen_b = configured_noise();
+        let gen_a = configured_noise();
+        let gen_b = configured_noise();
         let mut buf_a = VoxelBuffer::with_size(Vector3i::new(2, 4, 2));
         let mut buf_b = VoxelBuffer::with_size(Vector3i::new(2, 4, 2));
         buf_a.set_channel_depth(ChannelId::Sdf.index(), crate::storage::ChannelDepth::Bit32);
@@ -877,7 +877,7 @@ mod tests {
     fn noise_slab_contains_sign_change() {
         // The slab spans y=[0,10]; the SDF must transition from negative
         // (solid, near the bottom) to positive (air, near the top).
-        let mut gen = configured_noise();
+        let gen = configured_noise();
         let mut buf = VoxelBuffer::with_size(Vector3i::new(4, 12, 4));
         buf.set_channel_depth(ChannelId::Sdf.index(), crate::storage::ChannelDepth::Bit32);
         gen.generate_block(VoxelQueryData {

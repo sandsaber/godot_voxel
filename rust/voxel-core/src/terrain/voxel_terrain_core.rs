@@ -766,14 +766,12 @@ impl ThreadedTask for LoadBlockForTerrainTask {
                 // Fall back to the generator if installed.
                 let data = self.data.lock().expect("voxel data mutex poisoned");
                 if let Some(gen) = data.generator() {
-                    let mut gen_guard = gen.lock().expect("generator mutex poisoned");
                     use crate::generators::base::VoxelQueryData;
-                    gen_guard.generate_block(VoxelQueryData {
+                    gen.generate_block(VoxelQueryData {
                         buffer: &mut voxels,
                         origin_in_voxels: self.position * bs,
                         lod: 0,
                     });
-                    drop(gen_guard);
                     drop(data);
                     self.output = Some(BlockDataOutput::loaded(self.position, 0, voxels, false));
                 } else {
@@ -867,8 +865,7 @@ mod tests {
             channel: ChannelId::Sdf,
             ..Flat::default()
         };
-        let generator: Arc<Mutex<Box<dyn crate::generators::base::VoxelGenerator>>> =
-            Arc::new(Mutex::new(Box::new(flat)));
+        let generator: Arc<dyn crate::generators::base::VoxelGenerator> = Arc::new(flat);
         data.set_generator(Some(generator));
         let mesher: Arc<Mutex<Box<dyn VoxelMesher>>> =
             Arc::new(Mutex::new(Box::new(AlwaysOneTriangleMesher)));

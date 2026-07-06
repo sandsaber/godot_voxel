@@ -18,7 +18,7 @@ use crate::storage::{
 };
 use crate::streams::VoxelStream;
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 #[derive(Debug)]
 struct VoxelDataLod {
@@ -48,10 +48,10 @@ pub struct BlockLocation {
     pub lod_index: u8,
 }
 
-/// Shared, mutable generator storage. `Arc` lets worker tasks (Phase 4
-/// streaming) hold a reference; `Mutex` provides the `&mut self` access
-/// `generate_block` requires; `Box` makes the trait object sized.
-pub type SharedVoxelGenerator = Arc<Mutex<Box<dyn VoxelGenerator>>>;
+/// Shared generator storage. Implementations are `Send + Sync` and own any
+/// internal synchronization they need, matching the C++ contract that
+/// generators can be called from multiple worker threads.
+pub type SharedVoxelGenerator = Arc<dyn VoxelGenerator>;
 
 /// Shared stream storage. `VoxelStream` is already `Send + Sync`; the `Arc`
 /// lets multiple task instances reach the same stream.
@@ -185,19 +185,16 @@ impl VoxelData {
 
     /// Installs a shared generator. Matches `VoxelData::set_generator`.
     /// Pass `None` to detach. The handle can be safely cloned into worker
-    /// tasks later (the inner `Mutex` synchronises `generate_block` calls).
+    /// tasks later; generators own any internal synchronization they need.
     pub fn set_generator(&mut self, generator: Option<SharedVoxelGenerator>) {
         self.generator = generator;
     }
 
-    /// Runs `f` against the installed generator under its lock. Returns
+    /// Runs `f` against the installed generator. Returns
     /// `None` when no generator is set. Used by `pre_generate_box` /
     /// `update_lods` when the caller doesn't pass an explicit generator.
-    pub fn with_generator<R>(&self, f: impl FnOnce(&mut dyn VoxelGenerator) -> R) -> Option<R> {
-        self.generator.as_ref().map(|gen| {
-            let mut guard = gen.lock().expect("generator mutex poisoned");
-            f(&mut **guard)
-        })
+    pub fn with_generator<R>(&self, f: impl FnOnce(&dyn VoxelGenerator) -> R) -> Option<R> {
+        self.generator.as_ref().map(|gen| f(gen.as_ref()))
     }
 
     /// Returns a clone of the shared stream handle, if any. Matches
@@ -621,7 +618,7 @@ impl VoxelData {
     pub fn update_lods(
         &mut self,
         modified_lod0_blocks: &[Vector3i],
-        mut generator: Option<&mut dyn VoxelGenerator>,
+        generator: Option<&dyn VoxelGenerator>,
         mut out_updated_blocks: Option<&mut Vec<BlockLocation>>,
     ) {
         let lod_count = self.lods.len();
@@ -690,7 +687,7 @@ impl VoxelData {
                         // Generate an empty destination block and fill it via
                         // the generator before downscaling. Matches C++.
                         let mut voxels = self.create_block_buffer();
-                        if let Some(generator) = generator.as_deref_mut() {
+                        if let Some(generator) = generator {
                             let lod_block_size = (self.block_size() as i32) << dst_lod_index;
                             generator.generate_block(VoxelQueryData {
                                 buffer: &mut voxels,
@@ -717,7 +714,7 @@ impl VoxelData {
                     .is_some_and(|block| block.has_voxels());
                 if !dst_has_voxels {
                     let mut voxels = self.create_block_buffer();
-                    if let Some(generator) = generator.as_deref_mut() {
+                    if let Some(generator) = generator {
                         let lod_block_size = (self.block_size() as i32) << dst_lod_index;
                         generator.generate_block(VoxelQueryData {
                             buffer: &mut voxels,
@@ -785,7 +782,7 @@ impl VoxelData {
     pub fn pre_generate_box(
         &mut self,
         voxel_box: Box3i,
-        mut generator: Option<&mut dyn VoxelGenerator>,
+        generator: Option<&dyn VoxelGenerator>,
     ) -> usize {
         let mut generated_count = 0;
         let data_block_size = self.block_size() as i32;
@@ -802,7 +799,7 @@ impl VoxelData {
                 }
 
                 let mut voxels = self.create_block_buffer();
-                if let Some(generator) = generator.as_deref_mut() {
+                if let Some(generator) = generator {
                     generator.generate_block(VoxelQueryData {
                         buffer: &mut voxels,
                         origin_in_voxels: block_pos * lod_block_size,
@@ -1052,12 +1049,15 @@ mod tests {
 
     #[derive(Default)]
     struct RecordingGenerator {
-        calls: Vec<(Vector3i, u32)>,
+        calls: Mutex<Vec<(Vector3i, u32)>>,
     }
 
     impl VoxelGenerator for RecordingGenerator {
-        fn generate_block(&mut self, input: VoxelQueryData<'_>) -> GenResult {
-            self.calls.push((input.origin_in_voxels, input.lod));
+        fn generate_block(&self, input: VoxelQueryData<'_>) -> GenResult {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((input.origin_in_voxels, input.lod));
             let value = 10 + input.lod as u64 + input.origin_in_voxels.x as u64;
             input.buffer.fill(value, ChannelId::Type.index());
             GenResult::default()
@@ -1210,16 +1210,16 @@ mod tests {
         let mut data = VoxelData::new();
         data.set_lod_count(2);
         data.set_streaming_enabled(false);
-        let mut generator = RecordingGenerator::default();
+        let generator = RecordingGenerator::default();
 
         let generated = data.pre_generate_box(
             Box3i::new(Vector3i::zero(), Vector3i::new(32, 16, 16)),
-            Some(&mut generator),
+            Some(&generator),
         );
 
         assert_eq!(generated, 3);
         assert_eq!(
-            generator.calls,
+            *generator.calls.lock().unwrap(),
             vec![
                 (Vector3i::new(0, 0, 0), 0),
                 (Vector3i::new(16, 0, 0), 0),
@@ -1247,11 +1247,11 @@ mod tests {
         let mut data = VoxelData::new();
         let block_pos = Vector3i::zero();
         assert!(data.try_set_block(block_pos, VoxelDataBlock::empty(0)));
-        let mut generator = RecordingGenerator::default();
+        let generator = RecordingGenerator::default();
 
         let generated = data.pre_generate_box(
             Box3i::new(Vector3i::zero(), Vector3i::new(32, 16, 16)),
-            Some(&mut generator),
+            Some(&generator),
         );
 
         assert_eq!(generated, 1);
@@ -1443,13 +1443,15 @@ mod tests {
 
         // The destination LOD1 block doesn't exist; the generator must fill it
         // before the downscale runs. The recorder lets us observe the call.
-        let mut generator = RecordingGenerator::default();
-        data.update_lods(&modified, Some(&mut generator), None);
+        let generator = RecordingGenerator::default();
+        data.update_lods(&modified, Some(&generator), None);
 
         // LOD1 block (0,0,0) was generated on demand and is now present.
         assert!(data.has_block(Vector3i::zero(), 1));
         assert!(generator
             .calls
+            .lock()
+            .unwrap()
             .iter()
             .any(|(origin, lod)| { *lod == 1 && origin.x == 0 && origin.y == 0 && origin.z == 0 }));
     }
@@ -1593,10 +1595,7 @@ mod tests {
         let mut data = VoxelData::new();
         assert!(!data.has_generator());
 
-        let generator: SharedVoxelGenerator = Arc::new(Mutex::new(Box::new(
-            RecordingGenerator::default(),
-        )
-            as Box<dyn VoxelGenerator>));
+        let generator: SharedVoxelGenerator = Arc::new(RecordingGenerator::default());
         data.set_generator(Some(generator.clone()));
         assert!(data.has_generator());
 
@@ -1617,10 +1616,7 @@ mod tests {
         data.set_bounds(Box3i::new(Vector3i::zero(), Vector3i::splat(32)));
         data.set_streaming_enabled(false);
         let channel = ChannelId::Type.index();
-        let generator: SharedVoxelGenerator = Arc::new(Mutex::new(Box::new(
-            RecordingGenerator::default(),
-        )
-            as Box<dyn VoxelGenerator>));
+        let generator: SharedVoxelGenerator = Arc::new(RecordingGenerator::default());
         data.set_generator(Some(generator));
 
         // No blocks loaded yet. Copy must invoke the generator for the area.
@@ -1740,10 +1736,7 @@ mod tests {
         // RecordingGenerator writes `10 + lod + origin.x`. The default
         // `generate_single` impl passes the queried voxel position as the
         // 1×1×1 block's origin, so for voxel (20,5,5) the result is 10+0+20=30.
-        let generator: SharedVoxelGenerator = Arc::new(Mutex::new(Box::new(
-            RecordingGenerator::default(),
-        )
-            as Box<dyn VoxelGenerator>));
+        let generator: SharedVoxelGenerator = Arc::new(RecordingGenerator::default());
         data.set_generator(Some(generator));
 
         let value = data.get_voxel(Vector3i::new(20, 5, 5), channel, 0);
