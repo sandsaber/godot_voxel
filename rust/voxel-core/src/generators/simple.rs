@@ -16,6 +16,7 @@ use crate::generators::base::{
 use crate::math::funcs;
 use crate::math::{Vector2f, Vector3i};
 use crate::storage::voxel_buffer::ChannelId;
+use std::sync::Arc;
 
 // ===========================================================================
 // Waves
@@ -453,7 +454,7 @@ pub struct HeightmapNoise {
     pub noise_config: NoiseConfig,
     /// Optional curve remapping noise `[0,1]` → height. When `None`, the raw
     /// `0.5 + 0.5*noise` value is used.
-    pub curve: Option<Curve>,
+    pub curve: Option<Arc<Curve>>,
     /// Shared heightmap parameters (channel, range, iso_scale, offset).
     pub heightmap: HeightmapParams,
 }
@@ -461,6 +462,12 @@ pub struct HeightmapNoise {
 impl HeightmapNoise {
     /// Set the optional curve.
     pub fn set_curve(&mut self, curve: Option<Curve>) {
+        self.curve = curve.map(Arc::new);
+    }
+
+    /// Set the optional curve from shared storage. This keeps per-block
+    /// generation at an O(1) refcount clone instead of copying baked points.
+    pub fn set_curve_arc(&mut self, curve: Option<Arc<Curve>>) {
         self.curve = curve;
     }
 }
@@ -512,6 +519,7 @@ mod tests {
     use crate::math::{Vector2f, Vector2i, Vector3i};
     use crate::storage::voxel_buffer::{ChannelId, Compression};
     use crate::storage::VoxelBuffer;
+    use std::sync::Arc;
 
     /// Build a fresh SDF-channel buffer of the given size.
     fn sdf_buffer(size: Vector3i) -> VoxelBuffer {
@@ -1014,6 +1022,18 @@ mod tests {
             found_solid && found_air,
             "curve-remapped heightmap produced no surface"
         );
+    }
+
+    #[test]
+    fn heightmap_noise_curve_can_be_arc_shared() {
+        let curve = Arc::new(Curve::identity(257));
+        let mut gen = HeightmapNoise::default();
+
+        gen.set_curve_arc(Some(Arc::clone(&curve)));
+
+        let stored = gen.curve.as_ref().expect("curve should be stored");
+        assert!(Arc::ptr_eq(stored, &curve));
+        assert_eq!(Arc::strong_count(&curve), 2);
     }
 
     #[test]
