@@ -337,20 +337,14 @@ impl SpatialLock3D {
     /// Mirrors the C++ `SpatialLock3D::Read` nested type.
     pub fn read(&self, bounds: crate::math::BoxBounds3i) -> SpatialLockReadGuard<'_> {
         self.lock_read(bounds);
-        SpatialLockReadGuard {
-            lock: self,
-            bounds,
-        }
+        SpatialLockReadGuard { lock: self, bounds }
     }
 
     /// Convenience: acquire a write lock for `bounds` and return an RAII guard.
     /// Mirrors the C++ `SpatialLock3D::Write` nested type.
     pub fn write(&self, bounds: crate::math::BoxBounds3i) -> SpatialLockWriteGuard<'_> {
         self.lock_write(bounds);
-        SpatialLockWriteGuard {
-            lock: self,
-            bounds,
-        }
+        SpatialLockWriteGuard { lock: self, bounds }
     }
 }
 

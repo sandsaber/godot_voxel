@@ -288,14 +288,16 @@ godot_voxel (fork)
 
 ### Где остановились (для возобновления)
 
-**Phase 0 — полностью закрыт.** H1/H2 проверены C++ harness'ем без godot-cpp
-(stub-tree approach). Фаза 1 (`util/*`) — полностью портирована (191 тест).
+**Phase 0 — conditional GO, не full byte-parity.** H2 проверен C++ harness'ем
+без godot-cpp (stub-tree approach) и проходит; H1 остаётся partial: позиции и
+число треугольников совпадают, но vertex reuse/winding расходятся. Фаза 1
+(`util/*`) — полностью портирована (191 тест).
 Фаза 2 desktop-half — закрыт: `voxel-gdext` грузится в Godot 4.7, класс
 `VoxelRustHello` виден в GDScript, достигает `voxel_core::VERSION` через FFI.
 **Фаза 2 mobile-half — `.so` собран** (aarch64 + x86_64-android через NDK r29).
 **Фаза 3 (compute-слой) — ЗАВЕРШЕНА.** Все engine-agnostic компоненты
 портированы и повторно проверены audit pass'ом (439 unit тестов).
-**Фаза 4 — storage/streaming + meshing pipeline + single-LOD paging terrain работают headlessly (564 unit + 10 e2e тестов).**
+**Фаза 4 — storage/streaming + meshing pipeline + single-LOD paging terrain работают headlessly (625 unit + 10 integration тестов).**
 End-to-end: generator → VoxelData → MeshBlockTask → TransvoxelMesher → MesherOutput.
 Paging: VoxelTerrainCore orchestrates viewers → loads → meshing → outputs → unload.
 
@@ -321,13 +323,12 @@ Paging: VoxelTerrainCore orchestrates viewers → loads → meshing → outputs 
    - **`VoxelEngine` subset** — volume/viewer registry (`SlotMap`) + `process()`
      dequeue loop + `sync_viewers_task_priority_data`. Нужен для multi-volume
      и centralized viewer tracking.
-   - **`generators::graph` runtime** — минимальный AST-walker готов
-     (InputX/Y/Z, Constant, Add/Sub/Mul/Div, Sin/Cos/Abs/Sqrt, Min/Max,
-     Remap, OutputSdf + GraphGenerator impl VoxelGenerator). Curve/Image/
-     Noise/SDF nodes, FastNoise2, range analysis, Expression node, bytecode
+   - **`generators::graph` runtime** — AST-walker + SDF/Curve/Noise/math nodes
+     готовы; Image node, FastNoise2, range analysis, Expression node и bytecode
      VM — отложены.
-   - **Cubes/Blocky mesher adapters** — TransvoxelMesher готов; Cubes/Blocky
-     wrappers требуют порт colour callbacks из free-function API.
+   - **Mesher adapters** — Transvoxel/Cubes/Blocky wrappers готовы. Cubes/Blocky
+     явно report `supports_lod=false`; Transvoxel сейчас regular path, transition
+     mesh для variable LOD остаётся отдельным пунктом.
    - **`VoxelDataGrid`** — terrain meshing query helper (оптимизация; текущий
      MeshBlockTask обходит это через прямой `voxel_data.get_block` lookup).
    - **`SpatialLock3D` real impl** — пока no-op stub; нужен для concurrent
@@ -466,7 +467,7 @@ conditions (проверка под ThreadSanitizer/loom).
 git clone https://github.com/sandsaber/godot_voxel.git
 cd godot_voxel && git checkout rust/pilot
 cd rust
-cargo test -p voxel-core       # 610 unit + 10 integration + 1 doc-test; 1 ignored golden-gen
+cargo test -p voxel-core       # 625 unit + 10 integration + 1 doc-test; 1 ignored golden-gen
 cargo build -p voxel-gdext     # GDExtension .so (грузится в Godot 4.7)
 cargo clippy --workspace --all-targets  # должен быть чистый
 cargo bench                    # transvoxel benches (16³=143 / 32³=199 / 64³=249 Melem/s)

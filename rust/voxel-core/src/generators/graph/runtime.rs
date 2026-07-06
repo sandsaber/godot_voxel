@@ -58,13 +58,25 @@ pub enum NodeKind {
     /// Constant value. Carries the value as a parameter.
     Constant(f32),
     /// `a + b`.
-    Add { a: Option<GraphPort>, b: Option<GraphPort> },
+    Add {
+        a: Option<GraphPort>,
+        b: Option<GraphPort>,
+    },
     /// `a - b`.
-    Subtract { a: Option<GraphPort>, b: Option<GraphPort> },
+    Subtract {
+        a: Option<GraphPort>,
+        b: Option<GraphPort>,
+    },
     /// `a * b`.
-    Multiply { a: Option<GraphPort>, b: Option<GraphPort> },
+    Multiply {
+        a: Option<GraphPort>,
+        b: Option<GraphPort>,
+    },
     /// `a / b`.
-    Divide { a: Option<GraphPort>, b: Option<GraphPort> },
+    Divide {
+        a: Option<GraphPort>,
+        b: Option<GraphPort>,
+    },
     /// `sin(a)`.
     Sin { a: Option<GraphPort> },
     /// `cos(a)`.
@@ -74,9 +86,15 @@ pub enum NodeKind {
     /// `sqrt(a)`.
     Sqrt { a: Option<GraphPort> },
     /// `min(a, b)`.
-    Min { a: Option<GraphPort>, b: Option<GraphPort> },
+    Min {
+        a: Option<GraphPort>,
+        b: Option<GraphPort>,
+    },
     /// `max(a, b)`.
-    Max { a: Option<GraphPort>, b: Option<GraphPort> },
+    Max {
+        a: Option<GraphPort>,
+        b: Option<GraphPort>,
+    },
     /// Remap `a` from `[from_start, from_end]` to `[to_start, to_end]`.
     Remap {
         a: Option<GraphPort>,
@@ -90,7 +108,10 @@ pub enum NodeKind {
     /// `fract(a)` (returns the fractional part).
     Fract { a: Option<GraphPort> },
     /// Euclidean distance from the origin in 2D: `sqrt(x*x + y*y)`.
-    Distance2D { x: Option<GraphPort>, y: Option<GraphPort> },
+    Distance2D {
+        x: Option<GraphPort>,
+        y: Option<GraphPort>,
+    },
     /// Euclidean distance from the origin in 3D: `sqrt(x*x + y*y + z*z)`.
     Distance3D {
         x: Option<GraphPort>,
@@ -104,7 +125,10 @@ pub enum NodeKind {
         z: Option<GraphPort>,
     },
     /// `pow(a, b)`.
-    Pow { a: Option<GraphPort>, b: Option<GraphPort> },
+    Pow {
+        a: Option<GraphPort>,
+        b: Option<GraphPort>,
+    },
     /// `mix(a, b, t)` = `a*(1-t) + b*t`.
     Mix {
         a: Option<GraphPort>,
@@ -172,9 +196,15 @@ pub enum NodeKind {
         r2: f32,
     },
     /// Hard SDF union: `min(a, b)`.
-    SdfUnion { a: Option<GraphPort>, b: Option<GraphPort> },
+    SdfUnion {
+        a: Option<GraphPort>,
+        b: Option<GraphPort>,
+    },
     /// Hard SDF subtraction: `max(a, -b)`.
-    SdfSubtract { a: Option<GraphPort>, b: Option<GraphPort> },
+    SdfSubtract {
+        a: Option<GraphPort>,
+        b: Option<GraphPort>,
+    },
     /// Polynomial smooth union with the given `smoothness` (0 = hard union).
     SdfSmoothUnion {
         a: Option<GraphPort>,
@@ -403,7 +433,13 @@ impl Graph {
                     scratch.put(id, r);
                 }
                 NodeKind::Divide { a, b } => {
-                    let r = binop(scratch, a, b, slice_size, |x, y| x / y);
+                    let r = binop(scratch, a, b, slice_size, |x, y| {
+                        if y.abs() <= f32::EPSILON {
+                            0.0
+                        } else {
+                            x / y
+                        }
+                    });
                     scratch.put(id, r);
                 }
                 NodeKind::Sin { a } => {
@@ -419,7 +455,7 @@ impl Graph {
                     scratch.put(id, r);
                 }
                 NodeKind::Sqrt { a } => {
-                    let r = monop(scratch, a, slice_size, f32::sqrt);
+                    let r = monop(scratch, a, slice_size, |v| v.max(0.0).sqrt());
                     scratch.put(id, r);
                 }
                 NodeKind::Min { a, b } => {
@@ -470,29 +506,22 @@ impl Graph {
                     scratch.put(id, r);
                 }
                 NodeKind::Distance3D { x, y, z } => {
-                    let xs = x.as_ref().and_then(|p| scratch.get(p.node)).unwrap_or_else(|| panic_zero(slice_size));
-                    let ys = y.as_ref().and_then(|p| scratch.get(p.node)).unwrap_or_else(|| panic_zero(slice_size));
-                    // Z is the per-voxel slice coordinate; Y is constant.
-                    let zs = z.as_ref().and_then(|p| scratch.get(p.node)).unwrap_or_else(|| panic_zero(slice_size));
                     let r: Vec<f32> = (0..slice_size)
                         .map(|i| {
-                            let xv = xs.get(i).copied().unwrap_or(0.0);
-                            let yv = ys.get(i).copied().unwrap_or(0.0);
-                            let zv = zs.get(i).copied().unwrap_or(0.0);
+                            let xv = value_at(scratch, x, i, 0.0);
+                            let yv = value_at(scratch, y, i, 0.0);
+                            let zv = value_at(scratch, z, i, 0.0);
                             (xv * xv + yv * yv + zv * zv).sqrt()
                         })
                         .collect();
                     scratch.put(id, r);
                 }
                 NodeKind::Normalize3D { x, y, z } => {
-                    let xs = x.as_ref().and_then(|p| scratch.get(p.node)).unwrap_or_else(|| panic_zero(slice_size));
-                    let ys = y.as_ref().and_then(|p| scratch.get(p.node)).unwrap_or_else(|| panic_zero(slice_size));
-                    let zs = z.as_ref().and_then(|p| scratch.get(p.node)).unwrap_or_else(|| panic_zero(slice_size));
                     let r: Vec<f32> = (0..slice_size)
                         .map(|i| {
-                            let xv = xs.get(i).copied().unwrap_or(0.0);
-                            let yv = ys.get(i).copied().unwrap_or(0.0);
-                            let zv = zs.get(i).copied().unwrap_or(0.0);
+                            let xv = value_at(scratch, x, i, 0.0);
+                            let yv = value_at(scratch, y, i, 0.0);
+                            let zv = value_at(scratch, z, i, 0.0);
                             let len = (xv * xv + yv * yv + zv * zv).sqrt();
                             if len > 0.0 {
                                 1.0 / len
@@ -505,16 +534,18 @@ impl Graph {
                     // downstream multiply nodes; the C++ node returns the
                     // normalised vector, which the AST-walker represents as
                     // three separate Normalize3D nodes feeding back into X/Y/Z.
-                    let _ = zs;
-                    let _ = ys;
                     scratch.put(id, r);
                 }
                 NodeKind::Mix { a, b, t } => {
-                    let r = ternary(scratch, a, b, t, slice_size, |a, b, t| a * (1.0 - t) + b * t);
+                    let r = ternary(scratch, a, b, t, slice_size, |a, b, t| {
+                        a * (1.0 - t) + b * t
+                    });
                     scratch.put(id, r);
                 }
                 NodeKind::Clamp { a, min_v, max_v } => {
-                    let r = ternary(scratch, a, min_v, max_v, slice_size, |v, lo, hi| v.clamp(lo, hi));
+                    let r = ternary(scratch, a, min_v, max_v, slice_size, |v, lo, hi| {
+                        v.clamp(lo.min(hi), lo.max(hi))
+                    });
                     scratch.put(id, r);
                 }
                 NodeKind::Curve { a, curve } => {
@@ -524,24 +555,24 @@ impl Graph {
                 }
                 NodeKind::Noise2D { x, y, noise } => {
                     let noise = noise.build();
-                    let xs = x.as_ref().and_then(|p| scratch.get(p.node)).unwrap_or_else(|| panic_zero(slice_size));
-                    let ys = y.as_ref().and_then(|p| scratch.get(p.node)).unwrap_or_else(|| panic_zero(slice_size));
                     let r: Vec<f32> = (0..slice_size)
-                        .map(|i| noise.get_noise_2d(xs.get(i).copied().unwrap_or(0.0), ys.get(i).copied().unwrap_or(0.0)))
+                        .map(|i| {
+                            noise.get_noise_2d(
+                                value_at(scratch, x, i, 0.0),
+                                value_at(scratch, y, i, 0.0),
+                            )
+                        })
                         .collect();
                     scratch.put(id, r);
                 }
                 NodeKind::Noise3D { x, y, z, noise } => {
                     let noise = noise.build();
-                    let xs = x.as_ref().and_then(|p| scratch.get(p.node)).unwrap_or_else(|| panic_zero(slice_size));
-                    let ys = y.as_ref().and_then(|p| scratch.get(p.node)).unwrap_or_else(|| panic_zero(slice_size));
-                    let zs = z.as_ref().and_then(|p| scratch.get(p.node)).unwrap_or_else(|| panic_zero(slice_size));
                     let r: Vec<f32> = (0..slice_size)
                         .map(|i| {
                             noise.get_noise_3d(
-                                xs.get(i).copied().unwrap_or(0.0),
-                                ys.get(i).copied().unwrap_or(0.0),
-                                zs.get(i).copied().unwrap_or(0.0),
+                                value_at(scratch, x, i, 0.0),
+                                value_at(scratch, y, i, 0.0),
+                                value_at(scratch, z, i, 0.0),
                             )
                         })
                         .collect();
@@ -551,18 +582,22 @@ impl Graph {
                     let r = binop(scratch, y, height, slice_size, |y, h| y - h);
                     scratch.put(id, r);
                 }
-                NodeKind::SdfBox { x, y, z, size_x, size_y, size_z } => {
+                NodeKind::SdfBox {
+                    x,
+                    y,
+                    z,
+                    size_x,
+                    size_y,
+                    size_z,
+                } => {
                     let size = crate::math::Vector3f::new(*size_x, *size_y, *size_z);
-                    let xs = x.as_ref().and_then(|p| scratch.get(p.node)).unwrap_or_else(|| panic_zero(slice_size));
-                    let ys = y.as_ref().and_then(|p| scratch.get(p.node)).unwrap_or_else(|| panic_zero(slice_size));
-                    let zs = z.as_ref().and_then(|p| scratch.get(p.node)).unwrap_or_else(|| panic_zero(slice_size));
                     let r: Vec<f32> = (0..slice_size)
                         .map(|i| {
                             crate::math::sdf::sdf_box(
                                 crate::math::Vector3f::new(
-                                    xs.get(i).copied().unwrap_or(0.0),
-                                    ys.get(i).copied().unwrap_or(0.0),
-                                    zs.get(i).copied().unwrap_or(0.0),
+                                    value_at(scratch, x, i, 0.0),
+                                    value_at(scratch, y, i, 0.0),
+                                    value_at(scratch, z, i, 0.0),
                                 ),
                                 size,
                             )
@@ -571,17 +606,13 @@ impl Graph {
                     scratch.put(id, r);
                 }
                 NodeKind::SdfSphere { x, y, z, radius } => {
-                    let xs = x.as_ref().and_then(|p| scratch.get(p.node)).unwrap_or_else(|| panic_zero(slice_size));
-                    let ys = y.as_ref().and_then(|p| scratch.get(p.node)).unwrap_or_else(|| panic_zero(slice_size));
-                    let zs = z.as_ref().and_then(|p| scratch.get(p.node)).unwrap_or_else(|| panic_zero(slice_size));
-                    let rs = radius.as_ref().and_then(|p| scratch.get(p.node)).unwrap_or_else(|| panic_zero(slice_size));
                     let r: Vec<f32> = (0..slice_size)
                         .map(|i| {
-                            let radius = rs.get(i).copied().unwrap_or(1.0);
+                            let radius = value_at(scratch, radius, i, 1.0);
                             let pos = crate::math::Vector3f::new(
-                                xs.get(i).copied().unwrap_or(0.0),
-                                ys.get(i).copied().unwrap_or(0.0),
-                                zs.get(i).copied().unwrap_or(0.0),
+                                value_at(scratch, x, i, 0.0),
+                                value_at(scratch, y, i, 0.0),
+                                value_at(scratch, z, i, 0.0),
                             );
                             crate::math::sdf::sdf_sphere(pos, crate::math::Vector3f::zero(), radius)
                         })
@@ -591,16 +622,13 @@ impl Graph {
                 NodeKind::SdfTorus { x, y, z, r1, r2 } => {
                     let r1 = *r1;
                     let r2 = *r2;
-                    let xs = x.as_ref().and_then(|p| scratch.get(p.node)).unwrap_or_else(|| panic_zero(slice_size));
-                    let ys = y.as_ref().and_then(|p| scratch.get(p.node)).unwrap_or_else(|| panic_zero(slice_size));
-                    let zs = z.as_ref().and_then(|p| scratch.get(p.node)).unwrap_or_else(|| panic_zero(slice_size));
                     let r: Vec<f32> = (0..slice_size)
                         .map(|i| {
                             crate::math::sdf::sdf_torus(
                                 crate::math::Vector3f::new(
-                                    xs.get(i).copied().unwrap_or(0.0),
-                                    ys.get(i).copied().unwrap_or(0.0),
-                                    zs.get(i).copied().unwrap_or(0.0),
+                                    value_at(scratch, x, i, 0.0),
+                                    value_at(scratch, y, i, 0.0),
+                                    value_at(scratch, z, i, 0.0),
                                 ),
                                 r1,
                                 r2,
@@ -700,17 +728,9 @@ fn binop(
     slice_size: usize,
     f: impl Fn(f32, f32) -> f32,
 ) -> Vec<f32> {
-    let a = a
-        .as_ref()
-        .and_then(|p| scratch.get(p.node))
-        .unwrap_or_else(|| panic_zero(slice_size));
-    let b = b
-        .as_ref()
-        .and_then(|p| scratch.get(p.node))
-        .unwrap_or_else(|| panic_zero(slice_size));
-    debug_assert_eq!(a.len(), slice_size);
-    debug_assert_eq!(b.len(), slice_size);
-    a.iter().zip(b).map(|(x, y)| f(*x, *y)).collect()
+    (0..slice_size)
+        .map(|i| f(value_at(scratch, a, i, 0.0), value_at(scratch, b, i, 0.0)))
+        .collect()
 }
 
 fn monop(
@@ -719,12 +739,9 @@ fn monop(
     slice_size: usize,
     f: impl Fn(f32) -> f32,
 ) -> Vec<f32> {
-    let a = a
-        .as_ref()
-        .and_then(|p| scratch.get(p.node))
-        .unwrap_or_else(|| panic_zero(slice_size));
-    debug_assert_eq!(a.len(), slice_size);
-    a.iter().map(|v| f(*v)).collect()
+    (0..slice_size)
+        .map(|i| f(value_at(scratch, a, i, 0.0)))
+        .collect()
 }
 
 fn ternary(
@@ -735,42 +752,28 @@ fn ternary(
     slice_size: usize,
     f: impl Fn(f32, f32, f32) -> f32,
 ) -> Vec<f32> {
-    let a = a
-        .as_ref()
-        .and_then(|p| scratch.get(p.node))
-        .unwrap_or_else(|| panic_zero(slice_size));
-    let b = b
-        .as_ref()
-        .and_then(|p| scratch.get(p.node))
-        .unwrap_or_else(|| panic_zero(slice_size));
-    let c = c
-        .as_ref()
-        .and_then(|p| scratch.get(p.node))
-        .unwrap_or_else(|| panic_zero(slice_size));
-    debug_assert_eq!(a.len(), slice_size);
-    debug_assert_eq!(b.len(), slice_size);
-    debug_assert_eq!(c.len(), slice_size);
-    a.iter()
-        .zip(b)
-        .zip(c)
-        .map(|((x, y), z)| f(*x, *y, *z))
+    (0..slice_size)
+        .map(|i| {
+            f(
+                value_at(scratch, a, i, 0.0),
+                value_at(scratch, b, i, 0.0),
+                value_at(scratch, c, i, 0.0),
+            )
+        })
         .collect()
 }
 
-fn panic_zero(slice_size: usize) -> &'static [f32] {
-    static ZERO: std::sync::OnceLock<Vec<f32>> = std::sync::OnceLock::new();
-    let buf = ZERO.get_or_init(|| vec![0.0; 4096]);
-    if buf.len() >= slice_size {
-        &buf[..slice_size]
-    } else {
-        // Pathological large slice — fall back to a per-call empty slice.
-        // The interpreter uses default 0.0 for unconnected inputs; an empty
-        // slice is incorrect for slice_size > 0, so we panic to surface the
-        // bug rather than silently mis-evaluate.
-        panic!(
-            "graph input port is unconnected and slice_size {slice_size} exceeds the zero cache"
-        );
-    }
+fn value_at(
+    scratch: &GraphScratch,
+    port: &Option<GraphPort>,
+    index: usize,
+    default_value: f32,
+) -> f32 {
+    port.as_ref()
+        .and_then(|p| scratch.get(p.node))
+        .and_then(|values| values.get(index))
+        .copied()
+        .unwrap_or(default_value)
 }
 
 #[cfg(test)]
@@ -826,7 +829,9 @@ mod tests {
         };
         let mut scratch = GraphScratch::new();
         let mut outputs = Vec::new();
-        graph.generate(&inputs, slice, &mut scratch, &mut outputs).unwrap();
+        graph
+            .generate(&inputs, slice, &mut scratch, &mut outputs)
+            .unwrap();
 
         assert_eq!(outputs.len(), 1);
         let (out_kind, data) = &outputs[0];
@@ -854,7 +859,9 @@ mod tests {
         };
         let mut scratch = GraphScratch::new();
         let mut outputs = Vec::new();
-        graph.generate(&inputs, slice, &mut scratch, &mut outputs).unwrap();
+        graph
+            .generate(&inputs, slice, &mut scratch, &mut outputs)
+            .unwrap();
 
         let (_, data) = &outputs[0];
         for (i, v) in data.iter().enumerate() {
@@ -886,7 +893,9 @@ mod tests {
         };
         let mut scratch = GraphScratch::new();
         let mut outputs = Vec::new();
-        graph.generate(&inputs, 4, &mut scratch, &mut outputs).unwrap();
+        graph
+            .generate(&inputs, 4, &mut scratch, &mut outputs)
+            .unwrap();
 
         let (_, data) = &outputs[0];
         assert!((data[0] - 10.0).abs() < 1e-5);
@@ -930,10 +939,7 @@ mod tests {
     fn unconnected_input_defaults_to_zero() {
         let mut graph = Graph::new();
         // Add with both inputs unconnected — equivalent to 0 + 0.
-        let add = graph.push(NodeKind::Add {
-            a: None,
-            b: None,
-        });
+        let add = graph.push(NodeKind::Add { a: None, b: None });
         graph.push(NodeKind::OutputSdf {
             a: Some(GraphPort::new(add)),
         });
@@ -946,9 +952,35 @@ mod tests {
         };
         let mut scratch = GraphScratch::new();
         let mut outputs = Vec::new();
-        graph.generate(&inputs, 2, &mut scratch, &mut outputs).unwrap();
+        graph
+            .generate(&inputs, 2, &mut scratch, &mut outputs)
+            .unwrap();
         let (_, data) = &outputs[0];
         assert_eq!(data, &vec![0.0, 0.0]);
+    }
+
+    #[test]
+    fn unconnected_inputs_default_to_zero_for_large_slices() {
+        let mut graph = Graph::new();
+        let add = graph.push(NodeKind::Add { a: None, b: None });
+        graph.push(NodeKind::OutputSdf {
+            a: Some(GraphPort::new(add)),
+        });
+
+        let xs = vec![0.0; 4097];
+        let inputs = GraphInputs {
+            x: &xs,
+            y: 0.0,
+            z: &xs,
+        };
+        let mut scratch = GraphScratch::new();
+        let mut outputs = Vec::new();
+        graph
+            .generate(&inputs, 4097, &mut scratch, &mut outputs)
+            .unwrap();
+        let (_, data) = &outputs[0];
+        assert_eq!(data.len(), 4097);
+        assert!(data.iter().all(|v| *v == 0.0));
     }
 
     #[test]
@@ -990,7 +1022,9 @@ mod tests {
         };
         let mut scratch = GraphScratch::new();
         let mut outputs = Vec::new();
-        graph.generate(&inputs, 3, &mut scratch, &mut outputs).unwrap();
+        graph
+            .generate(&inputs, 3, &mut scratch, &mut outputs)
+            .unwrap();
         let (_, data) = &outputs[0];
         assert_eq!(data, &zs);
     }
@@ -1015,12 +1049,104 @@ mod tests {
         // Voxel at (1,0,0): distance 1, radius 2, SDF = 1 - 2 = -1 (inside).
         let xs = vec![1.0];
         let zs = vec![0.0];
-        let inputs = GraphInputs { x: &xs, y: 0.0, z: &zs };
+        let inputs = GraphInputs {
+            x: &xs,
+            y: 0.0,
+            z: &zs,
+        };
         let mut scratch = GraphScratch::new();
         let mut outputs = Vec::new();
-        graph.generate(&inputs, 1, &mut scratch, &mut outputs).unwrap();
+        graph
+            .generate(&inputs, 1, &mut scratch, &mut outputs)
+            .unwrap();
         let (_, data) = &outputs[0];
         assert!((data[0] - (-1.0)).abs() < 1e-5, "got {}", data[0]);
+    }
+
+    #[test]
+    fn sdf_sphere_unconnected_radius_defaults_to_one() {
+        let mut graph = Graph::new();
+        let x = graph.push(NodeKind::InputX);
+        let y = graph.push(NodeKind::InputY);
+        let z = graph.push(NodeKind::InputZ);
+        let sphere = graph.push(NodeKind::SdfSphere {
+            x: Some(GraphPort::new(x)),
+            y: Some(GraphPort::new(y)),
+            z: Some(GraphPort::new(z)),
+            radius: None,
+        });
+        graph.push(NodeKind::OutputSdf {
+            a: Some(GraphPort::new(sphere)),
+        });
+
+        let xs = vec![0.0];
+        let zs = vec![0.0];
+        let inputs = GraphInputs {
+            x: &xs,
+            y: 0.0,
+            z: &zs,
+        };
+        let mut scratch = GraphScratch::new();
+        let mut outputs = Vec::new();
+        graph
+            .generate(&inputs, 1, &mut scratch, &mut outputs)
+            .unwrap();
+        let (_, data) = &outputs[0];
+        assert!((data[0] - (-1.0)).abs() < 1e-5, "got {}", data[0]);
+    }
+
+    #[test]
+    fn divide_by_zero_outputs_zero() {
+        let mut graph = Graph::new();
+        let a = graph.push(NodeKind::Constant(4.0));
+        let b = graph.push(NodeKind::Constant(0.0));
+        let div = graph.push(NodeKind::Divide {
+            a: Some(GraphPort::new(a)),
+            b: Some(GraphPort::new(b)),
+        });
+        graph.push(NodeKind::OutputSdf {
+            a: Some(GraphPort::new(div)),
+        });
+
+        let xs = vec![0.0];
+        let inputs = GraphInputs {
+            x: &xs,
+            y: 0.0,
+            z: &xs,
+        };
+        let mut scratch = GraphScratch::new();
+        let mut outputs = Vec::new();
+        graph
+            .generate(&inputs, 1, &mut scratch, &mut outputs)
+            .unwrap();
+        let (_, data) = &outputs[0];
+        assert_eq!(data[0], 0.0);
+    }
+
+    #[test]
+    fn sqrt_clamps_negative_inputs_to_zero() {
+        let mut graph = Graph::new();
+        let c = graph.push(NodeKind::Constant(-4.0));
+        let sqrt = graph.push(NodeKind::Sqrt {
+            a: Some(GraphPort::new(c)),
+        });
+        graph.push(NodeKind::OutputSdf {
+            a: Some(GraphPort::new(sqrt)),
+        });
+
+        let xs = vec![0.0];
+        let inputs = GraphInputs {
+            x: &xs,
+            y: 0.0,
+            z: &xs,
+        };
+        let mut scratch = GraphScratch::new();
+        let mut outputs = Vec::new();
+        graph
+            .generate(&inputs, 1, &mut scratch, &mut outputs)
+            .unwrap();
+        let (_, data) = &outputs[0];
+        assert_eq!(data[0], 0.0);
     }
 
     #[test]
@@ -1037,10 +1163,16 @@ mod tests {
         });
 
         let xs = vec![0.0];
-        let inputs = GraphInputs { x: &xs, y: 7.0, z: &xs };
+        let inputs = GraphInputs {
+            x: &xs,
+            y: 7.0,
+            z: &xs,
+        };
         let mut scratch = GraphScratch::new();
         let mut outputs = Vec::new();
-        graph.generate(&inputs, 1, &mut scratch, &mut outputs).unwrap();
+        graph
+            .generate(&inputs, 1, &mut scratch, &mut outputs)
+            .unwrap();
         let (_, data) = &outputs[0];
         // 7 - 5 = 2 (above the plane).
         assert!((data[0] - 2.0).abs() < 1e-5);
@@ -1061,10 +1193,16 @@ mod tests {
         });
 
         let xs = vec![0.0];
-        let inputs = GraphInputs { x: &xs, y: 0.0, z: &xs };
+        let inputs = GraphInputs {
+            x: &xs,
+            y: 0.0,
+            z: &xs,
+        };
         let mut scratch = GraphScratch::new();
         let mut outputs = Vec::new();
-        graph.generate(&inputs, 1, &mut scratch, &mut outputs).unwrap();
+        graph
+            .generate(&inputs, 1, &mut scratch, &mut outputs)
+            .unwrap();
         let (_, data) = &outputs[0];
         // min(-3, -1) = -3.
         assert!((data[0] - (-3.0)).abs() < 1e-5, "got {}", data[0]);
@@ -1086,10 +1224,16 @@ mod tests {
         });
 
         let xs = vec![0.0, 0.5, 1.0];
-        let inputs = GraphInputs { x: &xs, y: 0.0, z: &xs };
+        let inputs = GraphInputs {
+            x: &xs,
+            y: 0.0,
+            z: &xs,
+        };
         let mut scratch = GraphScratch::new();
         let mut outputs = Vec::new();
-        graph.generate(&inputs, 3, &mut scratch, &mut outputs).unwrap();
+        graph
+            .generate(&inputs, 3, &mut scratch, &mut outputs)
+            .unwrap();
         let (_, data) = &outputs[0];
         assert!((data[0] - 0.0).abs() < 1e-5);
         assert!((data[1] - 5.0).abs() < 1e-5);
@@ -1118,16 +1262,25 @@ mod tests {
                 a: Some(GraphPort::new(n)),
             });
             let xs = vec![1.0, 2.0, 3.0];
-            let inputs = GraphInputs { x: &xs, y: 0.0, z: &xs };
+            let inputs = GraphInputs {
+                x: &xs,
+                y: 0.0,
+                z: &xs,
+            };
             let mut scratch = GraphScratch::new();
             let mut outputs = Vec::new();
-            graph.generate(&inputs, 3, &mut scratch, &mut outputs).unwrap();
+            graph
+                .generate(&inputs, 3, &mut scratch, &mut outputs)
+                .unwrap();
             outputs[0].1.clone()
         };
 
         let first = run();
         let second = run();
-        assert_eq!(first, second, "noise must be deterministic for the same seed");
+        assert_eq!(
+            first, second,
+            "noise must be deterministic for the same seed"
+        );
         assert!(
             first.iter().any(|v| *v != 0.0),
             "noise must produce non-zero values somewhere"
@@ -1150,14 +1303,50 @@ mod tests {
         });
 
         let xs = vec![1.0, 3.0, 5.0];
-        let inputs = GraphInputs { x: &xs, y: 0.0, z: &xs };
+        let inputs = GraphInputs {
+            x: &xs,
+            y: 0.0,
+            z: &xs,
+        };
         let mut scratch = GraphScratch::new();
         let mut outputs = Vec::new();
-        graph.generate(&inputs, 3, &mut scratch, &mut outputs).unwrap();
+        graph
+            .generate(&inputs, 3, &mut scratch, &mut outputs)
+            .unwrap();
         let (_, data) = &outputs[0];
         assert!((data[0] - 2.0).abs() < 1e-5);
         assert!((data[1] - 3.0).abs() < 1e-5);
         assert!((data[2] - 4.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn clamp_node_accepts_reversed_bounds() {
+        let mut graph = Graph::new();
+        let x = graph.push(NodeKind::InputX);
+        let lo = graph.push(NodeKind::Constant(4.0));
+        let hi = graph.push(NodeKind::Constant(2.0));
+        let clamp = graph.push(NodeKind::Clamp {
+            a: Some(GraphPort::new(x)),
+            min_v: Some(GraphPort::new(lo)),
+            max_v: Some(GraphPort::new(hi)),
+        });
+        graph.push(NodeKind::OutputSdf {
+            a: Some(GraphPort::new(clamp)),
+        });
+
+        let xs = vec![1.0, 3.0, 5.0];
+        let inputs = GraphInputs {
+            x: &xs,
+            y: 0.0,
+            z: &xs,
+        };
+        let mut scratch = GraphScratch::new();
+        let mut outputs = Vec::new();
+        graph
+            .generate(&inputs, 3, &mut scratch, &mut outputs)
+            .unwrap();
+        let (_, data) = &outputs[0];
+        assert_eq!(data, &vec![2.0, 3.0, 4.0]);
     }
 
     #[test]
@@ -1176,10 +1365,16 @@ mod tests {
         });
 
         let xs = vec![0.0; 1];
-        let inputs = GraphInputs { x: &xs, y: 0.0, z: &xs };
+        let inputs = GraphInputs {
+            x: &xs,
+            y: 0.0,
+            z: &xs,
+        };
         let mut scratch = GraphScratch::new();
         let mut outputs = Vec::new();
-        graph.generate(&inputs, 1, &mut scratch, &mut outputs).unwrap();
+        graph
+            .generate(&inputs, 1, &mut scratch, &mut outputs)
+            .unwrap();
         let (_, data) = &outputs[0];
         // mix(0, 10, 0.25) = 0*0.75 + 10*0.25 = 2.5.
         assert!((data[0] - 2.5).abs() < 1e-5);
@@ -1201,10 +1396,16 @@ mod tests {
         });
 
         let xs = vec![3.0, 0.0];
-        let inputs = GraphInputs { x: &xs, y: 4.0, z: &xs };
+        let inputs = GraphInputs {
+            x: &xs,
+            y: 4.0,
+            z: &xs,
+        };
         let mut scratch = GraphScratch::new();
         let mut outputs = Vec::new();
-        graph.generate(&inputs, 2, &mut scratch, &mut outputs).unwrap();
+        graph
+            .generate(&inputs, 2, &mut scratch, &mut outputs)
+            .unwrap();
         let (_, data) = &outputs[0];
         // (3,4,3): sqrt(9+16+9) = sqrt(34) ≈ 5.83.
         assert!((data[0] - (3.0f32 * 3.0 + 4.0 * 4.0 + 3.0 * 3.0).sqrt()).abs() < 1e-5);
@@ -1225,10 +1426,16 @@ mod tests {
         });
 
         let xs = vec![-1.5, 0.7, 2.9];
-        let inputs = GraphInputs { x: &xs, y: 0.0, z: &xs };
+        let inputs = GraphInputs {
+            x: &xs,
+            y: 0.0,
+            z: &xs,
+        };
         let mut scratch = GraphScratch::new();
         let mut outputs = Vec::new();
-        graph.generate(&inputs, 3, &mut scratch, &mut outputs).unwrap();
+        graph
+            .generate(&inputs, 3, &mut scratch, &mut outputs)
+            .unwrap();
         let (_, data) = &outputs[0];
         assert!((data[0] - (-2.0)).abs() < 1e-5);
         assert!((data[1] - 0.0).abs() < 1e-5);

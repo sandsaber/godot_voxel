@@ -264,8 +264,8 @@ pub fn gather_voxels_cpu(
         for dx in -1..=1 {
             for dy in -1..=1 {
                 let neighbour_block_pos = mesh_block_pos + Vector3i::new(dx, dy, dz);
-                let dst_offset = Vector3i::new(dx, dy, dz) * data_block_size
-                    + Vector3i::splat(min_padding);
+                let dst_offset =
+                    Vector3i::new(dx, dy, dz) * data_block_size + Vector3i::splat(min_padding);
 
                 let neighbour_present = voxel_data
                     .get_block(neighbour_block_pos, lod_index as usize)
@@ -325,9 +325,7 @@ mod tests {
     use crate::engine::MeshingDependency;
     use crate::generators::base::{GenResult, VoxelGenerator, VoxelQueryData};
     use crate::math::{Box3i, Vector3i};
-    use crate::meshers::{
-        MesherInput, MesherOutput, Surface, SurfaceArrays, VoxelMesher,
-    };
+    use crate::meshers::{MesherInput, MesherOutput, Surface, SurfaceArrays, VoxelMesher};
     use crate::storage::{ChannelId, VoxelBuffer, VoxelData};
     use std::sync::{Arc, Mutex};
 
@@ -364,7 +362,9 @@ mod tests {
                 crate::math::Vector3f::zero(),
             );
             arrays.indices.extend_from_slice(&[a, a, a]);
-            output.surfaces.push(Surface::new(SurfaceArrays::Transvoxel(arrays), 0));
+            output
+                .surfaces
+                .push(Surface::new(SurfaceArrays::Transvoxel(arrays), 0));
         }
 
         fn used_channels_mask(&self) -> u32 {
@@ -416,10 +416,7 @@ mod tests {
         assert_eq!(dst.size(), Vector3i::splat(bs + 2));
         // The central block wrote Type=7 at local (1,1,1) world; in dst that
         // voxel sits at (min_padding + 1, min_padding + 1, min_padding + 1).
-        assert_eq!(
-            dst.get_voxel(2, 2, 2, ChannelId::Type.index()),
-            7
-        );
+        assert_eq!(dst.get_voxel(2, 2, 2, ChannelId::Type.index()), 7);
         // A voxel in a missing neighbour region (just outside the central
         // block) was filled by the generator with a near -0.5 SDF. The exact
         // value runs through the SDF channel's signed-normalised quantiser
@@ -441,9 +438,8 @@ mod tests {
             Arc::new(Mutex::new(Box::new(DummyMesher {
                 build_calls: build_calls.clone(),
             })));
-        let generator: Arc<Mutex<Box<dyn VoxelGenerator>>> = Arc::new(Mutex::new(
-            Box::new(ConstantSdfGenerator { value: -1.0 }),
-        ));
+        let generator: Arc<Mutex<Box<dyn VoxelGenerator>>> =
+            Arc::new(Mutex::new(Box::new(ConstantSdfGenerator { value: -1.0 })));
         let meshing_dep = MeshingDependency::new(mesher, Some(generator));
 
         let mut task = MeshBlockTask::new(MeshBlockTaskParams {
@@ -498,11 +494,10 @@ mod tests {
     #[test]
     fn mesh_block_task_implements_threaded_task_contract() {
         let data = shared_data_with_central_block(16);
-        let mesher: Arc<Mutex<Box<dyn VoxelMesher>>> = Arc::new(Mutex::new(Box::new(
-            DummyMesher {
+        let mesher: Arc<Mutex<Box<dyn VoxelMesher>>> =
+            Arc::new(Mutex::new(Box::new(DummyMesher {
                 build_calls: Arc::new(Mutex::new(0)),
-            },
-        )));
+            })));
         let meshing_dep = MeshingDependency::new(mesher, None);
 
         let mut task = MeshBlockTask::new(MeshBlockTaskParams {
@@ -522,7 +517,10 @@ mod tests {
 
         // Run via the trait method (the threaded-task entry point) and then
         // recover the concrete task to inspect its output.
-        let outcome = Box::new(task).run(ThreadedTaskContext::new(0, crate::tasks::TaskPriority::max()));
+        let outcome = Box::new(task).run(ThreadedTaskContext::new(
+            0,
+            crate::tasks::TaskPriority::max(),
+        ));
         match outcome {
             crate::tasks::TaskRunOutcome::Complete(completed) => {
                 // Recover the concrete type via Any-downcast not available on

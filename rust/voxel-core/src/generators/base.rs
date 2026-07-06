@@ -294,7 +294,10 @@ mod tests {
         // generate_single for SDF reads back via get_voxel_f, so it returns
         // the f32-bits of the (possibly quantized) stored value.
         let value = gen.generate_single(Vector3i::zero(), ChannelId::Sdf.index());
-        assert_eq!(value.as_real(), probe.get_voxel_f(0, 0, 0, ChannelId::Sdf.index()));
+        assert_eq!(
+            value.as_real(),
+            probe.get_voxel_f(0, 0, 0, ChannelId::Sdf.index())
+        );
     }
 
     #[test]

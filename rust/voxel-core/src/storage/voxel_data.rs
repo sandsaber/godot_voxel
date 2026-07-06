@@ -313,7 +313,8 @@ impl VoxelData {
         channels_mask: u32,
         create_new_blocks: bool,
     ) {
-        self.lods[0].map
+        self.lods[0]
+            .map
             .paste(min_pos, src_buffer, channels_mask, create_new_blocks);
     }
 
@@ -450,9 +451,12 @@ impl VoxelData {
             if let Some(block) = self.lods[0].map.get_block(block_pos) {
                 if block.has_voxels() {
                     let local_pos = self.lods[0].map.to_local(pos);
-                    return block
-                        .voxels()
-                        .get_voxel(local_pos.x, local_pos.y, local_pos.z, channel_index);
+                    return block.voxels().get_voxel(
+                        local_pos.x,
+                        local_pos.y,
+                        local_pos.z,
+                        channel_index,
+                    );
                 }
             }
             return self
@@ -470,9 +474,12 @@ impl VoxelData {
             if let Some(block) = self.lods[lod_index].map.get_block(block_pos) {
                 if block.has_voxels() {
                     let local_pos = self.lods[lod_index].map.to_local(voxel_pos);
-                    return block
-                        .voxels()
-                        .get_voxel(local_pos.x, local_pos.y, local_pos.z, channel_index);
+                    return block.voxels().get_voxel(
+                        local_pos.x,
+                        local_pos.y,
+                        local_pos.z,
+                        channel_index,
+                    );
                 }
             }
             block_pos = block_pos >> 1;
@@ -626,8 +633,15 @@ impl VoxelData {
         // Per-LOD worklists. Index 0 is seeded from the caller's input; each
         // successive LOD is filled by the cascade. Using a small fixed-size
         // `Vec<Vec<_>>` mirrors the C++ `thread_local FixedArray<...,MAX_LOD>`.
-        let mut blocks_to_process_per_lod: Vec<Vec<Vector3i>> =
-            (0..lod_count).map(|i| if i == 0 { modified_lod0_blocks.to_vec() } else { Vec::new() }).collect();
+        let mut blocks_to_process_per_lod: Vec<Vec<Vector3i>> = (0..lod_count)
+            .map(|i| {
+                if i == 0 {
+                    modified_lod0_blocks.to_vec()
+                } else {
+                    Vec::new()
+                }
+            })
+            .collect();
 
         // LOD0 phase: clear needs_lodding and record updates.
         for &block_pos in &blocks_to_process_per_lod[0] {
@@ -637,7 +651,10 @@ impl VoxelData {
             };
             block.set_needs_lodding(false);
             if let Some(out) = out_updated_blocks.as_deref_mut() {
-                out.push(BlockLocation { position: block_pos, lod_index: 0 });
+                out.push(BlockLocation {
+                    position: block_pos,
+                    lod_index: 0,
+                });
             }
         }
 
@@ -758,7 +775,9 @@ impl VoxelData {
                 // references come from disjoint LOD slices, so this is sound.
                 let src_size = src_block.voxels().size();
                 let dst_voxels = dst_block.voxels_mut();
-                src_block.voxels().downscale_to(dst_voxels, Vector3i::zero(), src_size, dst_offset);
+                src_block
+                    .voxels()
+                    .downscale_to(dst_voxels, Vector3i::zero(), src_size, dst_offset);
             }
         }
     }
@@ -1429,9 +1448,10 @@ mod tests {
 
         // LOD1 block (0,0,0) was generated on demand and is now present.
         assert!(data.has_block(Vector3i::zero(), 1));
-        assert!(generator.calls.iter().any(|(origin, lod)| {
-            *lod == 1 && origin.x == 0 && origin.y == 0 && origin.z == 0
-        }));
+        assert!(generator
+            .calls
+            .iter()
+            .any(|(origin, lod)| { *lod == 1 && origin.x == 0 && origin.y == 0 && origin.z == 0 }));
     }
 
     #[test]
@@ -1459,13 +1479,22 @@ mod tests {
             Some(&mut found_blocks),
         );
 
-        assert_eq!(found_positions, vec![Vector3i::zero(), Vector3i::new(1, 0, 0)]);
+        assert_eq!(
+            found_positions,
+            vec![Vector3i::zero(), Vector3i::new(1, 0, 0)]
+        );
         assert_eq!(missing, vec![Vector3i::new(2, 0, 0)]);
         assert_eq!(found_blocks.len(), 2);
         // Viewers were incremented on the live blocks.
-        assert_eq!(data.get_block(Vector3i::zero(), 0).unwrap().viewers.get(), 1);
         assert_eq!(
-            data.get_block(Vector3i::new(1, 0, 0), 0).unwrap().viewers.get(),
+            data.get_block(Vector3i::zero(), 0).unwrap().viewers.get(),
+            1
+        );
+        assert_eq!(
+            data.get_block(Vector3i::new(1, 0, 0), 0)
+                .unwrap()
+                .viewers
+                .get(),
             1
         );
     }
@@ -1537,7 +1566,10 @@ mod tests {
             None,
             None,
         );
-        assert_eq!(data.get_block(Vector3i::zero(), 0).unwrap().viewers.get(), 2);
+        assert_eq!(
+            data.get_block(Vector3i::zero(), 0).unwrap().viewers.get(),
+            2
+        );
 
         let mut removed = Vec::new();
         data.unview_area(
@@ -1550,7 +1582,10 @@ mod tests {
 
         assert!(removed.is_empty());
         assert!(data.has_block(Vector3i::zero(), 0));
-        assert_eq!(data.get_block(Vector3i::zero(), 0).unwrap().viewers.get(), 1);
+        assert_eq!(
+            data.get_block(Vector3i::zero(), 0).unwrap().viewers.get(),
+            1
+        );
     }
 
     #[test]
@@ -1558,8 +1593,10 @@ mod tests {
         let mut data = VoxelData::new();
         assert!(!data.has_generator());
 
-        let generator: SharedVoxelGenerator =
-            Arc::new(Mutex::new(Box::new(RecordingGenerator::default()) as Box<dyn VoxelGenerator>));
+        let generator: SharedVoxelGenerator = Arc::new(Mutex::new(Box::new(
+            RecordingGenerator::default(),
+        )
+            as Box<dyn VoxelGenerator>));
         data.set_generator(Some(generator.clone()));
         assert!(data.has_generator());
 
@@ -1580,8 +1617,10 @@ mod tests {
         data.set_bounds(Box3i::new(Vector3i::zero(), Vector3i::splat(32)));
         data.set_streaming_enabled(false);
         let channel = ChannelId::Type.index();
-        let generator: SharedVoxelGenerator =
-            Arc::new(Mutex::new(Box::new(RecordingGenerator::default()) as Box<dyn VoxelGenerator>));
+        let generator: SharedVoxelGenerator = Arc::new(Mutex::new(Box::new(
+            RecordingGenerator::default(),
+        )
+            as Box<dyn VoxelGenerator>));
         data.set_generator(Some(generator));
 
         // No blocks loaded yet. Copy must invoke the generator for the area.
@@ -1649,10 +1688,7 @@ mod tests {
 
         // Streaming-mode short-circuit: area outside bounds returns false.
         data.set_streaming_enabled(true);
-        assert!(!data.is_area_loaded(Box3i::new(
-            Vector3i::new(100, 0, 0),
-            Vector3i::splat(16),
-        )));
+        assert!(!data.is_area_loaded(Box3i::new(Vector3i::new(100, 0, 0), Vector3i::splat(16),)));
     }
 
     #[test]
@@ -1685,10 +1721,8 @@ mod tests {
         // Add an empty (no-voxels) block alongside.
         assert!(data.try_set_block(Vector3i::new(1, 0, 0), VoxelDataBlock::empty(0)));
 
-        let blocks = data.get_blocks_with_voxel_data(
-            Box3i::new(Vector3i::zero(), Vector3i::new(2, 1, 1)),
-            0,
-        );
+        let blocks = data
+            .get_blocks_with_voxel_data(Box3i::new(Vector3i::zero(), Vector3i::new(2, 1, 1)), 0);
         // ZXY layout: (0,0,0) is index 0, (1,0,0) is index 1.
         assert_eq!(blocks.len(), 2);
         assert!(blocks[0].is_some());
@@ -1706,8 +1740,10 @@ mod tests {
         // RecordingGenerator writes `10 + lod + origin.x`. The default
         // `generate_single` impl passes the queried voxel position as the
         // 1×1×1 block's origin, so for voxel (20,5,5) the result is 10+0+20=30.
-        let generator: SharedVoxelGenerator =
-            Arc::new(Mutex::new(Box::new(RecordingGenerator::default()) as Box<dyn VoxelGenerator>));
+        let generator: SharedVoxelGenerator = Arc::new(Mutex::new(Box::new(
+            RecordingGenerator::default(),
+        )
+            as Box<dyn VoxelGenerator>));
         data.set_generator(Some(generator));
 
         let value = data.get_voxel(Vector3i::new(20, 5, 5), channel, 0);

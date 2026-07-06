@@ -6,6 +6,7 @@
 //! another system re-scheduled it" status without unsafe raw pointers.
 
 use super::TaskPriority;
+use std::any::Any;
 
 /// Context passed to a task while it runs on a worker thread.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,7 +35,7 @@ pub enum TaskRunOutcome {
 }
 
 /// Task runnable by [`super::ThreadedTaskRunner`].
-pub trait ThreadedTask: Send + 'static {
+pub trait ThreadedTask: Send + Any + 'static {
     /// Runs on a worker thread. Implementations must return `self` in
     /// [`TaskRunOutcome::Complete`] or [`TaskRunOutcome::Postponed`] unless
     /// ownership was intentionally transferred elsewhere.

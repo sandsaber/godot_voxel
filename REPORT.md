@@ -2,6 +2,9 @@
 
 > Branch: `rust/pilot` · Date: 2026-07-03 · Host: Linux x86_64, Rust 1.96.1, NDK r29
 > See `MIGRATION_PLAN.md` for the full plan. This report covers Phase 0 (pilot).
+> Update 2026-07-06: the C++ stub-tree harness has since run. H2 is a pass;
+> H1 remains partial because vertex reuse/winding differ even though positions
+> and triangle count match. See `rust/cpp-baseline/README.md`.
 
 ## TL;DR
 
@@ -9,10 +12,9 @@
 reproducible, voxel-core cross-compiles to **every priority mobile target**
 (Android aarch64/x86_64 `.so`, iOS/macOS arm64 `.a`), and the transvoxel mesher
 runs at hundreds of millions of cells/sec. The lookup tables are proven
-byte-identical to upstream C++. The **single open item** is full *mesh*
-byte-parity and the C++ perf baseline, both blocked on a godot-cpp harness (a
-focused follow-up, not a risk). Recommend proceeding to mesh-parity validation
-immediately; the strategic risk is low.
+byte-identical to upstream C++. Follow-up C++ harness results keep the GO:
+H2 passes, while H1 is partial until the vertex reuse/winding divergence is
+closed.
 
 ## The four hypotheses
 
@@ -23,28 +25,25 @@ immediately; the strategic risk is low.
 | Lookup tables (REGULAR_CELL_CLASS / CELL_DATA / VERTEX_DATA) **byte-identical** to real upstream `transvoxel_tables.cpp` | ✅ proven — `transvoxel_tables_parity` test, dump from `rust/cpp-baseline/` |
 | Faithful port of `build_regular_mesh` (TEXTURES_NONE, regular cells), incl. the ZXY memory-layout fix | ✅ |
 | Self-consistent golden mesh (sphere_16: 840 verts / 3912 idx; sphere_32) locks output against regressions | ✅ — `transvoxel_parity` framework + comparator |
-| Full mesh byte-parity vs C++ | ⏳ pending godot-cpp harness (mesher body needs Godot types; tables already proven) |
+| Full mesh byte-parity vs C++ | ⚠️ partial — positions and triangle count match; vertex reuse/winding differ |
 
 What this means: the lookup backbone of the algorithm is proven equivalent, so
 any future mesh divergence could only come from the small vertex-interpolation /
 reuse-cache logic — already a line-by-line port. Confidence is high; the final
 byte-proof is a C++ build task, not an algorithmic risk.
 
-### H2 — Performance (Rust within 15% of C++): **RUST FLOOR MEASURED, C++ COMPARE PENDING**
+### H2 — Performance (Rust within 15% of C++): **✅ PASS**
 
 Criterion, release profile (`lto=fat`, `codegen-units=1`, `panic=abort`), SDF
 sphere, throughput = cells the mesher visits per second:
 
-| Block (inner³) | Time | Throughput |
-|---|---|---|
-| 16³ | ~27.9 µs | ~147 Melem/s |
-| 32³ | ~164.6 µs | ~199 Melem/s |
-| 64³ | ~1.10 ms | ~238 Melem/s |
+| Impl | Time | Throughput |
+|---|---:|---:|
+| Rust criterion (16³ sphere) | 28.5 µs | 143 Melem/s |
+| C++ stub-tree harness | 44.1 µs | 93 Mvoxels/s |
 
-Absolute numbers are healthy (sub-millisecond for a 32³ chunk; throughput rises
-with size as surface/volume improves). **C++ baseline not yet measured** — needs
-the same godot-cpp harness as H1. The Rust floor being this high makes the 15%
-target plausible, but it is not yet a confirmed win.
+The Rust port is about 1.5× faster than the C++ reference harness at this size.
+See `rust/cpp-baseline/README.md` for the caveats and exact comparison.
 
 ### H3 — Tooling (cargo+gdext builds cleanly): **✅ PASS**
 
@@ -82,16 +81,14 @@ up to LLVM 22.)
 
 ## GO/NO-GO decision
 
-**GO** to proceed — with one explicit follow-up that gates the *final* Phase 0
-sign-off:
+**GO** to proceed — with one explicit follow-up that gates full Phase 0
+byte-parity sign-off:
 
-1. **Build the godot-cpp mesh harness** (`rust/cpp-baseline/README.md` has the
-   scoped plan): vendor godot-cpp, build `build_regular_mesh<float>` (TEXTURES_NONE)
-   on the same SDF sphere, dump in the existing `GoldenMesh` JSON schema, and time
-   it. This closes H1 (regenerate golden from C++ → existing `matches_golden_*`
-   tests become real parity) and H2 (perf-vs-C++) in one task.
+1. **Investigate the H1 reuse-cache/winding divergence** shown by the C++ harness
+   (`888` C++ vertices vs `840` Rust vertices, with `434/1304` ordered triangles
+   differing). H2 is already closed as a pass.
 
-The four hypotheses score H3✅ H4✅(+), H1 partial-strong, H2 floor-measured.
+The four hypotheses score H3✅ H4✅(+), H1 partial, H2✅.
 Nothing observed suggests Rust is the wrong call; the remaining work is
 measurement, not redesign. Starting Phase 1 (full math/containers core) in
 parallel is safe because it doesn't depend on the C++ harness.

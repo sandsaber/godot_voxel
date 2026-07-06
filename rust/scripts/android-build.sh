@@ -66,11 +66,31 @@ if [[ -z "$NDK_ROOT" || ! -d "$NDK_ROOT/toolchains/llvm" ]]; then
     echo "Android NDK not found. Set ANDROID_NDK_HOME or install to /opt/android-ndk." >&2
     exit 1
 fi
-NDK_BIN="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin"
+case "$(uname -s)" in
+    Darwin) HOST_OS=darwin;;
+    Linux)  HOST_OS=linux;;
+    *) echo "unsupported host OS for Android NDK: $(uname -s)" >&2; exit 1;;
+esac
+case "$(uname -m)" in
+    arm64|aarch64) HOST_ARCH=aarch64;;
+    x86_64|amd64)  HOST_ARCH=x86_64;;
+    *) echo "unsupported host arch for Android NDK: $(uname -m)" >&2; exit 1;;
+esac
+NDK_BIN="$NDK_ROOT/toolchains/llvm/prebuilt/${HOST_OS}-${HOST_ARCH}/bin"
+if [[ ! -d "$NDK_BIN" && "$HOST_OS" == "darwin" && "$HOST_ARCH" == "aarch64" ]]; then
+    # NDK packages commonly ship only darwin-x86_64 host tools; they run on
+    # Apple Silicon via Rosetta. Prefer native darwin-aarch64 when present.
+    NDK_BIN="$NDK_ROOT/toolchains/llvm/prebuilt/darwin-x86_64/bin"
+fi
+if [[ ! -d "$NDK_BIN" ]]; then
+    echo "Android NDK host tools not found for ${HOST_OS}-${HOST_ARCH} under $NDK_ROOT/toolchains/llvm/prebuilt." >&2
+    exit 1
+fi
 ARCH="${TARGET%%-*}"   # aarch64 | x86_64
 CLANG="$NDK_BIN/$ARCH-linux-android${ANDROID_API}-clang"
 CLANGXX="$NDK_BIN/$ARCH-linux-android${ANDROID_API}-clang++"
 echo "NDK:        $NDK_ROOT"
+echo "NDK host:   ${NDK_BIN%/bin}"
 echo "clang:      $CLANG"
 
 # --- locate rust's lld (same LLVM as rustc) ---------------------------------

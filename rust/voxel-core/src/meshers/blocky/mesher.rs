@@ -269,6 +269,19 @@ fn build_neighbor_luts(
         + side_neighbor_lut[Side::Left as usize];
 }
 
+fn append_collision_geometry(
+    out: &mut BlockyArrays,
+    positions: &[Vector3f],
+    indices: &[i32],
+    offset: Vector3f,
+) {
+    let index_offset = out.positions.len() as i32;
+    out.positions
+        .extend(positions.iter().map(|position| *position + offset));
+    out.indices
+        .extend(indices.iter().map(|index| index_offset + *index));
+}
+
 /// The core blocky meshing algorithm. Ported from the C++ `generate_mesh<T>`
 /// template (fluids, collision, and tinting are omitted; this port emits baked
 /// side + inside geometry with face culling and optional AO).
@@ -283,6 +296,50 @@ fn build_neighbor_luts(
 /// * `baked_occlusion_darkness` — AO strength (C++ default `0.8`).
 pub fn generate_mesh<T>(
     out: &mut [BlockyArrays],
+    type_buffer: &[T],
+    block_size: Vector3i,
+    library: &BakedLibrary,
+    bake_occlusion: bool,
+    baked_occlusion_darkness: f32,
+) where
+    T: Copy + Into<u16>,
+{
+    generate_mesh_impl(
+        out,
+        None,
+        type_buffer,
+        block_size,
+        library,
+        bake_occlusion,
+        baked_occlusion_darkness,
+    );
+}
+
+pub fn generate_mesh_with_collision<T>(
+    out: &mut [BlockyArrays],
+    collision_out: &mut BlockyArrays,
+    type_buffer: &[T],
+    block_size: Vector3i,
+    library: &BakedLibrary,
+    bake_occlusion: bool,
+    baked_occlusion_darkness: f32,
+) where
+    T: Copy + Into<u16>,
+{
+    generate_mesh_impl(
+        out,
+        Some(collision_out),
+        type_buffer,
+        block_size,
+        library,
+        bake_occlusion,
+        baked_occlusion_darkness,
+    );
+}
+
+fn generate_mesh_impl<T>(
+    out: &mut [BlockyArrays],
+    mut collision_out: Option<&mut BlockyArrays>,
     type_buffer: &[T],
     block_size: Vector3i,
     library: &BakedLibrary,
@@ -530,6 +587,17 @@ pub fn generate_mesh<T>(
                             arrays.indices[idx_append + j] = *index_offset + side_indices[j];
                         }
 
+                        if surface.collision_enabled {
+                            if let Some(collision_arrays) = collision_out.as_deref_mut() {
+                                append_collision_geometry(
+                                    collision_arrays,
+                                    side_positions,
+                                    side_indices,
+                                    pos,
+                                );
+                            }
+                        }
+
                         *index_offset += vertex_count as i32;
                     }
                 }
@@ -574,6 +642,12 @@ pub fn generate_mesh<T>(
 
                     for &idx in indices {
                         arrays.indices.push(*index_offset + idx);
+                    }
+
+                    if surface.collision_enabled {
+                        if let Some(collision_arrays) = collision_out.as_deref_mut() {
+                            append_collision_geometry(collision_arrays, positions, indices, pos);
+                        }
                     }
 
                     *index_offset += vertex_count as i32;

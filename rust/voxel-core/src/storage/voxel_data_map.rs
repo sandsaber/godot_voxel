@@ -365,12 +365,8 @@ impl VoxelDataMap {
                 for lx in local_min.x..local_max.x {
                     for ly in local_min.y..local_max.y {
                         let src_pos = Vector3i::new(lx, ly, lz) - dst_base_pos;
-                        if src_buffer.get_voxel(
-                            src_pos.x,
-                            src_pos.y,
-                            src_pos.z,
-                            src_mask_channel,
-                        ) == src_mask_value
+                        if src_buffer.get_voxel(src_pos.x, src_pos.y, src_pos.z, src_mask_channel)
+                            == src_mask_value
                         {
                             continue;
                         }
@@ -403,8 +399,7 @@ impl VoxelDataMap {
     ) {
         let channels = channel_indices_from_mask(channels_mask);
         let src_size = src_buffer.size();
-        if src_size.x <= 0 || src_size.y <= 0 || src_size.z <= 0 || dst_writable_values.is_empty()
-        {
+        if src_size.x <= 0 || src_size.y <= 0 || src_size.z <= 0 || dst_writable_values.is_empty() {
             return;
         }
 
@@ -452,12 +447,8 @@ impl VoxelDataMap {
                 for lx in local_min.x..local_max.x {
                     for ly in local_min.y..local_max.y {
                         let src_pos = Vector3i::new(lx, ly, lz) - dst_base_pos;
-                        if src_buffer.get_voxel(
-                            src_pos.x,
-                            src_pos.y,
-                            src_pos.z,
-                            src_mask_channel,
-                        ) == src_mask_value
+                        if src_buffer.get_voxel(src_pos.x, src_pos.y, src_pos.z, src_mask_channel)
+                            == src_mask_value
                         {
                             continue;
                         }
@@ -962,9 +953,6 @@ mod tests {
             .all_cells_match(|pos| map.get_voxel(pos, channel) == write_value));
         // The single-voxel outline of the area was masked out, so it remains
         // at the block default rather than `write_value`.
-        assert_ne!(
-            map.get_voxel(area.position, channel),
-            write_value
-        );
+        assert_ne!(map.get_voxel(area.position, channel), write_value);
     }
 }

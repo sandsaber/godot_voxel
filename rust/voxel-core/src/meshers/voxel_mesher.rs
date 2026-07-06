@@ -44,7 +44,10 @@ impl<'a> std::fmt::Debug for MesherInput<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MesherInput")
             .field("voxels", &self.voxels)
-            .field("generator", &self.generator.as_ref().map(|_| "<dyn VoxelGenerator>"))
+            .field(
+                "generator",
+                &self.generator.as_ref().map(|_| "<dyn VoxelGenerator>"),
+            )
             .field("origin_in_voxels", &self.origin_in_voxels)
             .field("lod_index", &self.lod_index)
             .field("collision_hint", &self.collision_hint)
@@ -189,10 +192,7 @@ impl MesherOutput {
 
     /// Total vertex count across every surface.
     pub fn total_vertex_count(&self) -> usize {
-        self.surfaces
-            .iter()
-            .map(|s| s.arrays.vertex_count())
-            .sum()
+        self.surfaces.iter().map(|s| s.arrays.vertex_count()).sum()
     }
 
     /// Reset to a fresh state, reusing allocations.
@@ -253,9 +253,7 @@ pub trait VoxelMesher: Send + Sync {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        CollisionSurface, MesherInput, MesherOutput, Surface, SurfaceArrays, VoxelMesher,
-    };
+    use super::{CollisionSurface, MesherInput, MesherOutput, Surface, SurfaceArrays, VoxelMesher};
     use crate::generators::base::{GenResult, VoxelGenerator, VoxelQueryData};
     use crate::math::{Vector3f, Vector3i};
     use crate::meshers::transvoxel::structures::MeshArrays;
@@ -292,7 +290,9 @@ mod tests {
                 Vector3f::zero(),
             );
             arrays.indices.extend_from_slice(&[a, b, c]);
-            output.surfaces.push(Surface::new(SurfaceArrays::Transvoxel(arrays), 0));
+            output
+                .surfaces
+                .push(Surface::new(SurfaceArrays::Transvoxel(arrays), 0));
         }
 
         fn used_channels_mask(&self) -> u32 {
@@ -393,7 +393,9 @@ mod tests {
             }
         }
 
-        let mut mesher = ProbingMesher { saw_generator: false };
+        let mut mesher = ProbingMesher {
+            saw_generator: false,
+        };
         let voxels = VoxelBuffer::with_size(Vector3i::splat(2));
         let mut gen = DummyGen;
         let input = MesherInput {

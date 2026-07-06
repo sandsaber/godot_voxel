@@ -8,6 +8,7 @@
 //! This is the integration test the audit recommended as the validation
 //! milestone for Phase 4's algorithmic core.
 
+use std::sync::{Arc, Mutex};
 use voxel_core::engine::MeshingDependency;
 use voxel_core::generators::base::{VoxelGenerator, VoxelQueryData};
 use voxel_core::math::{Box3i, Vector3i};
@@ -15,8 +16,7 @@ use voxel_core::meshers::{
     BlockMeshOutput, MeshBlockTask, MeshBlockTaskParams, MesherOutput, Surface, SurfaceArrays,
     VoxelMesher,
 };
-use voxel_core::storage::{ChannelId, ChannelDepth, VoxelData, VoxelFormat};
-use std::sync::{Arc, Mutex};
+use voxel_core::storage::{ChannelDepth, ChannelId, VoxelData, VoxelFormat};
 
 /// A generator that produces a sphere SDF centred at the origin. This is the
 /// same generator used by `tests/transvoxel_sphere.rs`, reimplemented here to
@@ -26,7 +26,10 @@ struct SphereGenerator {
 }
 
 impl VoxelGenerator for SphereGenerator {
-    fn generate_block(&mut self, input: VoxelQueryData<'_>) -> voxel_core::generators::base::GenResult {
+    fn generate_block(
+        &mut self,
+        input: VoxelQueryData<'_>,
+    ) -> voxel_core::generators::base::GenResult {
         let bs = input.buffer.size().x as f32;
         for z in 0..input.buffer.size().z {
             for x in 0..input.buffer.size().x {
@@ -34,11 +37,8 @@ impl VoxelGenerator for SphereGenerator {
                     let wx = input.origin_in_voxels.x as f32 + x as f32 + 0.5;
                     let wy = input.origin_in_voxels.y as f32 + y as f32 + 0.5;
                     let wz = input.origin_in_voxels.z as f32 + z as f32 + 0.5;
-                    let d =
-                        ((wx * wx + wy * wy + wz * wz).sqrt()) - self.radius;
-                    input
-                        .buffer
-                        .set_voxel_f(d, x, y, z, ChannelId::Sdf.index());
+                    let d = ((wx * wx + wy * wy + wz * wz).sqrt()) - self.radius;
+                    input.buffer.set_voxel_f(d, x, y, z, ChannelId::Sdf.index());
                 }
             }
         }
@@ -81,19 +81,25 @@ impl VoxelMesher for ThresholdMesher {
                         let a = arrays.add_vertex(
                             voxel_core::math::Vector3f::new(cx, cy, cz),
                             voxel_core::math::Vector3f::new(0.0, 1.0, 0.0),
-                            0, 0, 0,
+                            0,
+                            0,
+                            0,
                             voxel_core::math::Vector3f::zero(),
                         );
                         let b = arrays.add_vertex(
                             voxel_core::math::Vector3f::new(cx + 1.0, cy, cz),
                             voxel_core::math::Vector3f::new(0.0, 1.0, 0.0),
-                            0, 0, 0,
+                            0,
+                            0,
+                            0,
                             voxel_core::math::Vector3f::zero(),
                         );
                         let c = arrays.add_vertex(
                             voxel_core::math::Vector3f::new(cx, cy, cz + 1.0),
                             voxel_core::math::Vector3f::new(0.0, 1.0, 0.0),
-                            0, 0, 0,
+                            0,
+                            0,
+                            0,
                             voxel_core::math::Vector3f::zero(),
                         );
                         arrays.indices.extend_from_slice(&[a, b, c]);
@@ -102,7 +108,9 @@ impl VoxelMesher for ThresholdMesher {
             }
         }
 
-        output.surfaces.push(Surface::new(SurfaceArrays::Transvoxel(arrays), 0));
+        output
+            .surfaces
+            .push(Surface::new(SurfaceArrays::Transvoxel(arrays), 0));
     }
 
     fn used_channels_mask(&self) -> u32 {
@@ -117,24 +125,23 @@ fn sphere_pipeline(radius: f32, mesh_block_pos: Vector3i) -> BlockMeshOutput {
     let mut format = VoxelFormat::new();
     format.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
     data.set_format(format);
-    data.set_bounds(Box3i::new(
-        Vector3i::splat(-256),
-        Vector3i::splat(512),
-    ));
+    data.set_bounds(Box3i::new(Vector3i::splat(-256), Vector3i::splat(512)));
     data.set_streaming_enabled(false);
     data.set_full_load_completed(true);
     // Materialise the central block by editing a single voxel inside it.
-    data.try_set_voxel_f(-1.0, mesh_block_pos * 16 + Vector3i::new(1, 1, 1), ChannelId::Sdf.index());
+    data.try_set_voxel_f(
+        -1.0,
+        mesh_block_pos * 16 + Vector3i::new(1, 1, 1),
+        ChannelId::Sdf.index(),
+    );
 
     let data_handle = Arc::new(Mutex::new(data));
 
     // 2) Build the meshing dependency with the sphere generator + threshold
     //    mesher.
-    let generator: Arc<Mutex<Box<dyn VoxelGenerator>>> = Arc::new(Mutex::new(
-        Box::new(SphereGenerator { radius }),
-    ));
-    let mesher: Arc<Mutex<Box<dyn VoxelMesher>>> =
-        Arc::new(Mutex::new(Box::new(ThresholdMesher)));
+    let generator: Arc<Mutex<Box<dyn VoxelGenerator>>> =
+        Arc::new(Mutex::new(Box::new(SphereGenerator { radius })));
+    let mesher: Arc<Mutex<Box<dyn VoxelMesher>>> = Arc::new(Mutex::new(Box::new(ThresholdMesher)));
     let meshing_dependency = MeshingDependency::new(mesher, Some(generator));
 
     // 3) Run a MeshBlockTask at the requested position.
@@ -190,8 +197,7 @@ fn pipeline_dropped_output_when_dependency_invalidated() {
     data.try_set_voxel(1, Vector3i::new(1, 1, 1), ChannelId::Type.index());
 
     let data_handle = Arc::new(Mutex::new(data));
-    let mesher: Arc<Mutex<Box<dyn VoxelMesher>>> =
-        Arc::new(Mutex::new(Box::new(ThresholdMesher)));
+    let mesher: Arc<Mutex<Box<dyn VoxelMesher>>> = Arc::new(Mutex::new(Box::new(ThresholdMesher)));
     let meshing_dependency = MeshingDependency::new(mesher, None);
 
     let mut task = MeshBlockTask::new(MeshBlockTaskParams {
@@ -231,9 +237,11 @@ fn pipeline_vertex_positions_are_in_world_space() {
         SurfaceArrays::Transvoxel(a) => a,
         _ => unreachable!(),
     };
-    let any_in_block = arrays
-        .vertices
-        .iter()
-        .any(|p| p.x >= -1.0 && p.x <= 17.0 && p.y >= -1.0 && p.y <= 17.0 && p.z >= -1.0 && p.z <= 17.0);
-    assert!(any_in_block, "expected at least one world-space vertex in the mesh block");
+    let any_in_block = arrays.vertices.iter().any(|p| {
+        p.x >= -1.0 && p.x <= 17.0 && p.y >= -1.0 && p.y <= 17.0 && p.z >= -1.0 && p.z <= 17.0
+    });
+    assert!(
+        any_in_block,
+        "expected at least one world-space vertex in the mesh block"
+    );
 }

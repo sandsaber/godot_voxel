@@ -26,8 +26,10 @@ This is a `cdylib`; the artifact is `target/<profile>/libvoxel_gdext.so` (Linux)
 ## Load in Godot 4.7
 
 1. Copy `voxel_gdext.gdextension.in` → `voxel_gdext.gdextension` somewhere under
-   `res://` (e.g. the crate dir), and adjust the library paths to match where
-   your built artifact lives.
+   `res://` (e.g. the crate dir). The template defaults to debug desktop
+   artifacts (`cargo build -p voxel-gdext`) and release Android artifacts
+   (`./scripts/android-build.sh`); switch the paths if you load a release desktop
+   build.
 2. (Re)open the Godot project — the editor scans for `.gdextension` files and
    loads the library on startup.
 3. The class is now available in GDScript:

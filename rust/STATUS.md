@@ -1,20 +1,20 @@
 # Rust Port — Status Snapshot
 
-> Branch: `rust/pilot` · Last update: 2026-07-05
+> Branch: `rust/pilot` · Last update: 2026-07-06
 > See `MIGRATION_PLAN.md` at the repo root for the full plan + progress log.
 
 ## At a glance
 
 | Phase | Status | Tests |
 |---|---|---|
-| 0 — Pilot (transvoxel mesher + cross-compile) | ✅ COMPLETE | 5 integration + 1 doc-test |
+| 0 — Pilot (transvoxel mesher + cross-compile) | 🟡 CONDITIONAL GO (H1 byte-parity partial) | H2 pass; H1 partial |
 | 1 — Pure core (`util/{math,string,memory,io,testing}` + `expression_parser`) | ✅ COMPLETE | (cumulative) |
 | 2 — Mobile validation (gdext `.so` desktop + Android) | ✅ desktop+Android `.so` (on-device: pending SDK) | — |
 | 3 — Compute layer (storage, streams, meshers, generators, format) | ✅ COMPLETE | (cumulative) |
-| 4 — Terrain + threading (storage/streaming/meshing/paging/graph) | 🟡 IN PROGRESS | 610 unit + 10 integration |
+| 4 — Terrain + threading (storage/streaming/meshing/paging/graph) | 🟡 IN PROGRESS | 625 unit + 10 integration |
 | 5 — Godot binding + editor | ⏳ not started | — |
 
-**Total:** 610 unit tests + 10 integration + 1 doc-test, clippy clean.
+**Total:** 625 unit tests + 10 integration + 1 doc-test, clippy clean.
 
 ## Phase 4 — what works headlessly (no Godot)
 
@@ -47,6 +47,7 @@ VoxelTerrainCore (single-LOD paging orchestrator)
    • view_mesh_block / unview_mesh_block (refcount-tracked)
    • try_schedule_mesh_update (has_all_blocks_in_area gate)
    • LoadBlockForTerrainTask (stream first, generator fallback)
+   • save-on-unload for modified data blocks
    • full process() tick — viewers → loads → meshing → outputs → unload
 ```
 

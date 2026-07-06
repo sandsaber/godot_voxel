@@ -91,7 +91,9 @@ mod tests {
     }
 
     fn generator_handle() -> SharedVoxelGenerator {
-        Arc::new(Mutex::new(Box::new(NoOpGenerator) as Box<dyn VoxelGenerator>))
+        Arc::new(Mutex::new(
+            Box::new(NoOpGenerator) as Box<dyn VoxelGenerator>
+        ))
     }
 
     #[test]

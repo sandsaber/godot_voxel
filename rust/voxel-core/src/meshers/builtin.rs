@@ -13,8 +13,8 @@
 
 use crate::math::Vector3i;
 use crate::meshers::transvoxel::{
-    build_regular_mesh, BuildRegularMeshParams, Cache, MeshArrays, RegularMesherInput,
-    MAX_PADDING, MIN_PADDING,
+    build_regular_mesh, BuildRegularMeshParams, Cache, MeshArrays, RegularMesherInput, MAX_PADDING,
+    MIN_PADDING,
 };
 use crate::meshers::{MesherInput, MesherOutput, Surface, SurfaceArrays, VoxelMesher};
 use crate::storage::{ChannelId, VoxelBuffer};
@@ -61,7 +61,9 @@ impl<'a> RegularMesherInput for VoxelBufferTransvoxelInput<'a> {
         let x = rem / sy;
         let y = rem % sy;
         // Negate to flip "positive = outside" into "positive = inside".
-        -self.buffer.get_voxel_f(x as i32, y as i32, z as i32, self.sdf_channel)
+        -self
+            .buffer
+            .get_voxel_f(x as i32, y as i32, z as i32, self.sdf_channel)
     }
 }
 
@@ -106,6 +108,10 @@ impl VoxelMesher for TransvoxelMesher {
         };
         let mut arrays = MeshArrays::default();
         build_regular_mesh(&transvoxel_input, &params, &mut self.cache, &mut arrays);
+        if input.collision_hint && !arrays.indices.is_empty() {
+            output.collision_surface.submesh_vertex_end = arrays.vertices.len() as i32;
+            output.collision_surface.submesh_index_end = arrays.indices.len() as i32;
+        }
         // Even an empty transvoxel run produces a surface (zero triangles);
         // match C++ which always emits the surface and lets the caller drop
         // empty ones.
@@ -125,10 +131,14 @@ impl VoxelMesher for TransvoxelMesher {
     fn used_channels_mask(&self) -> u32 {
         1u32 << self.sdf_channel
     }
+
+    fn is_generating_collision_surface(&self) -> bool {
+        true
+    }
 }
 
 /// Blocky colored-cube mesher wrapping the existing greedy-cubes free
-/// function. Reads the `Type` channel as 32-bit voxel ids, looks up each
+/// function. Reads the `Color` channel as 32-bit voxel ids, looks up each
 /// id in a [`ColorPalette`], and emits two surfaces (opaque + transparent)
 /// matching the C++ `VoxelMesherCubes` output.
 pub struct CubesMesher {
@@ -149,7 +159,7 @@ impl Default for CubesMesher {
 impl CubesMesher {
     pub fn new() -> Self {
         Self {
-            type_channel: ChannelId::Type.index(),
+            type_channel: ChannelId::Color.index(),
             palette: crate::meshers::cubes::palette::ColorPalette::default(),
             greedy: true,
         }
@@ -200,9 +210,19 @@ impl VoxelMesher for CubesMesher {
         let mut arrays: [crate::meshers::cubes::arrays::CubesArrays; MATERIAL_COUNT] =
             Default::default();
         if self.greedy {
-            crate::meshers::cubes::greedy::build_greedy_cubes(&mut arrays, &voxels, block_size, color_func);
+            crate::meshers::cubes::greedy::build_greedy_cubes(
+                &mut arrays,
+                &voxels,
+                block_size,
+                color_func,
+            );
         } else {
-            crate::meshers::cubes::simple::build_simple_cubes(&mut arrays, &voxels, block_size, color_func);
+            crate::meshers::cubes::simple::build_simple_cubes(
+                &mut arrays,
+                &voxels,
+                block_size,
+                color_func,
+            );
         }
 
         // Two surfaces: opaque (index 0) and transparent (index 1). Both are
@@ -229,6 +249,10 @@ impl VoxelMesher for CubesMesher {
     fn used_channels_mask(&self) -> u32 {
         1u32 << self.type_channel
     }
+
+    fn supports_lod(&self) -> bool {
+        false
+    }
 }
 
 /// Voxel-model blocky mesher wrapping the existing `blocky::mesher::generate_mesh`
@@ -252,7 +276,9 @@ pub struct BlockyMesher {
 impl BlockyMesher {
     /// Build a mesher around a pre-baked library. The library must already
     /// have run `blocky::bake_library` so its side-culling matrix is valid.
-    pub fn new(library: std::sync::Arc<crate::meshers::blocky::baked_library::BakedLibrary>) -> Self {
+    pub fn new(
+        library: std::sync::Arc<crate::meshers::blocky::baked_library::BakedLibrary>,
+    ) -> Self {
         Self {
             type_channel: ChannelId::Type.index(),
             library,
@@ -290,20 +316,35 @@ impl BlockyMesher {
 
 impl VoxelMesher for BlockyMesher {
     fn build(&mut self, output: &mut MesherOutput, input: &MesherInput<'_>) {
-        use crate::meshers::blocky::mesher::generate_mesh;
+        use crate::meshers::blocky::mesher::{generate_mesh, generate_mesh_with_collision};
         let voxels = Self::extract_voxel_slice(input.voxels, self.type_channel);
         let size = input.voxels.size();
         let material_count = self.library.indexed_materials_count.max(1) as usize;
         let mut arrays: Vec<crate::meshers::blocky::mesher::BlockyArrays> =
             (0..material_count).map(|_| Default::default()).collect();
-        generate_mesh(
-            &mut arrays,
-            &voxels,
-            size,
-            &self.library,
-            self.bake_occlusion,
-            self.baked_occlusion_darkness,
-        );
+        if input.collision_hint {
+            let mut collision_arrays = crate::meshers::blocky::mesher::BlockyArrays::default();
+            generate_mesh_with_collision(
+                &mut arrays,
+                &mut collision_arrays,
+                &voxels,
+                size,
+                &self.library,
+                self.bake_occlusion,
+                self.baked_occlusion_darkness,
+            );
+            output.collision_surface.positions = collision_arrays.positions;
+            output.collision_surface.indices = collision_arrays.indices;
+        } else {
+            generate_mesh(
+                &mut arrays,
+                &voxels,
+                size,
+                &self.library,
+                self.bake_occlusion,
+                self.baked_occlusion_darkness,
+            );
+        }
         for (material_index, arrays) in arrays.into_iter().enumerate() {
             output.surfaces.push(Surface::new(
                 SurfaceArrays::Blocky(arrays),
@@ -323,12 +364,23 @@ impl VoxelMesher for BlockyMesher {
     fn used_channels_mask(&self) -> u32 {
         1u32 << self.type_channel
     }
+
+    fn supports_lod(&self) -> bool {
+        false
+    }
+
+    fn is_generating_collision_surface(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{BlockyMesher, CubesMesher, TransvoxelMesher};
-    use crate::math::{Vector3f, Vector3i};
+    use crate::constants::cube_tables::{Side, CORNER_POSITION, SIDE_CORNERS, SIDE_QUAD_TRIANGLES};
+    use crate::math::{Vector2f, Vector3f, Vector3i};
+    use crate::meshers::blocky::baked_library::{BakedLibrary, BakedModel};
+    use crate::meshers::blocky::SideSurface;
     use crate::meshers::transvoxel::{MAX_PADDING, MIN_PADDING};
     use crate::meshers::{MesherInput, MesherOutput, SurfaceArrays, VoxelMesher};
     use crate::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
@@ -350,11 +402,10 @@ mod tests {
                     let ix = x as f32 - MIN_PADDING as f32;
                     let iy = y as f32 - MIN_PADDING as f32;
                     let iz = z as f32 - MIN_PADDING as f32;
-                    let distance = ((ix - centre).powi(2)
-                        + (iy - centre).powi(2)
-                        + (iz - centre).powi(2))
-                    .sqrt()
-                        - radius;
+                    let distance =
+                        ((ix - centre).powi(2) + (iy - centre).powi(2) + (iz - centre).powi(2))
+                            .sqrt()
+                            - radius;
                     buf.set_voxel_f(distance, x, y, z, ChannelId::Sdf.index());
                 }
             }
@@ -416,6 +467,22 @@ mod tests {
         assert_send_sync::<TransvoxelMesher>();
     }
 
+    #[test]
+    fn transvoxel_collision_hint_populates_collision_submesh_range() {
+        let mut mesher = TransvoxelMesher::new();
+        let voxels = sphere_buffer(16, 6.0);
+        let mut input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+        input.collision_hint = true;
+
+        let mut output = MesherOutput::default();
+        mesher.build(&mut output, &input);
+
+        assert!(mesher.is_generating_collision_surface());
+        assert!(output.total_triangle_count() > 0);
+        assert!(output.collision_surface.submesh_vertex_end > 0);
+        assert!(output.collision_surface.submesh_index_end > 0);
+    }
+
     /// Vertex positions should land in world space (origin_in_voxels offset
     /// applied). The transvoxel free function uses scaled block-local coords;
     /// the wrapper currently forwards them as-is — so for `lod_index==0` and
@@ -436,7 +503,12 @@ mod tests {
         let padded_extent = (16 + MIN_PADDING + MAX_PADDING) as f32;
         assert!(arrays.vertices.iter().all(|p| {
             let Vector3f { x, y, z } = *p;
-            x >= 0.0 && y >= 0.0 && z >= 0.0 && x < padded_extent && y < padded_extent && z < padded_extent
+            x >= 0.0
+                && y >= 0.0
+                && z >= 0.0
+                && x < padded_extent
+                && y < padded_extent
+                && z < padded_extent
         }));
     }
 
@@ -446,7 +518,7 @@ mod tests {
     fn cubes_input_buffer() -> VoxelBuffer {
         // Padded block: PADDING(1) interior 2³ + PADDING(1) on each side.
         let mut voxels = VoxelBuffer::with_size(Vector3i::splat(2 + 2));
-        let channel = ChannelId::Type.index();
+        let channel = ChannelId::Color.index();
         // Fill the interior (1..3)³ with voxel id 1.
         for z in 1..3 {
             for x in 1..3 {
@@ -498,7 +570,17 @@ mod tests {
         let mesher = CubesMesher::new();
         assert_eq!(mesher.minimum_padding(), 1);
         assert_eq!(mesher.maximum_padding(), 1);
-        assert_eq!(mesher.used_channels_mask(), 1u32 << ChannelId::Type.index());
+        assert_eq!(
+            mesher.used_channels_mask(),
+            1u32 << ChannelId::Color.index()
+        );
+    }
+
+    #[test]
+    fn cubes_mesher_reports_lod_unsupported_until_lod_inputs_are_used() {
+        let mesher = CubesMesher::new();
+
+        assert!(!mesher.supports_lod());
     }
 
     #[test]
@@ -521,11 +603,61 @@ mod tests {
         assert_send_sync::<CubesMesher>();
     }
 
-    fn empty_blocky_library() -> std::sync::Arc<crate::meshers::blocky::baked_library::BakedLibrary> {
+    fn empty_blocky_library() -> std::sync::Arc<crate::meshers::blocky::baked_library::BakedLibrary>
+    {
         // Default-constructed library is empty (no models), so the mesher
         // emits no geometry regardless of input. Useful for testing the
         // adapter wiring without pulling in the full bake pass.
         std::sync::Arc::new(crate::meshers::blocky::baked_library::BakedLibrary::default())
+    }
+
+    fn full_cube_side_surface(side: usize) -> SideSurface {
+        let positions: Vec<Vector3f> = SIDE_CORNERS[side]
+            .iter()
+            .map(|&corner| CORNER_POSITION[corner])
+            .collect();
+        let indices = SIDE_QUAD_TRIANGLES[side].to_vec();
+        let uvs = vec![
+            Vector2f::new(0.0, 0.0),
+            Vector2f::new(1.0, 0.0),
+            Vector2f::new(1.0, 1.0),
+            Vector2f::new(0.0, 1.0),
+        ];
+        SideSurface {
+            positions,
+            uvs,
+            indices,
+            tangents: Vec::new(),
+        }
+    }
+
+    fn full_cube_blocky_library(collision_enabled: bool) -> std::sync::Arc<BakedLibrary> {
+        let air = BakedModel::default();
+        let mut cube = BakedModel {
+            empty: false,
+            culls_neighbors: true,
+            contributes_to_ao: true,
+            ..Default::default()
+        };
+        cube.model.surface_count = 1;
+        cube.model.surfaces[0].material_id = 0;
+        cube.model.surfaces[0].collision_enabled = collision_enabled;
+        for side in 0..Side::COUNT {
+            cube.model.sides_surfaces[side][0] = full_cube_side_surface(side);
+        }
+        let mut library = BakedLibrary {
+            models: vec![air, cube],
+            indexed_materials_count: 1,
+            ..Default::default()
+        };
+        crate::meshers::blocky::bake_library(&mut library);
+        std::sync::Arc::new(library)
+    }
+
+    fn blocky_input_buffer() -> VoxelBuffer {
+        let mut voxels = VoxelBuffer::with_size(Vector3i::splat(3));
+        voxels.set_voxel(1, 1, 1, 1, ChannelId::Type.index());
+        voxels
     }
 
     #[test]
@@ -555,6 +687,45 @@ mod tests {
         assert_eq!(mesher.minimum_padding(), 1);
         assert_eq!(mesher.maximum_padding(), 1);
         assert_eq!(mesher.used_channels_mask(), 1u32 << ChannelId::Type.index());
+    }
+
+    #[test]
+    fn blocky_collision_hint_emits_enabled_surface_geometry() {
+        let mut mesher = BlockyMesher::new(full_cube_blocky_library(true));
+        let voxels = blocky_input_buffer();
+        let mut input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+        input.collision_hint = true;
+
+        let mut output = MesherOutput::default();
+        mesher.build(&mut output, &input);
+
+        assert!(mesher.is_generating_collision_surface());
+        assert!(output.total_triangle_count() > 0);
+        assert_eq!(output.collision_surface.positions.len(), 24);
+        assert_eq!(output.collision_surface.indices.len(), 36);
+    }
+
+    #[test]
+    fn blocky_collision_hint_skips_surfaces_with_collision_disabled() {
+        let mut mesher = BlockyMesher::new(full_cube_blocky_library(false));
+        let voxels = blocky_input_buffer();
+        let mut input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+        input.collision_hint = true;
+
+        let mut output = MesherOutput::default();
+        mesher.build(&mut output, &input);
+
+        assert!(mesher.is_generating_collision_surface());
+        assert!(output.total_triangle_count() > 0);
+        assert!(output.collision_surface.positions.is_empty());
+        assert!(output.collision_surface.indices.is_empty());
+    }
+
+    #[test]
+    fn blocky_mesher_reports_lod_unsupported_until_lod_inputs_are_used() {
+        let mesher = BlockyMesher::new(empty_blocky_library());
+
+        assert!(!mesher.supports_lod());
     }
 
     #[test]

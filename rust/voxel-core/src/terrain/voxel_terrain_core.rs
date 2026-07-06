@@ -19,13 +19,13 @@
 //! data_block_size` (factor 1). The factor abstraction is preserved in the
 //! helpers so a future patch can extend it without rewriting the hot path.
 
-use crate::engine::MeshingDependency;
+use crate::engine::{MeshingDependency, StreamingDependency};
 use crate::math::{Box3i, Vector3i};
-use crate::meshers::{
-    BlockMeshOutput, MeshBlockTask, MeshBlockTaskParams, MesherOutput,
+use crate::meshers::{BlockMeshOutput, MeshBlockTask, MeshBlockTaskParams, MesherOutput};
+use crate::storage::{BlockToSave, VoxelBuffer, VoxelData, VoxelDataBlock};
+use crate::streams::{
+    BlockDataOutput, BlockDataOutputKind, MemoryStream, SaveBlockDataTask, VoxelStream,
 };
-use crate::storage::{VoxelBuffer, VoxelData, VoxelDataBlock};
-use crate::streams::{BlockDataOutput, BlockDataOutputKind, MemoryStream, VoxelStream};
 use crate::tasks::{ThreadedTask, ThreadedTaskRunner};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -223,10 +223,7 @@ impl VoxelTerrainCore {
         let mut seen = Vec::with_capacity(viewers.len());
         for update in viewers {
             seen.push(update.id);
-            let paired = self
-                .paired_viewers
-                .iter_mut()
-                .find(|p| p.id == update.id);
+            let paired = self.paired_viewers.iter_mut().find(|p| p.id == update.id);
             let horizontal = update
                 .horizontal_view_distance_voxels
                 .min(self.max_view_distance_voxels);
@@ -266,11 +263,7 @@ impl VoxelTerrainCore {
                 paired.state.requires_meshes = false;
                 continue;
             }
-            compute_viewer_boxes(
-                &mut paired.state,
-                data_block_size,
-                mesh_block_size,
-            );
+            compute_viewer_boxes(&mut paired.state, data_block_size, mesh_block_size);
         }
 
         // Diff each viewer and apply view/unview operations. We collect the
@@ -330,7 +323,13 @@ impl VoxelTerrainCore {
         let mut found_positions = Vec::new();
         {
             let mut data = self.data.lock().expect("voxel data mutex poisoned");
-            data.view_area(box_to_load, 0, Some(&mut missing), Some(&mut found_positions), None);
+            data.view_area(
+                box_to_load,
+                0,
+                Some(&mut missing),
+                Some(&mut found_positions),
+                None,
+            );
         }
         for bpos in missing {
             // Track loading viewers so duplicates coalesce and cancelled
@@ -346,9 +345,20 @@ impl VoxelTerrainCore {
 
     fn apply_data_unview(&mut self, box_to_unload: Box3i) {
         let mut removed_positions = Vec::new();
+        let mut missing_positions = Vec::new();
+        let mut saves = Vec::new();
         {
             let mut data = self.data.lock().expect("voxel data mutex poisoned");
-            data.unview_area(box_to_unload, 0, Some(&mut removed_positions), None, None);
+            data.unview_area(
+                box_to_unload,
+                0,
+                Some(&mut removed_positions),
+                Some(&mut missing_positions),
+                Some(&mut saves),
+            );
+        }
+        for save in saves {
+            self.enqueue_data_save(save);
         }
         for bpos in removed_positions {
             self.stats.blocks_unloaded += 1;
@@ -357,6 +367,27 @@ impl VoxelTerrainCore {
             self.loading_blocks.remove(&bpos);
             self.blocks_pending_load.retain(|p| *p != bpos);
         }
+        for bpos in missing_positions {
+            if let Some(count) = self.loading_blocks.get_mut(&bpos) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    self.loading_blocks.remove(&bpos);
+                    self.blocks_pending_load.retain(|p| *p != bpos);
+                }
+            }
+        }
+    }
+
+    fn enqueue_data_save(&mut self, save: BlockToSave) {
+        let task = SaveBlockDataTask::new_voxels(
+            save.position,
+            save.lod_index,
+            save.voxels,
+            StreamingDependency::new(self.stream.clone()),
+            None,
+            false,
+        );
+        self.task_runner.enqueue(Box::new(task), false);
     }
 
     fn view_mesh_block(&mut self, bpos: Vector3i) {
@@ -454,16 +485,13 @@ impl VoxelTerrainCore {
         let completed = self
             .task_runner
             .drain_completed_tasks_and_enqueue_followups(false);
-        for task in completed {
-            // Discriminate load vs mesh tasks by their debug name.
-            let name = task.debug_name();
-            if name == "LoadBlockForTerrain" {
-                let_any_downcast_load(task).apply_to(self);
-            } else if name == "MeshBlockTask" {
-                let_any_downcast_mesh(task).apply_to(self);
-            } else {
-                // Unknown task type; drop silently. (Follow-up tasks
-                // produced by load tasks would land here in a richer port.)
+        for mut task in completed {
+            if let Some(output) = try_take_load_output(task.as_mut()) {
+                self.apply_data_block_response(output);
+            } else if let Some(output) = try_take_save_output(task.as_mut()) {
+                self.apply_data_block_response(output);
+            } else if let Some(output) = try_take_mesh_output(task) {
+                self.apply_mesh_update(output);
             }
         }
     }
@@ -508,8 +536,14 @@ impl VoxelTerrainCore {
                 let Some(voxels) = output.voxels else {
                     return;
                 };
-                self.loading_blocks.remove(&bpos);
+                let viewer_count = self.loading_blocks.remove(&bpos).unwrap_or(0);
+                if viewer_count == 0 {
+                    return;
+                }
                 let mut block = VoxelDataBlock::with_voxels(voxels, 0);
+                for _ in 0..viewer_count {
+                    block.viewers.add();
+                }
                 block.set_edited(true);
                 let inserted = {
                     let mut data = self.data.lock().expect("voxel data mutex poisoned");
@@ -631,11 +665,7 @@ impl BoxDiff for Box3i {
 
 /// Compute the data and mesh boxes for one viewer. Equivalent to C++
 /// `process_viewers` Step E.
-fn compute_viewer_boxes(
-    state: &mut ViewerState,
-    data_block_size: i32,
-    mesh_block_size: i32,
-) {
+fn compute_viewer_boxes(state: &mut ViewerState, data_block_size: i32, mesh_block_size: i32) {
     let _ = mesh_block_size; // factor == 1 for now
     if !state.requires_meshes {
         // No mesh wanted: just keep data resident around the viewer.
@@ -643,7 +673,8 @@ fn compute_viewer_boxes(
         let v_blocks = ceil_div(state.vertical_view_distance_voxels, data_block_size);
         let block_pos = floor_div_vec(state.local_position_voxels, data_block_size);
         state.mesh_box = Box3i::default();
-        state.data_box = Box3i::from_center_extents(block_pos, Vector3i::new(h_blocks, v_blocks, h_blocks));
+        state.data_box =
+            Box3i::from_center_extents(block_pos, Vector3i::new(h_blocks, v_blocks, h_blocks));
         return;
     }
 
@@ -709,10 +740,21 @@ impl LoadBlockForTerrainTask {
 }
 
 impl ThreadedTask for LoadBlockForTerrainTask {
-    fn run(mut self: Box<Self>, _ctx: crate::tasks::ThreadedTaskContext) -> crate::tasks::TaskRunOutcome {
+    fn run(
+        mut self: Box<Self>,
+        _ctx: crate::tasks::ThreadedTaskContext,
+    ) -> crate::tasks::TaskRunOutcome {
         // Try the stream first. If it has nothing, ask the generator.
-        let bs = self.data.lock().expect("voxel data mutex poisoned").block_size() as i32;
-        let format = self.data.lock().expect("voxel data mutex poisoned").format();
+        let bs = self
+            .data
+            .lock()
+            .expect("voxel data mutex poisoned")
+            .block_size() as i32;
+        let format = self
+            .data
+            .lock()
+            .expect("voxel data mutex poisoned")
+            .format();
         let mut voxels = VoxelBuffer::with_size(Vector3i::splat(bs));
         format.configure_buffer(&mut voxels);
         let query = crate::streams::VoxelLoadQuery::new(&mut voxels, self.position, 0);
@@ -755,44 +797,19 @@ impl ThreadedTask for LoadBlockForTerrainTask {
 /// and apply its output. Using a trait-object downcast would require `Any`
 /// bounds we don't want on `ThreadedTask`; we exploit the fact that
 /// `drain_completed_tasks` already filtered by `debug_name`.
-struct LoadApplier {
-    output: Option<BlockDataOutput>,
-}
-impl LoadApplier {
-    fn apply_to(self, terrain: &mut VoxelTerrainCore) {
-        if let Some(output) = self.output {
-            terrain.apply_data_block_response(output);
-        }
-    }
-}
-fn let_any_downcast_load(task: Box<dyn ThreadedTask>) -> LoadApplier {
-    // SAFETY-equivalent: we know the concrete type from `debug_name()`.
-    // Re-box via a raw pointer cast because Rust's trait objects can't be
-    // moved out otherwise. This mirrors the `Box<dyn Any>::downcast` pattern
-    // without requiring `Any` on the public trait.
-    let raw = Box::into_raw(task);
-    let concrete = unsafe { Box::from_raw(raw as *mut LoadBlockForTerrainTask) };
-    LoadApplier {
-        output: concrete.output,
-    }
+fn try_take_load_output(task: &mut dyn ThreadedTask) -> Option<BlockDataOutput> {
+    let task = (task as &mut dyn std::any::Any).downcast_mut::<LoadBlockForTerrainTask>()?;
+    task.output.take()
 }
 
-struct MeshApplier {
-    output: Option<BlockMeshOutput>,
+fn try_take_save_output(task: &mut dyn ThreadedTask) -> Option<BlockDataOutput> {
+    let task = (task as &mut dyn std::any::Any).downcast_mut::<SaveBlockDataTask>()?;
+    task.take_output()
 }
-impl MeshApplier {
-    fn apply_to(self, terrain: &mut VoxelTerrainCore) {
-        if let Some(output) = self.output {
-            terrain.apply_mesh_update(output);
-        }
-    }
-}
-fn let_any_downcast_mesh(task: Box<dyn ThreadedTask>) -> MeshApplier {
-    let raw = Box::into_raw(task);
-    let mut concrete = unsafe { Box::from_raw(raw as *mut MeshBlockTask) };
-    MeshApplier {
-        output: concrete.take_output(),
-    }
+
+fn try_take_mesh_output(mut task: Box<dyn ThreadedTask>) -> Option<BlockMeshOutput> {
+    let task = (task.as_mut() as &mut dyn std::any::Any).downcast_mut::<MeshBlockTask>()?;
+    task.take_output()
 }
 
 #[cfg(test)]
@@ -802,6 +819,8 @@ mod tests {
     use crate::generators::simple::Flat;
     use crate::meshers::{MesherOutput, Surface, SurfaceArrays, VoxelMesher};
     use crate::storage::{ChannelId, VoxelData};
+    use crate::streams::LoadResult;
+    use crate::tasks::{TaskRunOutcome, ThreadedTask, ThreadedTaskContext};
     use std::sync::Mutex;
 
     /// A mesher that always emits one triangle, so we can tell from
@@ -813,7 +832,9 @@ mod tests {
             let a = arrays.add_vertex(
                 crate::math::Vector3f::zero(),
                 crate::math::Vector3f::new(0.0, 1.0, 0.0),
-                0, 0, 0,
+                0,
+                0,
+                0,
                 crate::math::Vector3f::zero(),
             );
             arrays.indices.extend_from_slice(&[a, a, a]);
@@ -823,12 +844,25 @@ mod tests {
         }
     }
 
+    struct DebugNameCollisionTask;
+
+    impl ThreadedTask for DebugNameCollisionTask {
+        fn run(self: Box<Self>, _ctx: ThreadedTaskContext) -> TaskRunOutcome {
+            TaskRunOutcome::Complete(self)
+        }
+
+        fn debug_name(&self) -> &'static str {
+            "MeshBlockTask"
+        }
+    }
+
     fn build_core() -> VoxelTerrainCore {
+        build_core_with_stream(Arc::new(MemoryStream::new()))
+    }
+
+    fn build_core_with_stream(stream: Arc<dyn VoxelStream>) -> VoxelTerrainCore {
         let mut data = VoxelData::new();
-        data.set_bounds(Box3i::new(
-            Vector3i::splat(-1024),
-            Vector3i::splat(2048),
-        ));
+        data.set_bounds(Box3i::new(Vector3i::splat(-1024), Vector3i::splat(2048)));
         let flat = Flat {
             channel: ChannelId::Sdf,
             ..Flat::default()
@@ -839,7 +873,7 @@ mod tests {
         let mesher: Arc<Mutex<Box<dyn VoxelMesher>>> =
             Arc::new(Mutex::new(Box::new(AlwaysOneTriangleMesher)));
         let meshing_dependency = MeshingDependency::new(mesher, None);
-        VoxelTerrainCore::new_generator_only(data, meshing_dependency)
+        VoxelTerrainCore::new(data, stream, meshing_dependency)
     }
 
     #[test]
@@ -868,7 +902,10 @@ mod tests {
                 .any(|e| matches!(e, VoxelTerrainEvent::MeshBlockEntered(_))),
             "expected a mesh to be produced, events were {events:?}"
         );
-        assert!(core.mesh_blocks().get(&Vector3i::zero()).is_some_and(|e| e.is_loaded));
+        assert!(core
+            .mesh_blocks()
+            .get(&Vector3i::zero())
+            .is_some_and(|e| e.is_loaded));
         assert!(core.stats.blocks_loaded > 0);
     }
 
@@ -913,6 +950,86 @@ mod tests {
     }
 
     #[test]
+    fn unloading_modified_data_block_saves_it_to_stream() {
+        let stream = Arc::new(MemoryStream::new());
+        let mut core = build_core_with_stream(stream.clone());
+        let bs = core.data_block_size();
+        let channel = ChannelId::Type.index();
+        let edited_voxel = Vector3i::new(1, 1, 1);
+
+        let viewer = vec![ViewerUpdate {
+            id: 1,
+            world_position_voxels: Vector3i::zero(),
+            horizontal_view_distance_voxels: bs,
+            vertical_view_distance_voxels: bs,
+            requires_meshes: true,
+        }];
+        core.process(&viewer);
+
+        {
+            let data = core.data();
+            let mut data = data.lock().expect("voxel data mutex poisoned");
+            assert!(data.try_set_voxel(77, edited_voxel, channel));
+            data.mark_area_modified(Box3i::new(edited_voxel, Vector3i::splat(1)), false);
+        }
+
+        core.process(&[]);
+
+        let mut loaded = VoxelBuffer::new(crate::storage::Allocator::Default);
+        assert_eq!(
+            stream.load_block(Vector3i::zero(), 0, &mut loaded),
+            LoadResult::Found
+        );
+        assert_eq!(loaded.get_voxel(1, 1, 1, channel), 77);
+    }
+
+    #[test]
+    fn loaded_blocks_keep_viewer_refs_from_coalesced_pending_loads() {
+        let mut core = build_core();
+        let bs = core.data_block_size();
+
+        let two_viewers = vec![
+            ViewerUpdate {
+                id: 1,
+                world_position_voxels: Vector3i::zero(),
+                horizontal_view_distance_voxels: bs,
+                vertical_view_distance_voxels: bs,
+                requires_meshes: true,
+            },
+            ViewerUpdate {
+                id: 2,
+                world_position_voxels: Vector3i::zero(),
+                horizontal_view_distance_voxels: bs,
+                vertical_view_distance_voxels: bs,
+                requires_meshes: true,
+            },
+        ];
+        core.process(&two_viewers);
+
+        let one_viewer = vec![ViewerUpdate {
+            id: 1,
+            world_position_voxels: Vector3i::zero(),
+            horizontal_view_distance_voxels: bs,
+            vertical_view_distance_voxels: bs,
+            requires_meshes: true,
+        }];
+        core.process(&one_viewer);
+
+        let data = core.data();
+        let data = data.lock().expect("voxel data mutex poisoned");
+        let origin_block = data
+            .get_block(Vector3i::zero(), 0)
+            .expect("origin block should stay loaded while one viewer still references it");
+        assert_eq!(origin_block.viewers.get(), 1);
+    }
+
+    #[test]
+    fn mesh_task_output_downcast_rejects_debug_name_collision() {
+        let task: Box<dyn ThreadedTask> = Box::new(DebugNameCollisionTask);
+        assert!(try_take_mesh_output(task).is_none());
+    }
+
+    #[test]
     fn box_difference_returns_removing_slabs() {
         // Subtraction of a centred inner box from an outer box yields the
         // 6 surrounding slabs. Verify the helper used by paging diffs.
@@ -951,4 +1068,3 @@ mod tests {
 
 // Keep the `VoxelBuffer` import used by the load task even though tests
 // don't exercise it directly.
-

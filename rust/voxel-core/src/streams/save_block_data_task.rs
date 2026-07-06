@@ -124,11 +124,11 @@ impl SaveBlockDataTask {
         }
 
         self.has_run = true;
-        self.output = Some(BlockDataOutput::saved(
-            self.position_in_blocks,
-            self.lod_index,
-            self.had_voxels,
-        ));
+        self.output = Some(if self.stream_error.is_some() {
+            BlockDataOutput::saved_dropped(self.position_in_blocks, self.lod_index, self.had_voxels)
+        } else {
+            BlockDataOutput::saved(self.position_in_blocks, self.lod_index, self.had_voxels)
+        });
     }
 }
 
@@ -166,6 +166,7 @@ mod tests {
     use crate::storage::{ChannelId, VoxelBuffer};
     use crate::streams::{
         BlockDataOutputKind, LoadResult, MemoryStream, StreamResult, VoxelSaveQuery, VoxelStream,
+        VoxelStreamError,
     };
     use crate::tasks::{
         AsyncDependencyTracker, TaskPriority, TaskRunOutcome, ThreadedTask, ThreadedTaskContext,
@@ -206,6 +207,14 @@ mod tests {
         fn flush(&self) -> StreamResult<()> {
             self.flushes.fetch_add(1, Ordering::SeqCst);
             Ok(())
+        }
+    }
+
+    struct ErrorSaveStream;
+
+    impl VoxelStream for ErrorSaveStream {
+        fn save_voxel_block(&self, _query: VoxelSaveQuery<'_>) -> StreamResult<()> {
+            Err(VoxelStreamError::Io("save failed".to_string()))
         }
     }
 
@@ -345,6 +354,33 @@ mod tests {
         assert_eq!(tracker.remaining_count(), 1);
         assert_eq!(stream.saves(), 0);
         assert_eq!(stream.flushes(), 0);
+    }
+
+    #[test]
+    fn save_stream_error_emits_dropped_output_and_exposes_error() {
+        let stream: Arc<dyn VoxelStream> = Arc::new(ErrorSaveStream);
+        let dependency = StreamingDependency::new(stream);
+        let mut task = SaveBlockDataTask::new_voxels(
+            Vector3i::default(),
+            0,
+            Some(filled_buffer(1)),
+            dependency,
+            None,
+            false,
+        );
+
+        task.run_save();
+        let output = task.take_output().unwrap();
+
+        assert_eq!(output.kind, BlockDataOutputKind::Saved);
+        assert!(output.dropped);
+        assert!(output.voxels.is_none());
+        assert!(output.had_voxels);
+        assert!(task.has_run());
+        assert!(matches!(
+            task.stream_error(),
+            Some(VoxelStreamError::Io(message)) if message == "save failed"
+        ));
     }
 
     #[test]

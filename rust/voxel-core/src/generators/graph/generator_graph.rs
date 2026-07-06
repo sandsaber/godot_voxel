@@ -8,7 +8,7 @@
 
 use crate::generators::base::{GenResult, VoxelGenerator, VoxelQueryData};
 use crate::generators::graph::{
-    GraphInputs, GraphOutput, GraphScratch, Graph, GraphNodeId, NodeKind,
+    Graph, GraphInputs, GraphNodeId, GraphOutput, GraphScratch, NodeKind,
 };
 use crate::math::Vector3i;
 use crate::storage::voxel_buffer::ChannelId;
@@ -86,7 +86,7 @@ pub fn generate_block_with_graph(
     let size = input.buffer.size();
     let sdf_channel = ChannelId::Sdf.index();
     let lod = input.lod;
-    let stride = (1u32 << lod) as f32 * coordinate_scale;
+    let lod_stride = (1u32 << lod) as f32;
 
     // Pre-allocated scratch buffers for the per-slice X/Z world coordinates.
     // Reused across Y-slices to avoid reallocation. The slice has
@@ -97,15 +97,17 @@ pub fn generate_block_with_graph(
     let mut outputs: Vec<(GraphOutput, Vec<f32>)> = Vec::new();
 
     for y in 0..size.y {
-        let world_y = (input.origin_in_voxels.y + y) as f32 * stride;
+        let world_y = (input.origin_in_voxels.y as f32 + y as f32 * lod_stride) * coordinate_scale;
         // Build the X and Z slices. ZXY layout: for each z, for each x, the
         // voxel index is `y + size.y * (x + size.x * z)` — but we only need
         // the world-space (x, z) per slice cell, which is independent of y.
         for z in 0..size.z {
             for x in 0..size.x {
                 let i = (x as usize) + (z as usize) * (size.x as usize);
-                xs[i] = (input.origin_in_voxels.x + x) as f32 * stride;
-                zs[i] = (input.origin_in_voxels.z + z) as f32 * stride;
+                xs[i] =
+                    (input.origin_in_voxels.x as f32 + x as f32 * lod_stride) * coordinate_scale;
+                zs[i] =
+                    (input.origin_in_voxels.z as f32 + z as f32 * lod_stride) * coordinate_scale;
             }
         }
 
@@ -114,7 +116,10 @@ pub fn generate_block_with_graph(
             y: world_y,
             z: &zs,
         };
-        if graph.generate(&inputs, slice_size, scratch, &mut outputs).is_err() {
+        if graph
+            .generate(&inputs, slice_size, scratch, &mut outputs)
+            .is_err()
+        {
             // Topology error: bail out (matches the C++ behaviour of
             // printing an error and leaving the block at its default).
             return;
@@ -129,7 +134,13 @@ pub fn generate_block_with_graph(
     }
 }
 
-fn write_sdf_slice(buffer: &mut VoxelBuffer, channel: usize, size: Vector3i, y: i32, slice: &[f32]) {
+fn write_sdf_slice(
+    buffer: &mut VoxelBuffer,
+    channel: usize,
+    size: Vector3i,
+    y: i32,
+    slice: &[f32],
+) {
     for z in 0..size.z {
         for x in 0..size.x {
             let i = (x as usize) + (z as usize) * (size.x as usize);
@@ -253,6 +264,30 @@ mod tests {
         assert_eq!(buffer.get_voxel_f(0, 0, 0, ChannelId::Sdf.index()), 20.0);
         // Voxel (1,0,0) gets world X 11*2 = 22.
         assert_eq!(buffer.get_voxel_f(1, 0, 0, ChannelId::Sdf.index()), 22.0);
+    }
+
+    #[test]
+    fn lod_stride_scales_local_coordinates_without_scaling_origin() {
+        let mut graph = Graph::new();
+        let x = graph.push(NodeKind::InputX);
+        graph.push(NodeKind::OutputSdf {
+            a: Some(GraphPort::new(x)),
+        });
+        let mut generator = GraphGenerator::new(graph);
+
+        let mut buffer = VoxelBuffer::with_size(Vector3i::new(2, 1, 1));
+        let mut format = VoxelFormat::new();
+        format.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+        format.configure_buffer(&mut buffer);
+
+        let _ = generator.generate_block(VoxelQueryData {
+            buffer: &mut buffer,
+            origin_in_voxels: Vector3i::new(10, 0, 0),
+            lod: 1,
+        });
+
+        assert_eq!(buffer.get_voxel_f(0, 0, 0, ChannelId::Sdf.index()), 10.0);
+        assert_eq!(buffer.get_voxel_f(1, 0, 0, ChannelId::Sdf.index()), 12.0);
     }
 
     #[test]

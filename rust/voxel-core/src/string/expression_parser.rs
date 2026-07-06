@@ -40,7 +40,10 @@ pub enum Node {
     /// [`Function`] table. The parser caps arguments at 4 (matching the C++
     /// `FixedArray<UniquePtr<Node>, 4>`); callers wanting more should extend
     /// the parser.
-    Function { function_id: u32, args: Vec<Box<Node>> },
+    Function {
+        function_id: u32,
+        args: Vec<Box<Node>>,
+    },
 }
 
 /// Built-in error categories. Matches `ExpressionParser::ErrorID`.
@@ -212,11 +215,30 @@ pub fn is_tree_equal(a: &Node, b: &Node) -> bool {
         (Node::Number(x), Node::Number(y)) => x.to_bits() == y.to_bits(),
         (Node::Variable(x), Node::Variable(y)) => x == y,
         (
-            Node::Operator { op: op_a, n0: a0, n1: a1 },
-            Node::Operator { op: op_b, n0: b0, n1: b1 },
+            Node::Operator {
+                op: op_a,
+                n0: a0,
+                n1: a1,
+            },
+            Node::Operator {
+                op: op_b,
+                n0: b0,
+                n1: b1,
+            },
         ) => op_a == op_b && is_tree_equal(a0, b0) && is_tree_equal(a1, b1),
-        (Node::Function { function_id: id_a, args: aa }, Node::Function { function_id: id_b, args: ba }) => {
-            id_a == id_b && aa.len() == ba.len() && aa.iter().zip(ba).all(|(x, y)| is_tree_equal(x, y))
+        (
+            Node::Function {
+                function_id: id_a,
+                args: aa,
+            },
+            Node::Function {
+                function_id: id_b,
+                args: ba,
+            },
+        ) => {
+            id_a == id_b
+                && aa.len() == ba.len()
+                && aa.iter().zip(ba).all(|(x, y)| is_tree_equal(x, y))
         }
         _ => false,
     }
@@ -329,8 +351,7 @@ impl<'a> Tokenizer<'a> {
         }
         // Names are ASCII-only (the C++ parser matches `[A-Za-z_]` then
         // `[A-Za-z0-9_]`); using `from_utf8` here is safe in practice.
-        String::from_utf8(self.chars[start..self.position].to_vec())
-            .unwrap_or_default()
+        String::from_utf8(self.chars[start..self.position].to_vec()).unwrap_or_default()
     }
 
     fn take_number(&mut self) -> Result<f32, ()> {
@@ -360,8 +381,8 @@ impl<'a> Tokenizer<'a> {
         let mut value = int_part;
         if float_end != int_end {
             // Decimal part after the `.`.
-            let decimal_text = std::str::from_utf8(&self.chars[int_end + 1..float_end])
-                .map_err(|_| ())?;
+            let decimal_text =
+                std::str::from_utf8(&self.chars[int_end + 1..float_end]).map_err(|_| ())?;
             if !decimal_text.is_empty() {
                 let decimals: f32 = decimal_text.parse::<f32>().map_err(|_| ())?;
                 let scale = 10f32.powi(decimal_text.len() as i32);
@@ -465,7 +486,9 @@ fn parse_expression(
             let precedence = precedence_base + op_precedence(op);
             while let Some(last) = operations_stack.last() {
                 if precedence <= last.precedence {
-                    if let Err(id) = pop_expression_operator(&mut operations_stack, &mut operand_stack) {
+                    if let Err(id) =
+                        pop_expression_operator(&mut operations_stack, &mut operand_stack)
+                    {
                         return ParseResult {
                             root: None,
                             error: Error::new(id, tokenizer.position()),
@@ -489,11 +512,12 @@ fn parse_expression(
             let mut is_function_call = false;
             if let Some(back) = operand_stack.last() {
                 if matches!(back.as_ref(), Node::Variable(_)) {
-                    let fn_name = if let Node::Variable(name) = operand_stack.pop().unwrap().as_ref() {
-                        name.clone()
-                    } else {
-                        unreachable!()
-                    };
+                    let fn_name =
+                        if let Node::Variable(name) = operand_stack.pop().unwrap().as_ref() {
+                            name.clone()
+                        } else {
+                            unreachable!()
+                        };
                     match parse_function(tokenizer, fn_name, functions) {
                         Ok(node) => operand_stack.push(Box::new(node)),
                         Err(error) => {
@@ -601,7 +625,8 @@ fn parse_function(
                 &name,
             ));
         };
-        if matches!(last_token, Token::ParenthesisClose) && arg_index + 1 < function.argument_count {
+        if matches!(last_token, Token::ParenthesisClose) && arg_index + 1 < function.argument_count
+        {
             return Err(Error::with_symbol(
                 ErrorId::TooFewArguments,
                 tokenizer.position(),
@@ -662,7 +687,9 @@ fn precompute_constants(node: Box<Node>, functions: &[Function]) -> Box<Node> {
                 .into_iter()
                 .map(|a| precompute_constants(a, functions))
                 .collect();
-            let all_constant = folded_args.iter().all(|a| matches!(a.as_ref(), Node::Number(_)));
+            let all_constant = folded_args
+                .iter()
+                .all(|a| matches!(a.as_ref(), Node::Number(_)));
             if all_constant {
                 if let Some(f) = functions.iter().find(|f| f.id == function_id) {
                     if let Some(callback) = f.func {
@@ -828,7 +855,10 @@ mod tests {
         let root = result.root.unwrap();
         let mut vars = Vec::new();
         find_variables(&root, &mut vars);
-        assert_eq!(vars, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+        assert_eq!(
+            vars,
+            vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
     }
 
     #[test]

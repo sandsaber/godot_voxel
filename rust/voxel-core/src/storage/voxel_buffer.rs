@@ -1231,7 +1231,10 @@ mod tests {
         assert_eq!(dst.get_voxel(0, 0, 0, channel), 7);
         // SDF channel was uniform on both ends with equal defaults → untouched,
         // stays uniform (no allocation).
-        assert_eq!(dst.channel_compression(ChannelId::Sdf.index()), Compression::Uniform);
+        assert_eq!(
+            dst.channel_compression(ChannelId::Sdf.index()),
+            Compression::Uniform
+        );
     }
 
     #[test]

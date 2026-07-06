@@ -14,5 +14,7 @@ pub mod regular;
 pub mod regular_tables;
 pub mod structures;
 
-pub use regular::{build_regular_mesh, BuildRegularMeshParams, RegularMesherInput, MAX_PADDING, MIN_PADDING};
+pub use regular::{
+    build_regular_mesh, BuildRegularMeshParams, RegularMesherInput, MAX_PADDING, MIN_PADDING,
+};
 pub use structures::{Cache, MeshArrays, ReuseCell};

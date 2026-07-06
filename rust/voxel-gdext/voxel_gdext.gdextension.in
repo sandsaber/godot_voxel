@@ -15,7 +15,7 @@ reloadable = true
 # Linux x86_64:
 linux.x86_64 = "res://rust/target/debug/libvoxel_gdext.so"
 # macOS (universal arm64+x86_64 if you lipo them; here arm64):
-macos = "res://rust/target/release/libvoxel_gdext.dylib"
+macos = "res://rust/target/debug/libvoxel_gdext.dylib"
 # Windows x86_64:
 windows.x86_64 = "res://rust/target/debug/voxel_gdext.dll"
 # Android arm64 (device) + x86_64 (emulator). Built with the NDK via
