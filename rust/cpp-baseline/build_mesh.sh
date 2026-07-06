@@ -59,12 +59,14 @@ cp "$REPO/meshers/transvoxel/transvoxel_tables.cpp"        "$BUILD/meshers/trans
 cp "$REPO/meshers/transvoxel/transvoxel_materials_null.h"  "$BUILD/meshers/transvoxel/"
 # Trim transvoxel.cpp: keep includes + inner template (1-602), drop transition/
 # dispatcher (604-1553), keep the namespace close (re-added manually).
-head -n 602 "$REPO/meshers/transvoxel/transvoxel.cpp" > "$BUILD/meshers/transvoxel/transvoxel.cpp"
+TRANSVOXEL_CPP="$BUILD/meshers/transvoxel/transvoxel.cpp"
+head -n 602 "$REPO/meshers/transvoxel/transvoxel.cpp" > "$TRANSVOXEL_CPP"
 # Drop the unused mixel4/single_s4 material includes (lines 8-9) — they pull in
 # Godot APIs and we only use NullProcessor.
-sed -i '/transvoxel_materials_mixel4.h/d; /transvoxel_materials_single_s4.h/d' "$BUILD/meshers/transvoxel/transvoxel.cpp"
+sed '/transvoxel_materials_mixel4.h/d; /transvoxel_materials_single_s4.h/d' "$TRANSVOXEL_CPP" > "$TRANSVOXEL_CPP.tmp"
+mv "$TRANSVOXEL_CPP.tmp" "$TRANSVOXEL_CPP"
 # Re-close the namespace (the original close was at the file's end we trimmed).
-printf '\n} // namespace zylann::voxel::transvoxel\n' >> "$BUILD/meshers/transvoxel/transvoxel.cpp"
+printf '\n} // namespace zylann::voxel::transvoxel\n' >> "$TRANSVOXEL_CPP"
 
 # -----------------------------------------------------------------------
 # STUB headers. These shadow the Godot-dependent originals by sitting at the
@@ -387,7 +389,7 @@ if [ "$REGENERATE" = "1" ]; then
         echo "regenerating $out (inner=$inner, radius=$radius)..."
         "$BUILD/dump_mesh" "$inner" "$radius" "$out"
     done
-    echo "done. Compare with the previous (Rust-generated) goldens, then commit."
+    echo "done. Inspect the C++ golden diff, then commit."
 else
     # Default: run the 16-sphere — timing to stderr, JSON to stdout.
     "$BUILD/dump_mesh" 16 6.0

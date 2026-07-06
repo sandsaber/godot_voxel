@@ -21,11 +21,10 @@ use crate::storage::{ChannelId, VoxelBuffer};
 
 /// `RegularMesherInput` adapter over a [`VoxelBuffer`]'s SDF channel.
 ///
-/// The transvoxel algorithm uses the convention "positive SDF = inside
-/// solid" (the C++ `sdf_as_float` negates the snorm-stored value). The Rust
-/// `VoxelBuffer` stores SDF with the opposite convention ("positive =
-/// outside", matching `SDF_FAR_OUTSIDE = +100`), so the adapter negates on
-/// read — same as C++ `sdf_as_float`.
+/// C++ `build_regular_mesh` reads raw engine SDF values for its fast early-out,
+/// then uses `sdf_as_float` for case selection, interpolation and normals. This
+/// adapter exposes the converted `sdf_as_float` value; the Rust mesher mirrors
+/// the raw early-out by inverting that converted sign internally.
 struct VoxelBufferTransvoxelInput<'a> {
     buffer: &'a VoxelBuffer,
     sdf_channel: usize,
@@ -60,7 +59,7 @@ impl<'a> RegularMesherInput for VoxelBufferTransvoxelInput<'a> {
         let rem = data_index % (sx * sy);
         let x = rem / sy;
         let y = rem % sy;
-        // Negate to flip "positive = outside" into "positive = inside".
+        // Match C++ `sdf_as_float(float)`.
         -self
             .buffer
             .get_voxel_f(x as i32, y as i32, z as i32, self.sdf_channel)

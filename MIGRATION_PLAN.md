@@ -263,10 +263,10 @@ godot_voxel (fork)
 | 2026-07-03 | 0.5-0.6: transvoxel mesher (regular-cell) | ✅ 29/29 тестов проходят, mesh генерируется на SDF-сфере |
 | 2026-07-03 | 0.8: criterion benches (16³/32³/64³) | ✅ Rust floor: 147–238 Melem/s. C++ compare pending |
 | 2026-07-03 | 0.9: Android NDK cross-compile (H4) | ✅ `.a` + `.so` для aarch64/x86_64-android; +Apple arm64 `.a` с Linux |
-| 2026-07-03 | 0.7: parity framework + self-consistent golden | ✅ GoldenMesh JSON + comparator, sphere_16/32 |
+| 2026-07-03 | 0.7: parity framework + initial Rust self-consistency golden | ✅ GoldenMesh JSON + comparator, sphere_16/32; superseded by C++ goldens on 2026-07-06 |
 | 2026-07-03 | 0.7 (real C++): table parity | ✅ Rust-таблицы byte-identical upstream C++ (`transvoxel_tables_parity`) |
-| 2026-07-03 | 0.10: REPORT.md | ✅ Conditional GO; подробности в `REPORT.md` |
-| 2026-07-04 | 0.7 (mesh parity vs C++) + 0.8 (C++ perf baseline) | ✅ C++ harness (без godot-cpp, через stub-tree). **H1 partial**: позиции вершин совпадают (606=606), треугольников поровну (1304), но reuse-cache даёт 888 vs 840 вершин и 434/1304 треугольника расходятся в winding. **H2 PASS**: Rust 28.5µs/143Melem/s vs C++ 44.1µs/93Mvoxels/s (~1.5× быстрее). Детали в `rust/cpp-baseline/README.md` |
+| 2026-07-03 | 0.10: REPORT.md | ✅ Initial GO/NO-GO report; superseded by H1 pass update on 2026-07-06 |
+| 2026-07-04 | 0.7 (mesh parity vs C++) + 0.8 (C++ perf baseline) | ✅ C++ harness (без godot-cpp, через stub-tree). Первичный прогон выявил divergence в H1, H2 PASS: Rust 28.5µs/143Melem/s vs C++ 44.1µs/93Mvoxels/s (~1.5× быстрее). Детали в `rust/cpp-baseline/README.md` |
 | 2026-07-04 | Фаза 2 mobile-half: voxel-gdext Android `.so` (NDK r29) | ✅ `libvoxel_gdext.so` собран для aarch64 (3.2 MB) **и** x86_64-android (3.2 MB, эмулятор), оба экспортируют `gdext_rust_init`. `rust/scripts/android-build.sh` расширен: дефолт — gdext `.so`, `--core` — voxel-core; `CC`/`CXX` пробрасываются в `godot-cpp`. `.gdextension.in` дополнен `android.x86_64` |
 | 2026-07-04 | Фаза 3: `format::vox` (MagicaVoxel `.vox` парсер) | ✅ +23 теста, total 244. `streams/vox/vox_data.{h,cpp}` → `voxel-core/src/format/vox/{data,parser,tests}.rs`. Чистый Rust, ноль новых зависимостей; `&[u8]` cursor вместо `FileAccess`, `Node` enum вместо C++ inheritance, rotation-byte→Basis3f decode с fallback для out-of-spec байт |
 | 2026-07-04 | Фаза 3: `streams::instance_data` + io fallible API | ✅ +13 тестов, total 257. `streams/instance_data.{h,cpp}` → `voxel-core/src/streams/instance_data.rs`. Расширение `MemoryReader`: `try_get_*`/`try_take` (Option, без panic) + `set_endianness` для v0 big-endian backcompat. `DeserializeError` enum, round-trip с quantization tolerance |
@@ -285,12 +285,14 @@ godot_voxel (fork)
 | 2026-07-05 | Фаза 1 closure: `string::expression_parser` | ✅ total 578 unit + 5 e2e. Закрыт последний отложенный пункт Фазы 1 — `util/string/expression_parser.{h,cpp}` (~980 LOC C++) → Rust. Recursive-descent parser с operator-precedence stack, AST `enum Node { Number/Variable/Operator/Function }` с `Box<Node>` children (idiomatic Rust, без `Box<dyn>`), `precompute_constants` constant-folding, `find_variables`, `tree_to_string`, `is_tree_equal`. Открывает `generators::graph` runtime (graph compiler lowering). 14 тестов покрывают parsing + folding + error paths + variable extraction + structural compare |
 | 2026-07-05 | Фаза 4: `generators::graph` runtime | ✅ total 593 unit + 5 e2e. Engine-agnostic runtime для procedural graph generator: AST-walker интерпретатор (`Graph` topology + `NodeKind` enum с InputX/Y/Z, Constant, Add/Sub/Mul/Div, Sin/Cos/Abs/Sqrt, Min/Max, Remap, OutputSdf), topological sort с cycle detection, `GraphGenerator` impl `VoxelGenerator` (Y-slice loop, SDF output). 15 тестов покрывают topology, evaluation, cycle detection, defaults, generator adapter. Подход проще C++ bytecode VM (быстрее в реализации, та же публичная API). Curve/Image/Noise/SDF nodes, range analysis, FastNoise2, Expression node, bytecode VM — отложены |
 | 2026-07-05 | Фаза 4: graph extensions + Cubes/Blocky mesher adapters | ✅ total 610 unit + 5 e2e. (1) `generators::graph` расширен 16 узлами: SDF (Plane/Box/Sphere/Torus/Union/Subtract/SmoothUnion/SmoothSubtract), Curve (baked lookup), Noise2D/3D (fastnoise-lite через NoiseConfig), math (Floor/Fract/Pow/Mix/Clamp/Distance2D/3D/Normalize3D). Все используют существующие `math::sdf` функции + `simple::Curve`/`NoiseConfig`. (2) `CubesMesher` adapter (VoxelMesher trait) — оборачивает greedy/simple cubes free functions, palette + opaque/transparent material split. (3) `BlockyMesher` adapter — оборачивает `blocky::mesher::generate_mesh`, shared `Arc<BakedLibrary>`, AO. Трио mesher adapters (Transvoxel/Cubes/Blocky) полностью готовы. 17 тестов (9 graph extensions + 4 CubesMesher + 3 BlockyMesher + empty-library edge) |
+| 2026-07-06 | H1 full regular-mesh parity closed on macOS | ✅ C++ `transvoxel_sphere_16/32` goldens committed (`godot_voxel-cpp`): sphere_16 888 verts / 3912 idx, sphere_32 3696 verts / 18600 idx. Rust `transvoxel_parity` now passes against C++ goldens with exact structural fields and float tolerance. Root cause: C++ early-out uses raw SDF comparison, while case/interpolation use `sdf_as_float`; Rust now mirrors that split. `build_mesh.sh` fixed for macOS (`./build_mesh.sh`, BSD-sed-safe) |
 
 ### Где остановились (для возобновления)
 
-**Phase 0 — conditional GO, не full byte-parity.** H2 проверен C++ harness'ем
-без godot-cpp (stub-tree approach) и проходит; H1 остаётся partial: позиции и
-число треугольников совпадают, но vertex reuse/winding расходятся. Фаза 1
+**Phase 0 — GO.** H1 regular-mesh parity и H2 performance проверены C++ harness'ем
+без godot-cpp (stub-tree approach) и проходят: C++ goldens committed, Rust
+`transvoxel_parity` воспроизводит их с точными structural fields и float tolerance.
+Фаза 1
 (`util/*`) — полностью портирована (191 тест).
 Фаза 2 desktop-half — закрыт: `voxel-gdext` грузится в Godot 4.7, класс
 `VoxelRustHello` виден в GDScript, достигает `voxel_core::VERSION` через FFI.
@@ -301,22 +303,21 @@ godot_voxel (fork)
 End-to-end: generator → VoxelData → MeshBlockTask → TransvoxelMesher → MesherOutput.
 Paging: VoxelTerrainCore orchestrates viewers → loads → meshing → outputs → unload.
 
-**H1 (partial):** C++ и Rust генерируют идентичные *позиции* вершин (606=606) и
-одинаковое *число* треугольников (1304), но reuse-cache даёт разное число вершин
-(888 vs 840) и 434/1304 треугольника расходятся в winding/reuse. Это реальная
-дивергенция в логике reuse-cache / итерации, не float-precision. Rust goldens
-остаются self-consistent; C++ goldens не коммитятся (fail byte-exact parity).
+**H1 (pass):** C++ и Rust генерируют одинаковый regular mesh для committed
+goldens: sphere_16 = 888 verts / 3912 idx, sphere_32 = 3696 verts / 18600 idx.
+Structural fields exact; float arrays compare with tolerance for C++ `%.8g`
+JSON formatting/codegen drift. Root cause старого divergence: C++ делает
+empty-cell early-out по raw SDF, а case/interpolation/normals — после
+`sdf_as_float`; Rust теперь зеркалит этот split.
 **H2 (pass):** Rust ~1.5× быстрее C++ (28.5µs/143Melem/s vs 44.1µs/93Mvoxels/s).
 Полный разбор — в `rust/cpp-baseline/README.md` и `REPORT.md`.
 
 **Открытые пункты:**
-1. **H1 full byte-parity** — исследовать расхождение reuse-cache (888 vs 840
-   вершин). Не блокирующее (H2 пройден, позиции совпадают), но нужно для strict parity.
-2. **Фаза 2 on-device** — загрузить `libvoxel_gdext.so` в Godot Android export
+1. **Фаза 2 on-device** — загрузить `libvoxel_gdext.so` в Godot Android export
    template (нужен custom template `platform=android` + SDK + устройство/эмулятор).
    `.so` собирается локально через `rust/scripts/android-build.sh`; упаковка в APK
    и проверка на устройстве — вне данного окружения.
-3. **Фаза 4 — что осталось (после single-LOD paging terrain):**
+2. **Фаза 4 — что осталось (после single-LOD paging terrain):**
    - **Multi-LOD paging (VoxelLodTerrain)** — `VoxelLodTerrainUpdateData` +
      threaded update task (clipbox/octree стратегии). Single-LOD paging
      (`VoxelTerrainCore`) готов; multi-LOD — отдельный orchestrator.

@@ -2,35 +2,33 @@
 
 > Branch: `rust/pilot` · Date: 2026-07-03 · Host: Linux x86_64, Rust 1.96.1, NDK r29
 > See `MIGRATION_PLAN.md` for the full plan. This report covers Phase 0 (pilot).
-> Update 2026-07-06: the C++ stub-tree harness has since run. H2 is a pass;
-> H1 remains partial because vertex reuse/winding differ even though positions
-> and triangle count match. See `rust/cpp-baseline/README.md`.
+> Update 2026-07-06: the C++ stub-tree harness now supplies the committed mesh
+> goldens. H1 and H2 both pass; see `rust/cpp-baseline/README.md`.
 
 ## TL;DR
 
-**Conditional GO.** The Rust+gdext stack is viable for this engine: the build is
+**GO.** The Rust+gdext stack is viable for this engine: the build is
 reproducible, voxel-core cross-compiles to **every priority mobile target**
 (Android aarch64/x86_64 `.so`, iOS/macOS arm64 `.a`), and the transvoxel mesher
 runs at hundreds of millions of cells/sec. The lookup tables are proven
-byte-identical to upstream C++. Follow-up C++ harness results keep the GO:
-H2 passes, while H1 is partial until the vertex reuse/winding divergence is
-closed.
+byte-identical to upstream C++, and the regular mesh output matches C++ goldens
+structurally with a small float tolerance for JSON formatting/codegen drift.
 
 ## The four hypotheses
 
-### H1 — Equivalence (Rust mesh == C++ mesh): **PARTIAL ✅⚠️**
+### H1 — Equivalence (Rust mesh == C++ mesh): **✅ PASS**
 
 | Evidence | Status |
 |---|---|
 | Lookup tables (REGULAR_CELL_CLASS / CELL_DATA / VERTEX_DATA) **byte-identical** to real upstream `transvoxel_tables.cpp` | ✅ proven — `transvoxel_tables_parity` test, dump from `rust/cpp-baseline/` |
 | Faithful port of `build_regular_mesh` (TEXTURES_NONE, regular cells), incl. the ZXY memory-layout fix | ✅ |
-| Self-consistent golden mesh (sphere_16: 840 verts / 3912 idx; sphere_32) locks output against regressions | ✅ — `transvoxel_parity` framework + comparator |
-| Full mesh byte-parity vs C++ | ⚠️ partial — positions and triangle count match; vertex reuse/winding differ |
+| C++ golden mesh (sphere_16: 888 verts / 3912 idx; sphere_32: 3696 verts / 18600 idx) locks output against regressions | ✅ — `transvoxel_parity` framework + comparator |
+| Full regular mesh parity vs C++ | ✅ structural fields exact; float arrays within tolerance |
 
-What this means: the lookup backbone of the algorithm is proven equivalent, so
-any future mesh divergence could only come from the small vertex-interpolation /
-reuse-cache logic — already a line-by-line port. Confidence is high; the final
-byte-proof is a C++ build task, not an algorithmic risk.
+What this means: the lookup backbone and regular-cell mesh body are both proven
+equivalent against the upstream C++ harness. The key parity fix was mirroring the
+C++ split between raw-SDF early-out and `sdf_as_float` samples used by case
+selection/interpolation.
 
 ### H2 — Performance (Rust within 15% of C++): **✅ PASS**
 
@@ -81,24 +79,20 @@ up to LLVM 22.)
 
 ## GO/NO-GO decision
 
-**GO** to proceed — with one explicit follow-up that gates full Phase 0
-byte-parity sign-off:
+**GO** to proceed.
 
-1. **Investigate the H1 reuse-cache/winding divergence** shown by the C++ harness
-   (`888` C++ vertices vs `840` Rust vertices, with `434/1304` ordered triangles
-   differing). H2 is already closed as a pass.
-
-The four hypotheses score H3✅ H4✅(+), H1 partial, H2✅.
+The four hypotheses score H1✅ H2✅ H3✅ H4✅(+).
 Nothing observed suggests Rust is the wrong call; the remaining work is
-measurement, not redesign. Starting Phase 1 (full math/containers core) in
-parallel is safe because it doesn't depend on the C++ harness.
+integration, not redesign. Starting Phase 1 (full math/containers core) in
+parallel is safe because the pilot gate is closed.
 
 ## What changed in this session (Phase 0 steps 0.7–0.10)
 
 - **0.7** Parity framework: versioned `GoldenMesh` JSON schema + tolerance
-  comparator + self-consistent golden for sphere_16/32 + ignored regenerator.
-- **0.7 (partial, real C++)** Table parity: standalone C++ dumper of upstream
-  tables + Rust byte-equality test (passing).
+  comparator + C++ goldens for sphere_16/32.
+- **0.7 (real C++)** Table parity: standalone C++ dumper of upstream tables +
+  Rust byte-equality test (passing); mesh parity now also passes against C++
+  goldens.
 - **0.8** Criterion benches (16³/32³/64³) with cell/sec throughput.
 - **0.9** Android cross-compile targets + `.a`/`.so` verification + NDK/rust-lld
   workaround + `android-build.sh`; Apple arm64 `.a` from Linux.
@@ -107,6 +101,6 @@ parallel is safe because it doesn't depend on the C++ harness.
 
 ## Next session (priority order)
 
-1. godot-cpp mesh harness → close H1 + H2 (the gating item).
-2. Begin Phase 1 (math/containers/string/io/memory core) — independent of (1).
-3. Wire the Android `.so` + a minimal gdext hello-world for Phase 2 kick-off.
+1. Continue Phase 4 multi-LOD / engine-orchestration work.
+2. Phase 2 on-device Android verification when SDK/device access is available.
+3. Phase 5 Godot binding/editor surface.

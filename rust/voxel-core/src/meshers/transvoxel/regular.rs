@@ -33,8 +33,8 @@ pub trait RegularMesherInput {
     fn len(&self) -> usize;
     /// Padded block size (including MIN_PADDING/MAX_PADDING on each axis).
     fn block_size(&self) -> Vector3i;
-    /// SDF sample as `f32`. The isolevel is always 0; negative = inside solid,
-    /// positive = outside (matches the C++ `sdf_as_float` sign convention).
+    /// SDF sample as `f32`, after the same conversion C++ applies with
+    /// `sdf_as_float`. The isolevel is always 0.
     fn sample_f32(&self, data_index: usize) -> f32;
 }
 
@@ -203,14 +203,18 @@ pub fn build_regular_mesh(
             pos.x = min_pos.x;
             while pos.x < max_pos.x {
                 // ---- Early-out: skip cells that don't cross the isolevel ----
-                let s = input.sample_f32(data_index) > isolevel;
-                let all_same = (input.sample_f32(data_index + n010) > isolevel) == s
-                    && (input.sample_f32(data_index + n100) > isolevel) == s
-                    && (input.sample_f32(data_index + n110) > isolevel) == s
-                    && (input.sample_f32(data_index + n001) > isolevel) == s
-                    && (input.sample_f32(data_index + n011) > isolevel) == s
-                    && (input.sample_f32(data_index + n101) > isolevel) == s
-                    && (input.sample_f32(data_index + n111) > isolevel) == s;
+                // C++ performs this fast path on the raw SDF (`sdf_data >
+                // isolevel`) before converting through `sdf_as_float`, which
+                // negates float samples. Because `sample_f32()` is the converted
+                // value, the faithful equivalent is `< isolevel` here.
+                let s = input.sample_f32(data_index) < isolevel;
+                let all_same = (input.sample_f32(data_index + n010) < isolevel) == s
+                    && (input.sample_f32(data_index + n100) < isolevel) == s
+                    && (input.sample_f32(data_index + n110) < isolevel) == s
+                    && (input.sample_f32(data_index + n001) < isolevel) == s
+                    && (input.sample_f32(data_index + n011) < isolevel) == s
+                    && (input.sample_f32(data_index + n101) < isolevel) == s
+                    && (input.sample_f32(data_index + n111) < isolevel) == s;
                 if all_same {
                     data_index += sy;
                     pos.x += 1;

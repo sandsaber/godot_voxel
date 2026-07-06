@@ -12,8 +12,8 @@ use voxel_core::meshers::transvoxel::{
 use voxel_core::storage::{ChannelDepth, DenseVoxelBuffer, VoxelBufferRead};
 
 /// An SDF sampled into a DenseVoxelBuffer, exposed through RegularMesherInput.
-/// The mesher works on signed distances; we use a sphere of radius `r` centered
-/// in the block so negative = inside.
+/// The stored samples mirror godot_voxel's engine SDF convention; `sample_f32`
+/// returns the converted value consumed by the transvoxel algorithm.
 struct SphereInput {
     buf: DenseVoxelBuffer,
 }
@@ -47,9 +47,9 @@ impl SphereInput {
                     // Signed distance to the sphere surface (positive outside).
                     let d =
                         ((ix - cx).powi(2) + (iy - cy).powi(2) + (iz - cz).powi(2)).sqrt() - radius;
-                    // godot_voxel stores SDF so that POSITIVE values mean inside solid
-                    // (the algorithm negates via sdf_as_float before comparison).
-                    // So we store the negation of the geometric distance.
+                    // Store the same raw value as the C++ harness. The
+                    // algorithm converts it with `sdf_as_float`, which negates
+                    // float samples before case selection/interpolation.
                     let stored = -d;
                     // ZXY layout: index = y + sy*(x + sx*z). Y innermost.
                     let i = y + sy * (x + sx * z);
@@ -73,11 +73,9 @@ impl RegularMesherInput for SphereInput {
         self.buf.size()
     }
     fn sample_f32(&self, data_index: usize) -> f32 {
-        // Return the stored value directly; it is already in the algorithm's
-        // convention (positive = inside solid, since we negated when storing).
         let b = self.buf.data();
         let off = data_index * 4;
-        f32::from_le_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]])
+        -f32::from_le_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]])
     }
 }
 

@@ -86,29 +86,25 @@ harness was built `-O2` host-native; the Rust criterion bench used the workspace
 goes through a plain `std::vector<float>` rather than `VoxelBuffer`'s compressed
 path; the engine may be faster. But it establishes that Rust is not slower.)
 
-### H1 (equivalence) — PARTIAL: positions match, indices/winding differ
+### H1 (equivalence) — PASS
 
-The harness reveals the Rust port is **algorithmically correct but not
-byte-identical** to C++:
+The committed `voxel-core/tests/golden/transvoxel_sphere_{16,32}.json` files now
+come from this C++ harness (`generator: "godot_voxel-cpp"`), and
+`cargo test -p voxel-core --test transvoxel_parity` reproduces them from the Rust
+port. Structural fields are exact; float arrays use a small tolerance for C++
+`%.8g` JSON formatting and compiler/codegen drift.
 
-| metric | C++ | Rust | match? |
-|--------|-----|------|--------|
-| unique vertex positions | 606 | 606 | ✅ identical sets |
-| triangle count | 1304 | 1304 | ✅ |
-| index_count | 3912 | 3912 | ✅ |
-| **vertex_count** | **888** | **840** | ❌ (vertex reuse cache differs) |
-| triangles-as-sets | 1304 | 1304 | ❌ 434 differ (winding/vertex choice) |
+| case | vertex_count | index_count | triangles | unique positions |
+|------|-------------:|------------:|----------:|-----------------:|
+| sphere_16 | 888 | 3912 | 1304 | 606 |
+| sphere_32 | 3696 | 18600 | 6200 | 2982 |
 
-**Interpretation:** the two meshers generate exactly the same vertex *positions*
-and the same *number* of triangles, but differ in (a) how the vertex reuse cache
-collapses shared positions (888 vs 840 vertices), and (b) the winding order /
-which reused vertex a triangle picks (434/1304 triangles differ as ordered
-position-triples). This is a real divergence in the reuse-cache and cell-iteration
-logic, not a float-precision issue. The committed Rust goldens remain
-self-consistent (`generator: "voxel-core-rust"`); the C++ goldens from
-`--regenerate` are NOT committed because they would *fail* the byte-exact
-`matches_golden_*` tests. Investigating the reuse-cache divergence is the next
-step toward full H1 byte-parity.
+**Root cause fixed:** the C++ mesher performs its fast empty-cell early-out on
+raw SDF values (`sdf_data > isolevel`), then converts samples through
+`sdf_as_float` for case selection, interpolation and normals. The Rust port had
+initially used one converted sample path for both operations. The fix mirrors the
+C++ split by doing early-out with the inverted converted sign while keeping
+`sample_f32()` equivalent to `sdf_as_float`.
 
 ### NDK note (Phase 2, not needed here)
 

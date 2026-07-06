@@ -7,7 +7,7 @@
 
 | Phase | Status | Tests |
 |---|---|---|
-| 0 — Pilot (transvoxel mesher + cross-compile) | 🟡 CONDITIONAL GO (H1 byte-parity partial) | H2 pass; H1 partial |
+| 0 — Pilot (transvoxel mesher + cross-compile) | ✅ GO | H1/H2 pass |
 | 1 — Pure core (`util/{math,string,memory,io,testing}` + `expression_parser`) | ✅ COMPLETE | (cumulative) |
 | 2 — Mobile validation (gdext `.so` desktop + Android) | ✅ desktop+Android `.so` (on-device: pending SDK) | — |
 | 3 — Compute layer (storage, streams, meshers, generators, format) | ✅ COMPLETE | (cumulative) |
