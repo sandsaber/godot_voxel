@@ -511,7 +511,7 @@ A1 (генератор `&self`) → A2 (мешер `&self` + scratch) → A4 (п
 Уже после этой волны mesh-build'ы и генерация исполняются параллельно (глобальный замок
 `VoxelData` остаётся только на gather — короткая секция).
 **DoD:** новый тест «N воркеров мешат M блоков» показывает масштабирование по потокам
-(время ~1/N, загрузка >1 ядра); 635+10 тестов и golden-парити зелёные.
+(время ~1/N, загрузка >1 ядра); 636+10 тестов и golden-парити зелёные.
 
 **Волна 2 — конкурентность до конца:**
 A3 (`Arc<VoxelData>` + per-LOD RwLock + реальный SpatialLock3D) → A5 (semaphore + staging +
@@ -535,7 +535,7 @@ paging-сценарий (движущийся viewer), сравнение с р�
 - **cargo-fuzz таргеты на парсеры** (`.vox`, `block_serializer`, `region`): C++-сторона уже
   фаззится (`fuzzer.yml`), Rust-парсеры — нет; баг D2 — ровно тот класс, который находит фаззер.
 
-Инварианты на всём протяжении: 635 unit + 10 integration + golden-парити остаются зелёными;
+Инварианты на всём протяжении: 636 unit + 10 integration + golden-парити остаются зелёными;
 clippy/fmt чистые; каждый шаг сверяется с соответствующим C++-файлом (ссылки в §9.1-9.3).
 
 ---
@@ -546,6 +546,7 @@ clippy/fmt чистые; каждый шаг сверяется с соотве�
 |---|---|---|---|
 | 2026-07-06 | A1, часть generator: `VoxelGenerator::generate_block(&self)` / `generate_single(&self)` + `SharedVoxelGenerator = Arc<dyn VoxelGenerator>` | ✅ закрыто. Внешний generator-mutex удалён из `VoxelData`, `MeshingDependency`, `MeshBlockTask`, `LoadBlockForTerrainTask`; `GraphGenerator` синхронизирует только собственный scratch локально | `cargo test -p voxel-core` → 635 unit + 10 integration + 1 doc-test, 0 failed |
 | 2026-07-06 | A2, часть mesher: `VoxelMesher::build(&self)` + `SharedVoxelMesher = Arc<dyn VoxelMesher>` | ✅ закрыто. Внешний mesher-mutex удалён из `MeshingDependency`/`MeshBlockTask`; `TransvoxelMesher` использует thread-local `Cache`, поэтому shared mesher не сериализует build через внутренний глобальный lock | `cargo test -p voxel-core` → 635 unit + 10 integration + 1 doc-test, 0 failed |
+| 2026-07-06 | D2: `.vox` negative model-size guard | ✅ закрыто. `SIZE` dimensions now must be in `0..=MAX_MODEL_SIZE`, so `0xFFFFFFFF`/`-1` returns `InvalidData` before model allocation | `cargo test -p voxel-core` → 636 unit + 10 integration + 1 doc-test, 0 failed |
 
 Остаток пункта #1: `VoxelData` per-LOD `RwLock`/real `SpatialLock3D`.
 ABBA-риск с внешним generator/mesher lock снят, но правило “не держать data lock через
@@ -568,7 +569,7 @@ byte-parity тесты), но **два системных долга** треб�
    целенаправленно устранял; заявление H2 о 1.5× преимуществе не распространяется на end-to-end конвейер.
 
 План действий — три волны из §9.6: (1) остаток волны 1 — A4 + быстрые
-фиксы (B2/C2/D1/D2/D5), (2) волна 2 — per-LOD RwLock + реальный SpatialLock3D + TSan/stress
+фиксы (B2/C2/D1/D5), (2) волна 2 — per-LOD RwLock + реальный SpatialLock3D + TSan/stress
 (закрывает GO-критерий Фазы 4), (3) волна 3 — перф-фиксы горячего пути и graph runtime
 с перемером H2 end-to-end. Параллельно: настроить upstream-tracking (`cpp-reference`) и
 CI для `rust/` — сейчас Rust не собирается ни одним workflow.

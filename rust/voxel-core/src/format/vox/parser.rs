@@ -284,9 +284,12 @@ pub fn parse(bytes: &[u8]) -> Result<Data> {
                 i32_from_u32(r.u32()?),
                 i32_from_u32(r.u32()?),
             );
-            if size.x > MAX_MODEL_SIZE || size.y > MAX_MODEL_SIZE || size.z > MAX_MODEL_SIZE {
+            if !(0..=MAX_MODEL_SIZE).contains(&size.x)
+                || !(0..=MAX_MODEL_SIZE).contains(&size.y)
+                || !(0..=MAX_MODEL_SIZE).contains(&size.z)
+            {
                 return Err(VoxError::InvalidData(format!(
-                    "model dimension exceeds {MAX_MODEL_SIZE}: {size:?}"
+                    "model dimension must be in 0..={MAX_MODEL_SIZE}: {size:?}"
                 )));
             }
             last_size = magica_to_opengl(size);

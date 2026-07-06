@@ -472,6 +472,23 @@ fn parse_rejects_oversized_model() {
 }
 
 #[test]
+fn parse_rejects_negative_model_size() {
+    let mut size = Vec::new();
+    size.extend_from_slice(&u32_le(u32::MAX)); // -1 via two's complement
+    size.extend_from_slice(&u32_le(1));
+    size.extend_from_slice(&u32_le(1));
+
+    let mut xyzi = Vec::new();
+    xyzi.extend_from_slice(&u32_le(0)); // force model allocation path
+
+    let bytes = vox_file(&[(b"SIZE", size), (b"XYZI", xyzi)]);
+    match parse(&bytes).unwrap_err() {
+        VoxError::InvalidData(m) => assert!(m.contains("-1"), "message: {m}"),
+        other => panic!("expected InvalidData, got {other:?}"),
+    }
+}
+
+#[test]
 fn parse_rejects_duplicate_node_id() {
     let mut ngrp = Vec::new();
     ngrp.extend_from_slice(&u32_le(5)); // node id 5
