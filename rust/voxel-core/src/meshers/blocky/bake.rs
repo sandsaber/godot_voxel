@@ -578,16 +578,12 @@ fn generate_library_cutout_sides(lib: &mut BakedLibrary) {
         if !enabled {
             continue;
         }
-        // Clone the library reference immutably for the read-only neighbor
-        // scans; only `models[model_id]` is mutated.
+        // Compute cutouts on a local model copy while the library is only
+        // borrowed immutably for neighbor scans, then move the result back.
         let model_id_u16 = model_id as u16;
-        let lib_ref: *const BakedLibrary = lib;
-        // SAFETY: we only mutate `lib.models[model_id]`, and only read other
-        // entries. No aliasing of the same element occurs.
-        unsafe {
-            let lib_imm: &BakedLibrary = &*lib_ref;
-            generate_model_cutout_sides(&mut lib.models[model_id], model_id_u16, lib_imm);
-        }
+        let mut model_data = lib.models[model_id].clone();
+        generate_model_cutout_sides(&mut model_data, model_id_u16, lib);
+        lib.models[model_id].cutout_side_surfaces = model_data.cutout_side_surfaces;
     }
 }
 
@@ -1030,5 +1026,14 @@ mod tests {
             cube,
             Side::Front as i32
         ));
+    }
+
+    #[test]
+    fn bake_module_uses_safe_cutout_driver() {
+        let raw_block_marker = ["unsafe", " {"].concat();
+        assert!(
+            !include_str!("bake.rs").contains(&raw_block_marker),
+            "cutout-side generation should not use raw-pointer aliasing"
+        );
     }
 }

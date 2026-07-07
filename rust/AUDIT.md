@@ -275,8 +275,9 @@ so we can get rid of abstraction layers and conditionals»*):
 - `VoxelBuffer::create()` depth preservation после аудита закрыт 2026-07-07: в исходном
   состоянии `create()` безусловно сбрасывал кастомные channel depths — расходилось с C++
   (сохраняет при `format==null`), и с собственным doc-комментарием.
-- `unsafe` raw-pointer aliasing в `blocky/bake.rs:573-592` — обходит borrow checker вручную; путь
-  одноразовый (bake), но хрупкий; заменяется безопасным compute-then-assign.
+- `blocky/bake.rs` raw-pointer aliasing после аудита закрыт 2026-07-07: в исходном
+  состоянии cutout-pass обходил borrow checker через `unsafe`; теперь cutout surfaces
+  считаются на локальной копии модели под shared borrow библиотеки и переносятся обратно.
 
 ### 9.4 Следствие для заявления H2 («Rust в 1.5× быстрее C++»)
 
@@ -511,7 +512,7 @@ C++ `inner_group_start_index` / `skip_outer_group` (`voxel_generator_graph.cpp:9
 | D3 | `VoxelBuffer::create(size, format: Option<&VoxelFormat>)` | ✅ закрыто 2026-07-07: `create()` сохраняет текущие channel depths при сбросе буфера и пересчитывает uniform default под текущий depth; явный `VoxelFormat::configure_buffer()` по-прежнему применяет формат |
 | D4 | `#[inline]` на `get_voxel`/`set_voxel`/`get_voxel_f`/`set_voxel_f` ×2 типа; `fill_area` — база строки за внутренний цикл (образец: свой же `fill_3d_region_zxy`); depth-hoisted helper для `downscale_to`/`paste_masked*` (аналог C++ `write_box_template`) | |
 | D5 | `HeightmapNoise::curve: Option<Arc<Curve>>` | ✅ закрыто 2026-07-06: клон 256×f32 на блок заменён на O(1) refcount (образец — graph-узел Curve) |
-| D6 | `blocky/bake.rs`: compute-then-assign вместо `unsafe` raw-pointer aliasing | считаем cutout-данные в локальный `Vec` под shared borrow, присваиваем после |
+| D6 | `blocky/bake.rs`: compute-then-assign вместо `unsafe` raw-pointer aliasing | ✅ закрыто 2026-07-07: cutout-данные считаются на локальной копии `BakedModel` под shared borrow библиотеки, затем `cutout_side_surfaces` переносится обратно без raw pointer aliasing |
 | D7 | **(структурная опция)** типизированное хранилище каналов: `enum ChannelData { U8(Vec<u8>), U16(Vec<u16>), U32(Vec<u32>), U64(Vec<u64>) }` | снимает alignment-вопрос B1/B5 навсегда, делает depth-dispatch естественным (match один раз → типизированный слайс) и бесплатно даёт «write_box_template»-аналог из D4; цена — рефакторинг `voxel_buffer.rs` + сериализатора (typed→bytes каст безопасен всегда). Решить до волны 3 |
 
 #### Порядок внедрения
@@ -527,7 +528,7 @@ A4 (правило замков).
 Уже после этой волны mesh-build'ы и генерация исполняются параллельно (глобальный замок
 `VoxelData` остаётся только на gather — короткая секция).
 **DoD:** новый тест «N воркеров мешат M блоков» показывает масштабирование по потокам
-(время ~1/N, загрузка >1 ядра); 646+10 тестов и golden-парити зелёные.
+(время ~1/N, загрузка >1 ядра); 647+10 тестов и golden-парити зелёные.
 
 **Волна 2 — конкурентность до конца:**
 A3 (`Arc<VoxelData>` + per-LOD RwLock + реальный SpatialLock3D) → A5 (semaphore + staging +
@@ -536,7 +537,7 @@ A3 (`Arc<VoxelData>` + per-LOD RwLock + реальный SpatialLock3D) → A5 (
 чист (nightly `-Zsanitizer=thread`, Linux-хост); GO-критерий Фазы 4 закрыт формально.
 
 **Волна 3 — производительность:**
-решение по D7 → B1 → B3/B4/B5 → C1 → C3 → D3/D4/D6.
+решение по D7 → B1 → B3/B4/B5 → C1 → C3 → D4.
 **DoD:** новый бенч **H2-MT** — throughput на уровне `MeshBlockTask::run` + многопоточный
 paging-сценарий (движущийся viewer), сравнение с расширенным `cpp-baseline`; критерий прежний:
 не хуже C++ −15%, target ≥0%.
@@ -551,7 +552,7 @@ paging-сценарий (движущийся viewer), сравнение с р�
 - **cargo-fuzz таргеты на парсеры** (`.vox`, `block_serializer`, `region`): C++-сторона уже
   фаззится (`fuzzer.yml`), Rust-парсеры — нет; баг D2 — ровно тот класс, который находит фаззер.
 
-Инварианты на всём протяжении: 646 unit + 10 integration + golden-парити остаются зелёными;
+Инварианты на всём протяжении: 647 unit + 10 integration + golden-парити остаются зелёными;
 clippy/fmt чистые; каждый шаг сверяется с соответствующим C++-файлом (ссылки в §9.1-9.3).
 
 ---
@@ -569,6 +570,7 @@ clippy/fmt чистые; каждый шаг сверяется с соотве�
 | 2026-07-06 | D1: RegionFile deferred header write | ✅ закрыто. `RegionFile` keeps a `header_dirty` flag; `save_block` only marks the LUT dirty, while `flush()`/`close()`/`Drop` persist the header once | `cargo test -p voxel-core` → 640 unit + 10 integration + 1 doc-test, 0 failed |
 | 2026-07-06 | A4: data-lock ordering rule | ✅ закрыто. `LoadBlockForTerrainTask` snapshots stream/generator settings under `VoxelData` lock and runs stream/generator work after drop; `MeshBlockTask` now queues missing gather regions under lock, fills them outside the critical section, then calls the mesher after lock release. Regression tests assert `try_lock()` succeeds inside generator/mesher/stream callbacks, plus two mesh tasks can overlap inside one shared mesher | `cargo test -p voxel-core` → 645 unit + 10 integration + 1 doc-test, 0 failed |
 | 2026-07-07 | D3: `VoxelBuffer::create` depth preservation | ✅ закрыто. `create()` now preserves existing per-channel depths when no explicit `VoxelFormat` is applied, resets channels to uniform defaults for those depths, and keeps `VoxelFormat::configure_buffer()` as the explicit format path | `cargo test -p voxel-core` → 646 unit + 10 integration + 1 doc-test, 0 failed |
+| 2026-07-07 | D6: safe blocky cutout bake | ✅ закрыто. `generate_library_cutout_sides` no longer creates a raw immutable alias of `BakedLibrary` while mutating one model; it computes cutouts on a local model copy and moves `cutout_side_surfaces` back. Safety regression test rejects `unsafe {` in the bake module | `cargo test -p voxel-core` → 647 unit + 10 integration + 1 doc-test, 0 failed |
 
 Остаток пункта #1: `VoxelData` per-LOD `RwLock`/real `SpatialLock3D`.
 ABBA-риск с внешним generator/mesher lock снят; правило “не держать data lock через

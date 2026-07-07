@@ -297,6 +297,7 @@ godot_voxel (fork)
 | 2026-07-06 | Audit wave 1G: RegionFile deferred header write | ✅ total 640 unit + 10 integration. `RegionFile` now tracks `header_dirty`: `save_block` marks the LUT dirty and `flush()`/`close()`/`Drop` persist the header once. Added regression test `save_block_defers_header_rewrite_until_flush` |
 | 2026-07-06 | Audit wave 1H: data-lock ordering rule | ✅ total 645 unit + 10 integration. `LoadBlockForTerrainTask` snapshots stream/generator settings under `VoxelData` lock and performs stream/generator work after drop; `MeshBlockTask` queues missing gather regions under lock, fills them outside the critical section, then calls the mesher after lock release. Added four `try_lock()` guard tests covering generator/mesher/stream callbacks plus a deterministic shared-mesher overlap test |
 | 2026-07-07 | Audit fix D3: VoxelBuffer create depth preservation | ✅ total 646 unit + 10 integration. `VoxelBuffer::create()` now preserves current per-channel depths when no explicit `VoxelFormat` is applied and resets channels to uniform defaults for those depths. `VoxelFormat::configure_buffer()` remains the explicit format application path. Added regression test `create_preserves_existing_channel_depths` |
+| 2026-07-07 | Audit fix D6: safe blocky cutout bake | ✅ total 647 unit + 10 integration. `generate_library_cutout_sides` no longer uses raw-pointer aliasing; it computes cutout surfaces on a local `BakedModel` copy under shared library borrow and moves `cutout_side_surfaces` back. Added safety regression test `bake_module_uses_safe_cutout_driver` |
 
 ### Где остановились (для возобновления)
 
@@ -310,7 +311,7 @@ godot_voxel (fork)
 **Фаза 2 mobile-half — `.so` собран** (aarch64 + x86_64-android через NDK r29).
 **Фаза 3 (compute-слой) — ЗАВЕРШЕНА.** Все engine-agnostic компоненты
 портированы и повторно проверены audit pass'ом (439 unit тестов).
-**Фаза 4 — storage/streaming + meshing pipeline + single-LOD paging terrain + VoxelEngine foundation/task loop работают headlessly (646 unit + 10 integration тестов).**
+**Фаза 4 — storage/streaming + meshing pipeline + single-LOD paging terrain + VoxelEngine foundation/task loop работают headlessly (647 unit + 10 integration тестов).**
 Audit wave 1A after the 2026-07-06 audit removed the outer generator mutex:
 `VoxelGenerator` is shared via `Arc<dyn VoxelGenerator>` and called through `&self`.
 Audit wave 1B removed the outer mesher mutex:
@@ -402,7 +403,7 @@ Compute-слой. Каждый модуль — отдельный коммит,
 |---|---|---|
 | `storage::voxel_memory_pool` | `storage/voxel_memory_pool.{h,cpp}` | ✅ +7 тестов (power-of-two block pool: 21 bucket до 1MiB, thread-safe recycle через Mutex<Vec> + atomics; идиоматичный Rust — owned Vec вместо raw pointers) |
 | `storage::funcs` | `storage/funcs.{h,cpp}` | ✅ +9 тестов (copy_3d_region_zxy, fill_3d_region_zxy, transform_3d_array_zxy через OrthoBasis, snorm s8/s16↔float квантизация) |
-| `storage::voxel_buffer` | `storage/voxel_buffer.{h,cpp}` | ✅ +14 тестов (полный multi-channel dense store: 8 каналов, depth 8/16/32/64-bit, UNIFORM/NONE компрессия, Default+Pool аллокаторы, get/set voxel raw+float, fill/fill_area, compress_uniform_channels, copy_channel_from, Drop возвращает пулу) |
+| `storage::voxel_buffer` | `storage/voxel_buffer.{h,cpp}` | ✅ +15 тестов (полный multi-channel dense store: 8 каналов, depth 8/16/32/64-bit, UNIFORM/NONE компрессия, Default+Pool аллокаторы, get/set voxel raw+float, fill/fill_area, compress_uniform_channels, copy_channel_from, create-depth preservation, Drop возвращает пулу) |
 | `storage::voxel_format` | `storage/voxel_format.{h,cpp}` | ✅ +5 тестов (per-channel depth descriptor + supported-depth ranges + default raw values) |
 | `format::vox` | `streams/vox/vox_data.{h,cpp}` | ✅ +23 теста (MagicaVoxel `.vox` парсер: header SIZE/XYZI/RGBA/nTRN/nGRP/nSHP/LAYR/MATL чанки, scene-graph валидация, rotation-byte→Basis3f decode c fallback на identity для out-of-spec байт, default palette parity с C++ `g_default_palette`, `magica_to_opengl` axis swap). `Node` → идиоматичный Rust enum вместо C++ inheritance; `FileAccess` → `&[u8]` cursor с `Result<_, VoxError>`. Godot-shim `vox_loader.cpp` отложен до binding-слоя) |
 | `io::serialization` (расширение) | `util/io/serialization.h` (MemoryReader) | ✅ +fallible API: `try_get_8/16/32/float` + `try_take` возвращают `Option` (без panic на EOF) и `set_endianness` для on-the-fly переключения byte order. Нужно для `instance_data` (чтение из untrusted-источников) и legacy v0 big-endian форматов |
@@ -418,7 +419,7 @@ Compute-слой. Каждый модуль — отдельный коммит,
 | `streams::region` | `streams/region/{region_file,file_utils}.{h,cpp}` | ✅ +22 теста (region-file archive format `.vxr`: `RegionFormat` (block_size_po2/region_size/channel_depths/sector_size/palette) с `validate`/`verify_block`/`header_size_v3`; `RegionBlockInfo` (24-bit sector_index + 8-bit sector_count packed u32); `RegionFile` — header save/load (VXR_ magic v3), deferred header flush, sector allocator (append/compact/`remove_sectors_from_block`), `load_block`/`save_block` через `block_serializer` + `compressed_data`. **Отложено**: forest wrapper (`VoxelStreamRegionFiles`, meta.vxrm JSON, LRU cache, lod-dir layout), v2→v3 legacy migration (needs `insert_bytes`), file locking) |
 | `constants::cube_tables` | `constants/cube_tables.{h,cpp}` | ✅ +11 тестов (Side/Edge/Corner enums + LUTs: CORNER_POSITION, SIDE_NORMALS, SIDE_CORNERS, SIDE_EDGES, EDGE_CORNERS, OPPOSITE_SIDE, MOORE_NEIGHBORING_3D, ORDERED_MOORE_AREA_3D; `dir_to_side`. Фундамент для blocky/cubes meshers) |
 | `meshers::blocky::baked_library` | `meshers/blocky/blocky_baked_library.h` | ✅ +8 тестов (plain-data model library: `BakedModel`/`BakedModelMesh`/`ModelSurface`/`SideSurface` с geometry arrays + side masks + pattern indices; `BakedLibrary` с `DynamicBitset` occlusion matrix; `BakedFluid`/`FluidSurface`; `Aabb` stand-in для Godot AABB. Godot Resource/editor слой → Фаза 5) |
-| `meshers::blocky::bake` | `meshers/blocky/voxel_blocky_library_base.cpp` (bake pass) | ✅ +9 тестов (side-culling matrix generation: `SideBitmap` `[u64;4]` rasterization, `detect_single_quad`, `rasterize_triangle_barycentric`, `generate_side_culling_matrix` — rasterizes side geometry → deduplicates patterns → builds occlusion matrix + `full_sides_mask`/`empty_sides_mask`/`side_pattern_indices`/`contributes_to_ao`; cutout-surface baking. `bake_library` entry point) |
+| `meshers::blocky::bake` | `meshers/blocky/voxel_blocky_library_base.cpp` (bake pass) | ✅ +10 тестов (side-culling matrix generation: `SideBitmap` `[u64;4]` rasterization, `detect_single_quad`, `rasterize_triangle_barycentric`, `generate_side_culling_matrix` — rasterizes side geometry → deduplicates patterns → builds occlusion matrix + `full_sides_mask`/`empty_sides_mask`/`side_pattern_indices`/`contributes_to_ao`; cutout-surface baking without raw-pointer aliasing. `bake_library` entry point) |
 | `meshers::blocky::mesher` | `meshers/blocky/voxel_mesher_blocky.{h,cpp}` (core) | ✅ +7 тестов (`generate_mesh<T>` core algorithm: neighbor-based face culling via `is_face_visible*`, baked geometry emission, 0fps-style corner ambient occlusion, cutout-surface lookup. `BlockyArrays` output struct. Godot `VoxelMesherBlocky` class/build()/`_bind_methods` → Фаза 5) |
 | `meshers::blocky::lod_skirts` | `meshers/blocky/blocky_lod_skirts.h` | ✅ +6 тестов (`append_skirts`/`append_side_skirts` — LOD seam-skirt geometry для всех 6 сторон. `TintSampler` → `skirt_depth: f32` (tint integration отложен до Фазы 5)) |
 | `meshers::blocky::shadow_occluders` | `meshers/blocky/blocky_shadow_occluders.{h,cpp}` | ✅ +12 тестов (`generate_shadow_occluders`/`generate_occluders_geometry`/`classify_chunk_occlusion_from_voxels` — shadow geometry из per-face box quads с точным winding per side; `ShadowOccluderArrays`; две bit-ordering конвенции reproduced + задокументированы) |
@@ -488,7 +489,7 @@ conditions (проверка под ThreadSanitizer/loom).
 git clone https://github.com/sandsaber/godot_voxel.git
 cd godot_voxel && git checkout rust/pilot
 cd rust
-cargo test -p voxel-core       # 646 unit + 10 integration + 1 doc-test; 1 ignored diagnostic snapshot
+cargo test -p voxel-core       # 647 unit + 10 integration + 1 doc-test; 1 ignored diagnostic snapshot
 cargo build -p voxel-gdext     # GDExtension .so (грузится в Godot 4.7)
 cargo clippy --workspace --all-targets  # должен быть чистый
 cargo bench                    # transvoxel benches (16³=143 / 32³=199 / 64³=249 Melem/s)
