@@ -1,16 +1,6 @@
 name: Rust
 
 on:
-  push:
-    branches: [ master, rust/pilot ]
-    paths:
-      - "rust/**"
-      - ".github/workflows/rust.yml"
-  pull_request:
-    branches: [ master, rust/pilot ]
-    paths:
-      - "rust/**"
-      - ".github/workflows/rust.yml"
   workflow_dispatch:
 
 concurrency:
