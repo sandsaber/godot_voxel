@@ -22,13 +22,13 @@
 use crate::engine::{MeshingDependency, StreamingDependency};
 use crate::math::{Box3i, Vector3i};
 use crate::meshers::{BlockMeshOutput, MeshBlockTask, MeshBlockTaskParams, MesherOutput};
-use crate::storage::{BlockToSave, VoxelBuffer, VoxelData, VoxelDataBlock};
+use crate::storage::{BlockToSave, SharedVoxelData, VoxelBuffer, VoxelData, VoxelDataBlock};
 use crate::streams::{
     BlockDataOutput, BlockDataOutputKind, MemoryStream, SaveBlockDataTask, VoxelStream,
 };
 use crate::tasks::{ThreadedTask, ThreadedTaskRunner};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// Lightweight viewer identity (mirrors C++ `ViewerID`).
 pub type ViewerId = u32;
@@ -107,7 +107,7 @@ pub struct ViewerUpdate {
 
 /// Engine-agnostic single-LOD paging terrain core.
 pub struct VoxelTerrainCore {
-    data: Arc<Mutex<VoxelData>>,
+    data: Arc<SharedVoxelData>,
     mesh_map: HashMap<Vector3i, MeshBlockEntry>,
     paired_viewers: Vec<PairedViewer>,
     blocks_pending_load: Vec<Vector3i>,
@@ -137,7 +137,7 @@ impl VoxelTerrainCore {
         stream: Arc<dyn VoxelStream>,
         meshing_dependency: Arc<MeshingDependency>,
     ) -> Self {
-        let data = Arc::new(Mutex::new(data));
+        let data = Arc::new(SharedVoxelData::new(data));
         let task_runner = ThreadedTaskRunner::new(num_threads());
         Self {
             data,
@@ -164,7 +164,7 @@ impl VoxelTerrainCore {
         Self::new(data, stream, meshing_dependency)
     }
 
-    pub fn data(&self) -> Arc<Mutex<VoxelData>> {
+    pub fn data(&self) -> Arc<SharedVoxelData> {
         self.data.clone()
     }
 
@@ -174,8 +174,7 @@ impl VoxelTerrainCore {
     fn data_block_size(&self) -> i32 {
         // Lock just long enough to read the constant; matches the C++ inline
         // `get_data_block_size()`.
-        let data = self.data.lock().expect("voxel data mutex poisoned");
-        data.block_size() as i32
+        self.data.with_data(|data| data.block_size() as i32)
     }
 
     /// Reference to the underlying mesh-block hashmap (read-only). Tests and
@@ -322,7 +321,9 @@ impl VoxelTerrainCore {
         let mut missing = Vec::new();
         let mut found_positions = Vec::new();
         {
-            let mut data = self.data.lock().expect("voxel data mutex poisoned");
+            let voxel_box = block_box_to_voxel_box(box_to_load, self.data_block_size());
+            let _write_region = self.data.write_region(0, voxel_box);
+            let mut data = self.data.lock();
             data.view_area(
                 box_to_load,
                 0,
@@ -348,7 +349,9 @@ impl VoxelTerrainCore {
         let mut missing_positions = Vec::new();
         let mut saves = Vec::new();
         {
-            let mut data = self.data.lock().expect("voxel data mutex poisoned");
+            let voxel_box = block_box_to_voxel_box(box_to_unload, self.data_block_size());
+            let _write_region = self.data.write_region(0, voxel_box);
+            let mut data = self.data.lock();
             data.unview_area(
                 box_to_unload,
                 0,
@@ -437,7 +440,9 @@ impl VoxelTerrainCore {
         }
         // factor == 1: data_box == mesh_block padded by 1.
         let data_box = Box3i::new(bpos, Vector3i::splat(1)).padded(1);
-        let data = self.data.lock().expect("voxel data mutex poisoned");
+        let voxel_box = block_box_to_voxel_box(data_box, self.data_block_size());
+        let _read_region = self.data.read_region(0, voxel_box);
+        let data = self.data.lock();
         if !data.has_all_blocks_in_area(data_box, 0) {
             return;
         }
@@ -546,7 +551,10 @@ impl VoxelTerrainCore {
                 }
                 block.set_edited(true);
                 let inserted = {
-                    let mut data = self.data.lock().expect("voxel data mutex poisoned");
+                    let bs = self.data_block_size();
+                    let voxel_box = Box3i::new(bpos * bs, Vector3i::splat(bs));
+                    let _write_region = self.data.write_region(0, voxel_box);
+                    let mut data = self.data.lock();
                     data.try_set_block(bpos, block)
                 };
                 if inserted {
@@ -705,6 +713,10 @@ fn floor_div_vec(v: Vector3i, b: i32) -> Vector3i {
     Vector3i::new(v.x.div_euclid(b), v.y.div_euclid(b), v.z.div_euclid(b))
 }
 
+fn block_box_to_voxel_box(block_box: Box3i, block_size: i32) -> Box3i {
+    Box3i::new(block_box.position * block_size, block_box.size * block_size)
+}
+
 fn num_threads() -> usize {
     let n = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -723,13 +735,13 @@ fn num_threads() -> usize {
 /// can consume it.
 struct LoadBlockForTerrainTask {
     position: Vector3i,
-    data: Arc<Mutex<VoxelData>>,
+    data: Arc<SharedVoxelData>,
     stream: Arc<dyn VoxelStream>,
     output: Option<BlockDataOutput>,
 }
 
 impl LoadBlockForTerrainTask {
-    fn new(position: Vector3i, data: Arc<Mutex<VoxelData>>, stream: Arc<dyn VoxelStream>) -> Self {
+    fn new(position: Vector3i, data: Arc<SharedVoxelData>, stream: Arc<dyn VoxelStream>) -> Self {
         Self {
             position,
             data,
@@ -745,10 +757,9 @@ impl ThreadedTask for LoadBlockForTerrainTask {
         _ctx: crate::tasks::ThreadedTaskContext,
     ) -> crate::tasks::TaskRunOutcome {
         // Try the stream first. If it has nothing, ask the generator.
-        let (bs, format, generator) = {
-            let data = self.data.lock().expect("voxel data mutex poisoned");
-            (data.block_size() as i32, data.format(), data.generator())
-        };
+        let (bs, format, generator) = self
+            .data
+            .with_data(|data| (data.block_size() as i32, data.format(), data.generator()));
         let mut voxels = VoxelBuffer::with_size(Vector3i::splat(bs));
         format.configure_buffer(&mut voxels);
         let query = crate::streams::VoxelLoadQuery::new(&mut voxels, self.position, 0);
@@ -846,7 +857,7 @@ mod tests {
     }
 
     struct VoxelDataLockProbeGenerator {
-        data: std::sync::Weak<Mutex<VoxelData>>,
+        data: std::sync::Weak<SharedVoxelData>,
     }
 
     impl VoxelGenerator for VoxelDataLockProbeGenerator {
@@ -863,7 +874,7 @@ mod tests {
     }
 
     struct VoxelDataLockProbeStream {
-        data: std::sync::Weak<Mutex<VoxelData>>,
+        data: std::sync::Weak<SharedVoxelData>,
     }
 
     impl VoxelStream for VoxelDataLockProbeStream {
@@ -900,13 +911,12 @@ mod tests {
 
     #[test]
     fn load_task_releases_data_lock_before_generator_fallback() {
-        let data = Arc::new(Mutex::new(VoxelData::new()));
-        {
-            let mut guard = data.lock().expect("voxel data mutex poisoned");
-            guard.set_generator(Some(Arc::new(VoxelDataLockProbeGenerator {
+        let data = Arc::new(SharedVoxelData::new(VoxelData::new()));
+        data.with_data_mut(|data_guard| {
+            data_guard.set_generator(Some(Arc::new(VoxelDataLockProbeGenerator {
                 data: Arc::downgrade(&data),
             })));
-        }
+        });
 
         let task =
             LoadBlockForTerrainTask::new(Vector3i::zero(), data, Arc::new(MemoryStream::new()));
@@ -922,7 +932,7 @@ mod tests {
 
     #[test]
     fn load_task_releases_data_lock_before_stream_load() {
-        let data = Arc::new(Mutex::new(VoxelData::new()));
+        let data = Arc::new(SharedVoxelData::new(VoxelData::new()));
         let stream: Arc<dyn VoxelStream> = Arc::new(VoxelDataLockProbeStream {
             data: Arc::downgrade(&data),
         });
@@ -1031,7 +1041,7 @@ mod tests {
 
         {
             let data = core.data();
-            let mut data = data.lock().expect("voxel data mutex poisoned");
+            let mut data = data.lock();
             assert!(data.try_set_voxel(77, edited_voxel, channel));
             data.mark_area_modified(Box3i::new(edited_voxel, Vector3i::splat(1)), false);
         }
@@ -1079,7 +1089,7 @@ mod tests {
         core.process(&one_viewer);
 
         let data = core.data();
-        let data = data.lock().expect("voxel data mutex poisoned");
+        let data = data.lock();
         let origin_block = data
             .get_block(Vector3i::zero(), 0)
             .expect("origin block should stay loaded while one viewer still references it");

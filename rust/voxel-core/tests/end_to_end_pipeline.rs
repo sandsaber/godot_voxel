@@ -8,7 +8,7 @@
 //! This is the integration test the audit recommended as the validation
 //! milestone for Phase 4's algorithmic core.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use voxel_core::engine::MeshingDependency;
 use voxel_core::generators::base::{VoxelGenerator, VoxelQueryData};
 use voxel_core::math::{Box3i, Vector3i};
@@ -16,7 +16,7 @@ use voxel_core::meshers::{
     BlockMeshOutput, MeshBlockTask, MeshBlockTaskParams, MesherOutput, Surface, SurfaceArrays,
     VoxelMesher,
 };
-use voxel_core::storage::{ChannelDepth, ChannelId, VoxelData, VoxelFormat};
+use voxel_core::storage::{ChannelDepth, ChannelId, SharedVoxelData, VoxelData, VoxelFormat};
 
 /// A generator that produces a sphere SDF centred at the origin. This is the
 /// same generator used by `tests/transvoxel_sphere.rs`, reimplemented here to
@@ -132,7 +132,7 @@ fn sphere_pipeline(radius: f32, mesh_block_pos: Vector3i) -> BlockMeshOutput {
         ChannelId::Sdf.index(),
     );
 
-    let data_handle = Arc::new(Mutex::new(data));
+    let data_handle = Arc::new(SharedVoxelData::new(data));
 
     // 2) Build the meshing dependency with the sphere generator + threshold
     //    mesher.
@@ -192,7 +192,7 @@ fn pipeline_dropped_output_when_dependency_invalidated() {
     data.set_full_load_completed(true);
     data.try_set_voxel(1, Vector3i::new(1, 1, 1), ChannelId::Type.index());
 
-    let data_handle = Arc::new(Mutex::new(data));
+    let data_handle = Arc::new(SharedVoxelData::new(data));
     let mesher: Arc<dyn VoxelMesher> = Arc::new(ThresholdMesher);
     let meshing_dependency = MeshingDependency::new(mesher, None);
 

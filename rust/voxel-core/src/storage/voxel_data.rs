@@ -5,20 +5,21 @@
 //! synchronous storage contract: LOD maps, format, bounds, block insertion,
 //! direct voxel edits, modification flags, LOD cascade, copy/paste, the
 //! reference-counted view/unview API and area-loaded queries. Threaded
-//! streaming task integration is layered on top in later Phase 4 steps
-//! (the C++ `SpatialLock3D` + per-LOD `RWLock` are deferred — Rust uses
-//! `&mut self` to enforce exclusive access at the type level for now).
+//! streaming task integration is layered on top in later Phase 4 steps.
+//! Shared task code reaches `VoxelData` through [`SharedVoxelData`], which
+//! owns the scoped `SpatialLock3D` region guards used by C++ terrain workers.
 
 use crate::constants::voxel_constants::MAX_LOD;
 use crate::generators::base::{VoxelGenerator, VoxelQueryData};
-use crate::math::{Box3i, Vector3i};
+use crate::math::{Box3i, BoxBounds3i, Vector3i};
 use crate::storage::{
     voxel_buffer::{raw_voxel_to_real, real_to_raw_voxel, SDF_FAR_OUTSIDE},
     VoxelBuffer, VoxelDataBlock, VoxelDataMap, VoxelFormat,
 };
 use crate::streams::VoxelStream;
+use crate::thread::SpatialLock3D;
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex, MutexGuard as StdMutexGuard, TryLockError};
 
 #[derive(Debug)]
 struct VoxelDataLod {
@@ -57,9 +58,147 @@ pub type SharedVoxelGenerator = Arc<dyn VoxelGenerator>;
 /// lets multiple task instances reach the same stream.
 pub type SharedVoxelStream = Arc<dyn VoxelStream>;
 
+/// Shared voxel-data handle for worker tasks.
+///
+/// This is the migration boundary between the earlier `Arc<Mutex<VoxelData>>`
+/// port and the C++ shape where terrain code passes a shared `VoxelData`
+/// pointer and each method scopes its own map/region locks. The data mutex
+/// still protects the current `VoxelData` value while A3 is being migrated;
+/// the per-LOD [`SpatialLock3D`] guards are already real and are taken by
+/// mesh/read and edit/write regions before touching the data.
+pub struct SharedVoxelData {
+    data: StdMutex<VoxelData>,
+    spatial_locks: Vec<SpatialLock3D>,
+}
+
+impl SharedVoxelData {
+    pub fn new(data: VoxelData) -> Self {
+        Self {
+            data: StdMutex::new(data),
+            spatial_locks: (0..MAX_LOD).map(|_| SpatialLock3D::new()).collect(),
+        }
+    }
+
+    pub fn lock(&self) -> StdMutexGuard<'_, VoxelData> {
+        self.data.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub fn try_lock(&self) -> Option<StdMutexGuard<'_, VoxelData>> {
+        match self.data.try_lock() {
+            Ok(guard) => Some(guard),
+            Err(TryLockError::Poisoned(e)) => Some(e.into_inner()),
+            Err(TryLockError::WouldBlock) => None,
+        }
+    }
+
+    pub fn with_data<R>(&self, f: impl FnOnce(&VoxelData) -> R) -> R {
+        let data = self.lock();
+        f(&data)
+    }
+
+    pub fn with_data_mut<R>(&self, f: impl FnOnce(&mut VoxelData) -> R) -> R {
+        let mut data = self.lock();
+        f(&mut data)
+    }
+
+    pub fn read_region(&self, lod_index: usize, voxel_box: Box3i) -> SharedVoxelDataReadRegion<'_> {
+        let bounds = bounds_from_box(voxel_box);
+        let lock = self.spatial_lock(lod_index);
+        lock.lock_read(bounds);
+        SharedVoxelDataReadRegion { lock, bounds }
+    }
+
+    pub fn try_read_region(
+        &self,
+        lod_index: usize,
+        voxel_box: Box3i,
+    ) -> Option<SharedVoxelDataReadRegion<'_>> {
+        let bounds = bounds_from_box(voxel_box);
+        let lock = self.spatial_lock(lod_index);
+        if lock.try_lock_read(bounds) {
+            Some(SharedVoxelDataReadRegion { lock, bounds })
+        } else {
+            None
+        }
+    }
+
+    pub fn write_region(
+        &self,
+        lod_index: usize,
+        voxel_box: Box3i,
+    ) -> SharedVoxelDataWriteRegion<'_> {
+        let bounds = bounds_from_box(voxel_box);
+        let lock = self.spatial_lock(lod_index);
+        lock.lock_write(bounds);
+        SharedVoxelDataWriteRegion { lock, bounds }
+    }
+
+    pub fn try_write_region(
+        &self,
+        lod_index: usize,
+        voxel_box: Box3i,
+    ) -> Option<SharedVoxelDataWriteRegion<'_>> {
+        let bounds = bounds_from_box(voxel_box);
+        let lock = self.spatial_lock(lod_index);
+        if lock.try_lock_write(bounds) {
+            Some(SharedVoxelDataWriteRegion { lock, bounds })
+        } else {
+            None
+        }
+    }
+
+    pub fn locked_region_count(&self, lod_index: usize) -> usize {
+        self.spatial_lock(lod_index).locked_boxes_count()
+    }
+
+    fn spatial_lock(&self, lod_index: usize) -> &SpatialLock3D {
+        self.spatial_locks
+            .get(lod_index)
+            .expect("LOD index is outside the supported range")
+    }
+}
+
+impl fmt::Debug for SharedVoxelData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let data = self.lock();
+        f.debug_struct("SharedVoxelData")
+            .field("data", &*data)
+            .field("spatial_lock_count", &self.spatial_locks.len())
+            .finish()
+    }
+}
+
+#[derive(Debug)]
+pub struct SharedVoxelDataReadRegion<'a> {
+    lock: &'a SpatialLock3D,
+    bounds: BoxBounds3i,
+}
+
+impl Drop for SharedVoxelDataReadRegion<'_> {
+    fn drop(&mut self) {
+        self.lock.unlock_read(self.bounds);
+    }
+}
+
+#[derive(Debug)]
+pub struct SharedVoxelDataWriteRegion<'a> {
+    lock: &'a SpatialLock3D,
+    bounds: BoxBounds3i,
+}
+
+impl Drop for SharedVoxelDataWriteRegion<'_> {
+    fn drop(&mut self) {
+        self.lock.unlock_write(self.bounds);
+    }
+}
+
+fn bounds_from_box(voxel_box: Box3i) -> BoxBounds3i {
+    BoxBounds3i::from_box(voxel_box.position, voxel_box.size)
+}
+
 /// Aggregate voxel storage.
 ///
-/// Locking invariant for task code using `Arc<Mutex<VoxelData>>`: clone shared
+/// Locking invariant for task code using [`SharedVoxelData`]: clone shared
 /// generator/stream handles and copy cheap settings while holding the data
 /// lock, then release the lock before calling generator, mesher or stream
 /// methods. This mirrors the C++ contract where those shared resources are
@@ -1048,7 +1187,7 @@ fn clone_block(block: &VoxelDataBlock) -> VoxelDataBlock {
 
 #[cfg(test)]
 mod tests {
-    use super::{BlockLocation, SharedVoxelGenerator, VoxelData};
+    use super::{BlockLocation, SharedVoxelData, SharedVoxelGenerator, VoxelData};
     use crate::generators::base::{GenResult, VoxelGenerator, VoxelQueryData};
     use crate::math::{Box3i, Vector3i};
     use crate::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelDataBlock, VoxelFormat};
@@ -1615,6 +1754,38 @@ mod tests {
         });
         assert_eq!(probed.len(), 1);
         assert!(Arc::ptr_eq(data.generator().as_ref().unwrap(), &generator));
+    }
+
+    #[test]
+    fn shared_voxel_data_region_locks_follow_voxel_data_contract() {
+        let shared = SharedVoxelData::new(VoxelData::new());
+        let area = Box3i::new(Vector3i::zero(), Vector3i::splat(16));
+        let overlap = Box3i::new(Vector3i::splat(8), Vector3i::splat(16));
+        let disjoint = Box3i::new(Vector3i::splat(64), Vector3i::splat(16));
+
+        let read = shared.read_region(0, area);
+        let overlap_read = shared
+            .try_read_region(0, overlap)
+            .expect("overlapping mesh/read regions may coexist");
+        assert!(
+            shared.try_write_region(0, overlap).is_none(),
+            "overlapping edit/write region must wait for readers"
+        );
+        let disjoint_write = shared
+            .try_write_region(0, disjoint)
+            .expect("disjoint edit/write region can proceed");
+        assert_eq!(shared.locked_region_count(0), 3);
+
+        drop(disjoint_write);
+        drop(overlap_read);
+        drop(read);
+
+        let write = shared
+            .try_write_region(0, overlap)
+            .expect("write should acquire after readers drop");
+        assert_eq!(shared.locked_region_count(0), 1);
+        drop(write);
+        assert_eq!(shared.locked_region_count(0), 0);
     }
 
     #[test]

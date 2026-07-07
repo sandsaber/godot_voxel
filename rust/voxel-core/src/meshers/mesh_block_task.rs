@@ -18,9 +18,9 @@
 
 use crate::engine::MeshingDependency;
 use crate::generators::base::{VoxelGenerator, VoxelQueryData};
-use crate::math::Vector3i;
+use crate::math::{Box3i, Vector3i};
 use crate::meshers::{MesherInput, MesherOutput, VoxelMesher};
-use crate::storage::{VoxelBuffer, VoxelData};
+use crate::storage::{SharedVoxelData, VoxelBuffer, VoxelData};
 use crate::tasks::{TaskPriority, TaskRunOutcome, ThreadedTask, ThreadedTaskContext};
 use std::sync::Arc;
 
@@ -46,7 +46,7 @@ pub struct BlockMeshOutput {
 pub struct MeshBlockTaskParams {
     pub position_in_blocks: Vector3i,
     pub lod_index: u8,
-    pub data: Arc<std::sync::Mutex<VoxelData>>,
+    pub data: Arc<SharedVoxelData>,
     pub meshing_dependency: Arc<MeshingDependency>,
     /// Hint that collision geometry is wanted (passed to the mesher).
     pub collision_hint: bool,
@@ -62,7 +62,7 @@ pub struct MeshBlockTaskParams {
 pub struct MeshBlockTask {
     position_in_blocks: Vector3i,
     lod_index: u8,
-    data: Arc<std::sync::Mutex<VoxelData>>,
+    data: Arc<SharedVoxelData>,
     meshing_dependency: Arc<MeshingDependency>,
     collision_hint: bool,
     lod_hint: bool,
@@ -126,9 +126,17 @@ impl MeshBlockTask {
 
         let generator_handle = self.meshing_dependency.generator();
 
+        let data_block_size = self.data.with_data(|data| data.block_size() as i32);
+        let lod_block_size = data_block_size << u32::from(self.lod_index);
+        let read_box = Box3i::new(
+            (self.position_in_blocks - Vector3i::splat(1)) * lod_block_size,
+            Vector3i::splat(lod_block_size * 3),
+        );
+
         let mut voxels = VoxelBuffer::with_size(Vector3i::zero());
         let gather_plan = {
-            let data = self.data.lock().expect("voxel data mutex poisoned");
+            let _read_region = self.data.read_region(self.lod_index as usize, read_box);
+            let data = self.data.lock();
             gather_voxels_cpu_snapshot(
                 &mut voxels,
                 min_padding,
@@ -376,7 +384,7 @@ mod tests {
     use crate::generators::base::{GenResult, VoxelGenerator, VoxelQueryData};
     use crate::math::{Box3i, Vector3i};
     use crate::meshers::{MesherInput, MesherOutput, Surface, SurfaceArrays, VoxelMesher};
-    use crate::storage::{ChannelId, VoxelBuffer, VoxelData};
+    use crate::storage::{ChannelId, SharedVoxelData, VoxelBuffer, VoxelData};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Condvar, Mutex, Weak};
     use std::time::{Duration, Instant};
@@ -397,7 +405,7 @@ mod tests {
     }
 
     struct VoxelDataLockProbeGenerator {
-        data: Weak<Mutex<VoxelData>>,
+        data: Weak<SharedVoxelData>,
     }
 
     impl VoxelGenerator for VoxelDataLockProbeGenerator {
@@ -414,7 +422,7 @@ mod tests {
     }
 
     struct VoxelDataLockProbeMesher {
-        data: Weak<Mutex<VoxelData>>,
+        data: Weak<SharedVoxelData>,
         build_calls: Arc<Mutex<usize>>,
     }
 
@@ -508,7 +516,7 @@ mod tests {
         }
     }
 
-    fn shared_data_with_central_block(block_size: i32) -> Arc<Mutex<VoxelData>> {
+    fn shared_data_with_central_block(block_size: i32) -> Arc<SharedVoxelData> {
         let mut data = VoxelData::new();
         data.set_bounds(Box3i::new(
             Vector3i::splat(-block_size * 4),
@@ -518,7 +526,7 @@ mod tests {
         data.set_full_load_completed(true);
         // Force-residence of the central block by writing one voxel into it.
         data.try_set_voxel(1, Vector3i::new(1, 1, 1), ChannelId::Type.index());
-        Arc::new(Mutex::new(data))
+        Arc::new(SharedVoxelData::new(data))
     }
 
     #[test]
