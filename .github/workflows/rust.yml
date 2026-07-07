@@ -84,13 +84,23 @@ jobs:
 
       - name: Install Android NDK
         run: |
-          if [[ -z "${ANDROID_HOME:-}" ]]; then
-            echo "ANDROID_HOME is not set by the runner" >&2
+          ANDROID_SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          if [[ -z "$ANDROID_SDK" ]]; then
+            echo "Neither ANDROID_HOME nor ANDROID_SDK_ROOT is set by the runner" >&2
             exit 1
           fi
-          yes | sdkmanager --licenses >/dev/null
-          sdkmanager --install "ndk;${ANDROID_NDK_VERSION}"
-          echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
+          SDKMANAGER="${ANDROID_SDK}/cmdline-tools/latest/bin/sdkmanager"
+          if [[ ! -x "$SDKMANAGER" ]]; then
+            SDKMANAGER="${ANDROID_SDK}/cmdline-tools/bin/sdkmanager"
+          fi
+          if [[ ! -x "$SDKMANAGER" ]]; then
+            echo "sdkmanager not found under ${ANDROID_SDK}" >&2
+            find "$ANDROID_SDK" -maxdepth 4 -name sdkmanager -type f >&2 || true
+            exit 1
+          fi
+          yes | "$SDKMANAGER" --licenses >/dev/null
+          "$SDKMANAGER" --install "ndk;${ANDROID_NDK_VERSION}"
+          echo "ANDROID_NDK_HOME=${ANDROID_SDK}/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
 
       - name: Build Android aarch64 GDExtension
         run: ./scripts/android-build.sh
