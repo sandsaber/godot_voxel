@@ -250,7 +250,7 @@ godot_voxel (fork)
 | Perf vs C++ (criterion benchmarks) | benches/ | ≥ -15% (target = 0%) |
 | Coverage voxel-core | cargo tarpaulin | ≥ 70% к Фазе 3 |
 | Cross-compile targets | CI | android ✓ (Ф2), ios ✓ (Ф2), wasm ⬜ |
-| Build time на CI | GitHub Actions | <15 мин incremental; базовый Rust workflow добавлен 2026-07-07 |
+| Build time на CI | GitHub Actions | <15 мин incremental; базовый Rust workflow + Android aarch64 smoke добавлены 2026-07-07 |
 | Количество переведённых строк | tracking | cumulative по фазам |
 
 ---
@@ -305,7 +305,8 @@ godot_voxel (fork)
 | 2026-07-07 | Audit wave 2D: SharedVoxelData per-LOD map locks | ✅ total 653 unit + 10 integration. `SharedVoxelData` no longer wraps one `VoxelData` in a common data lock: settings are snapshotted from their own lock, each LOD map has an independent `RwLock`, mesh gather reads only the target LOD map, and terrain view/unview/load writes mutate only the target LOD map. Added regression test `shared_voxel_data_allows_parallel_lod_map_writes`. Then-remaining wave 2 work: A5 task runner + stress/TSan |
 | 2026-07-07 | Audit wave 2E: ThreadedTaskRunner semaphore/staging + nonblocking terrain drain | ✅ total 655 unit + 10 integration. `ThreadedTaskRunner` now stages enqueued work under a separate lock, wakes workers with `thread::Semaphore`, sorts cached priorities before end-pop, and keeps condvar waiting for `wait_for_all_tasks`. `VoxelTerrainCore::process()` no longer blocks on two waits per tick; it drains completed work opportunistically and dispatches load/mesh batches via `enqueue_many`. Added regression tests `enqueue_does_not_block_on_worker_queue_lock` and `process_does_not_wait_for_slow_load_tasks`. Then-remaining wave 2 work: stress/TSan |
 | 2026-07-07 | Audit wave 2F: threaded edit/load/mesh stress | ✅ total 655 unit + 11 integration. Added `threaded_edit_load_mesh_stress`: six `ThreadedTaskRunner` workers run `MeshBlockTask` over shared `SharedVoxelData` while two mutator threads perform region-locked edits and load-style block inserts. The stress asserts all mesh outputs complete, edit/load counters match, and `SpatialLock3D` regions are released. Remaining wave 2 work: Linux/nightly TSan |
-| 2026-07-07 | Rust workspace CI | ✅ `.github/workflows/rust.yml` запускает pinned toolchain + Cargo cache + `cargo fmt --all -- --check`, `cargo test --workspace`, `cargo clippy --workspace --all-targets`, `cargo build --workspace` на Ubuntu для Rust path changes. Android cross-build smoke и bench smoke остаются отдельными infra-пунктами |
+| 2026-07-07 | Rust workspace CI | ✅ `.github/workflows/rust.yml` запускает pinned toolchain + Cargo cache + `cargo fmt --all -- --check`, `cargo test --workspace`, `cargo clippy --workspace --all-targets`, `cargo build --workspace` на Ubuntu для Rust path changes |
+| 2026-07-07 | Android aarch64 CI smoke | ✅ `rust.yml` после основного Rust job ставит NDK 29.0.14206865 и запускает `./scripts/android-build.sh` для `voxel-gdext` aarch64 `.so`. `android-build.sh` дополнительно ищет NDK в `ANDROID_HOME`, `ANDROID_SDK_ROOT` и macOS `~/Library/Android/sdk/ndk`. Bench smoke и x86_64-android emulator smoke остаются отдельными infra-пунктами |
 
 ### Где остановились (для возобновления)
 

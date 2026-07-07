@@ -559,8 +559,9 @@ paging-сценарий (движущийся viewer), сравнение с р�
 - **CI для `rust/`**: ✅ закрыто для базового workspace guardrail 2026-07-07.
   `.github/workflows/rust.yml` запускает `cargo fmt --all -- --check`,
   `cargo test --workspace`, `cargo clippy --workspace --all-targets` и
-  `cargo build --workspace` на Ubuntu для Rust-изменений. Android cross-build smoke
-  (скрипт уже есть) и бенч-смоук остаются отдельными infra-пунктами.
+  `cargo build --workspace` на Ubuntu для Rust-изменений, затем Android aarch64
+  GDExtension smoke через `rust/scripts/android-build.sh`. Бенч-смоук и
+  x86_64-android emulator smoke остаются отдельными infra-пунктами.
 - **Бенч-харнесс H2-MT** (см. DoD волны 3) — без него результаты волн неизмеримы: текущий бенч
   меряет только ядро мешера в один поток.
 - **cargo-fuzz таргеты на парсеры** (`.vox`, `block_serializer`, `region`): C++-сторона уже
@@ -592,7 +593,8 @@ clippy/fmt чистые; каждый шаг сверяется с соотве�
 | 2026-07-07 | A3 substep: per-LOD map locks + settings lock | ✅ закрыто. `SharedVoxelData` no longer wraps one `VoxelData` in a common data lock: settings are snapshotted from a separate lock, each LOD map has its own `RwLock`, mesh gather reads only the target LOD map, and terrain view/unview/load writes mutate only the target LOD map. Added `shared_voxel_data_allows_parallel_lod_map_writes`. | `cargo test -p voxel-core` → 653 unit + 10 integration + 1 doc-test, 0 failed |
 | 2026-07-07 | A5: task runner semaphore/staging + nonblocking terrain drain | ✅ закрыто. `ThreadedTaskRunner` stages enqueue work under a separate lock, wakes workers via `thread::Semaphore`, sorts cached priorities before end-pop, and keeps `wait_for_all_tasks` on condvar. `VoxelTerrainCore::process()` now drains completed tasks without blocking and dispatches load/mesh batches through `enqueue_many`. Added `enqueue_does_not_block_on_worker_queue_lock` and `process_does_not_wait_for_slow_load_tasks`. | `cargo test -p voxel-core` → 655 unit + 10 integration + 1 doc-test, 0 failed |
 | 2026-07-07 | Wave 2 stress: threaded edit/load/mesh validation | ✅ закрыто для macOS cargo stress. Added `threaded_edit_load_mesh_stress`: six runner workers mesh shared `SharedVoxelData` while two scoped mutator threads perform region-locked edits and load-style block inserts; asserts all mesh outputs complete, edit/load counters match, and region locks are released. | `cargo test -p voxel-core --test threaded_edit_load_mesh_stress` → 1 passed |
-| 2026-07-07 | Infra: Rust workspace CI | ✅ закрыто для базового GitHub Actions guardrail. Added `.github/workflows/rust.yml` with pinned-toolchain install, Cargo cache, fmt, workspace tests, clippy, and workspace build for Rust path changes. Android cross-build smoke and bench smoke remain separate follow-ups. | локально: `cargo fmt --all -- --check`; `cargo test --workspace`; `cargo clippy --workspace --all-targets`; `cargo build --workspace` |
+| 2026-07-07 | Infra: Rust workspace CI | ✅ закрыто для базового GitHub Actions guardrail. Added `.github/workflows/rust.yml` with pinned-toolchain install, Cargo cache, fmt, workspace tests, clippy, and workspace build for Rust path changes. | локально: `cargo fmt --all -- --check`; `cargo test --workspace`; `cargo clippy --workspace --all-targets`; `cargo build --workspace` |
+| 2026-07-07 | Infra: Android aarch64 CI smoke | ✅ закрыто для device-target smoke. `rust.yml` installs NDK 29.0.14206865, exports `ANDROID_NDK_HOME`, and runs `./scripts/android-build.sh` after the main Rust job. `android-build.sh` now also discovers NDKs from `ANDROID_HOME`, `ANDROID_SDK_ROOT`, and macOS `~/Library/Android/sdk/ndk`. | локально: `./scripts/android-build.sh` → aarch64 `.so` + `gdext_rust_init` |
 
 Пункт #1 по снятию generator/mesher/data сериализации закрыт для текущего worker bridge.
 ABBA-риск с внешним generator/mesher lock снят; правило “не держать data lock через
@@ -620,5 +622,5 @@ byte-parity тесты), но **два системных долга** треб�
 (2) волна 2 — A3, A5 и macOS stress закрыты, дальше TSan
 (закрывает GO-критерий Фазы 4 формально), (3) волна 3 — перф-фиксы горячего пути и graph runtime
 с перемером H2 end-to-end. Параллельно: настроить upstream-tracking (`cpp-reference`) и
-добавить Android cross-build smoke/bench smoke поверх базового Rust CI.
+добавить bench smoke/x86_64-android smoke поверх базового Rust CI.
 Multi-LOD paging начинать после волны 2 — уже на исправленной threading-модели.

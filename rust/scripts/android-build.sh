@@ -58,12 +58,16 @@ fi
 # --- locate the NDK ----------------------------------------------------------
 NDK_ROOT="${ANDROID_NDK_HOME:-${ANDROID_NDK:-}}"
 if [[ -z "$NDK_ROOT" ]]; then
-    for cand in /opt/android-ndk "$HOME/Android/Sdk/ndk"/*; do
+    NDK_CANDIDATES=(/opt/android-ndk)
+    [[ -n "${ANDROID_HOME:-}" ]] && NDK_CANDIDATES+=("$ANDROID_HOME/ndk"/*)
+    [[ -n "${ANDROID_SDK_ROOT:-}" ]] && NDK_CANDIDATES+=("$ANDROID_SDK_ROOT/ndk"/*)
+    NDK_CANDIDATES+=("$HOME/Library/Android/sdk/ndk"/* "$HOME/Android/Sdk/ndk"/*)
+    for cand in "${NDK_CANDIDATES[@]}"; do
         [[ -d "$cand/toolchains/llvm" ]] && NDK_ROOT="$cand" && break
     done
 fi
 if [[ -z "$NDK_ROOT" || ! -d "$NDK_ROOT/toolchains/llvm" ]]; then
-    echo "Android NDK not found. Set ANDROID_NDK_HOME or install to /opt/android-ndk." >&2
+    echo "Android NDK not found. Set ANDROID_NDK_HOME or install an Android SDK NDK." >&2
     exit 1
 fi
 case "$(uname -s)" in
