@@ -38,11 +38,11 @@ real SpatialLock3D) проверены и совпадают с кодом. Ра
 
 ---
 
-## 2. Проверенные факты (прогон 2026-07-06, macOS)
+## 2. Проверенные факты (прогон 2026-07-07, macOS)
 
 | Проверка | Заявлено | Фактически |
 |---|---|---|
-| `cargo test -p voxel-core` | 635 unit + 10 integration + 1 doc-test | ✅ 635 unit + 10 integration (5 e2e + 2 parity + 2 sphere + 1 tables) + 1 doc-test, 0 failed, 1 ignored (diagnostic dump) |
+| `cargo test -p voxel-core` | 655 unit + 11 integration + 1 doc-test | ✅ 655 unit + 11 integration (5 e2e + 2 parity + 2 sphere + 1 tables + 1 threaded stress) + 1 doc-test, 0 failed, 1 ignored (diagnostic dump) |
 | `cargo clippy --workspace --all-targets` | чистый | ✅ чистый |
 | `cargo fmt --check` | чистый | ✅ чистый |
 | `cargo build -p voxel-gdext` | собирается | ✅ собирается |
@@ -145,8 +145,9 @@ GraphGenerator (24+ узлов) / Waves / Flat / Noise / HeightmapNoise
    (нужны SDK+устройство вне окружения). Формально GO-критерий Фазы 2 не выполнен.
 3. **GO-критерий Фазы 4 недостижим текущим кодом**: «нет race conditions под ThreadSanitizer» —
    TSan не запускался; `SharedVoxelData` уже берёт `SpatialLock3D` regions в terrain/mesh
-   consumers и использует per-LOD map locks/settings lock, A5 task runner закрыт, но полноценный
-   конкурентный edit+mesh stress ещё не существует.
+   consumers и использует per-LOD map locks/settings lock, A5 task runner закрыт, а macOS
+   stress `threaded_edit_load_mesh_stress` стабилен. До формального GO остаётся TSan на
+   Linux/nightly.
    Это честно задокументировано, но стоит держать в фокусе: реальная многопоточность может
    вскрыть проблемы в дизайне ownership.
 4. **Parity-покрытие тестами точечное.** Byte-parity доказан для transvoxel-таблиц и двух golden-сфер;
@@ -162,7 +163,7 @@ GraphGenerator (24+ узлов) / Waves / Flat / Noise / HeightmapNoise
 
 Грубо, по C++ LOC ещё не тронутого кода (≈105k из 142k, минус N/A godot-shims ≈7,8k и tests ≈9k → ~88k «содержательных»):
 
-- **Фаза 4 остаток**: variable_lod (9,9k) + VoxelEngine остаток + VoxelDataGrid + stress/TSan — крупнейший кусок: multi-LOD оркестратор.
+- **Фаза 4 остаток**: variable_lod (9,9k) + VoxelEngine остаток + VoxelDataGrid + TSan — крупнейший кусок: multi-LOD оркестратор.
 - **Фаза 5**: binding 75+ классов + editor (12,8k) + edition (7,8k) + modifiers (1,5k) + instancing (9,2k) + terrain root (2k) — по объёму сопоставимо со всем уже сделанным.
 - **Осознанно отложено/опционально**: GPU-путь (gpu + detail_rendering + shaders ≈7,1k), sqlite (2,2k), multipass (2,3k), FastNoise2 (3,1k), physics (Rapier, §9 плана — не начат).
 
@@ -192,7 +193,7 @@ GraphGenerator (24+ узлов) / Waves / Flat / Noise / HeightmapNoise
    (по образцу уже правильного `SharedVoxelStream = Arc<dyn VoxelStream>`).
 3. **`SharedVoxelData` data `RwLock` после аудита закрыт 2026-07-07**: worker bridge теперь хранит
    settings под отдельным lock и каждую LOD map под независимым `RwLock`; terrain/mesh load/view/gather
-   paths больше не берут общий data lock. Остаётся stress/TSan-валидация всей edit/load/mesh связки.
+   paths больше не берут общий data lock. macOS stress для edit/load/mesh добавлен; остаётся TSan.
 4. **Потенциальный ABBA-дедлок**: `LoadBlockForTerrainTask` берёт Data→Generator
    (`voxel_terrain_core.rs:748-777`), `MeshBlockTask` — Generator→Data (`mesh_block_task.rs:131-138`).
    При общем генераторе (естественная production-конфигурация) два worker-потока могут
@@ -294,7 +295,7 @@ so we can get rid of abstraction layers and conditionals»*):
 > generator/mesher/stream callbacks выполняются после выхода из `VoxelData` lock.
 > Обновление 2026-07-07: оставшаяся часть #1 тоже закрыта для `SharedVoxelData` worker bridge —
 > settings вынесены в отдельный lock, LOD maps — в независимые `RwLock`, terrain/mesh worker paths
-> мигрированы с общего data lock. A5 task runner тоже закрыт; дальше по конкурентности: stress/TSan.
+> мигрированы с общего data lock. A5 task runner и macOS stress тоже закрыты; дальше по конкурентности: TSan.
 
 | # | Что | Эффект | Стоимость |
 |---|---|---|---|
@@ -389,7 +390,7 @@ overlapping writes и пропускает disjoint regions. Подшаг 2026-0
 заменил bridge lock на shared data `RwLock`, так что read-only snapshots теперь
 пересекаются. Подшаг 2026-07-07 заменил общий data `RwLock` внутри `SharedVoxelData`
 на settings lock + per-LOD map locks и перевёл terrain/mesh worker paths на эти методы.
-A3 для worker bridge закрыт; A5 task runner закрыт; остаток волны 2 — stress/TSan.
+A3 для worker bridge закрыт; A5 task runner закрыт; macOS stress закрыт; остаток волны 2 — TSan.
 
 *Альтернативы (отвергнуты):* шардированный map (DashMap-стиль) — новая зависимость и другая
 семантика блокировок, теряем сверяемость с C++; actor-модель (один поток-владелец + каналы) —
@@ -430,9 +431,10 @@ generator/mesher/stream. `LoadBlockForTerrainTask` снимает snapshot `bloc
 - `process()` больше не блокируется на двух `wait_for_all_tasks()`: tick делает неблокирующий drain
   завершённых тасков и даёт load/mesh задачам завершаться между кадрами.
 
-**Валидация волны A:** stress-тест (8 потоков: параллельные mesh + edit + load на общей
-`VoxelData`, счётчики целостности), прогон под TSan (nightly `-Zsanitizer=thread`, на Linux-хосте),
-опционально loom для `SpatialLock3D`. Это же закрывает GO-критерий Фазы 4.
+**Валидация волны A:** ✅ macOS stress-тест добавлен (`threaded_edit_load_mesh_stress`:
+6 worker threads + 2 mutator threads, параллельные mesh + edit + load на общей `VoxelData`,
+счётчики целостности). Остался прогон под TSan (nightly `-Zsanitizer=thread`, на Linux-хосте),
+опционально loom для `SpatialLock3D`. Это закрывает GO-критерий Фазы 4 формально.
 
 #### B. Горячий путь мешинга (проблема §9.2)
 
@@ -539,13 +541,13 @@ A4 (правило замков).
 Уже после этой волны mesh-build'ы и генерация исполняются параллельно (глобальный замок
 `VoxelData` остаётся только на gather — короткая секция).
 **DoD:** новый тест «N воркеров мешат M блоков» показывает масштабирование по потокам
-(время ~1/N, загрузка >1 ядра); 655+10 тестов и golden-парити зелёные.
+(время ~1/N, загрузка >1 ядра); 655+11 тестов и golden-парити зелёные.
 
 **Волна 2 — конкурентность до конца:**
 A3 (`Arc<SharedVoxelData>` + per-LOD RwLock/settings lock) ✅ → A5 (semaphore + staging +
-неблокирующий drain в `process()`) ✅ → stress/TSan.
-**DoD:** stress-тест (8 потоков: mesh + edit + load на общей `VoxelData`) стабилен; TSan-прогон
-чист (nightly `-Zsanitizer=thread`, Linux-хост); GO-критерий Фазы 4 закрыт формально.
+неблокирующий drain в `process()`) ✅ → macOS stress ✅ → TSan.
+**DoD:** stress-тест (8 потоков: mesh + edit + load на общей `VoxelData`) стабилен; остаётся
+чистый TSan-прогон (nightly `-Zsanitizer=thread`, Linux-хост) для формального GO-критерия Фазы 4.
 
 **Волна 3 — производительность:**
 решение по D7 → B1 → B3/B4/B5 → C1 → C3.
@@ -563,7 +565,7 @@ paging-сценарий (движущийся viewer), сравнение с р�
 - **cargo-fuzz таргеты на парсеры** (`.vox`, `block_serializer`, `region`): C++-сторона уже
   фаззится (`fuzzer.yml`), Rust-парсеры — нет; баг D2 — ровно тот класс, который находит фаззер.
 
-Инварианты на всём протяжении: 655 unit + 10 integration + golden-парити остаются зелёными;
+Инварианты на всём протяжении: 655 unit + 11 integration + golden-парити остаются зелёными;
 clippy/fmt чистые; каждый шаг сверяется с соответствующим C++-файлом (ссылки в §9.1-9.3).
 
 ---
@@ -588,12 +590,13 @@ clippy/fmt чистые; каждый шаг сверяется с соотве�
 | 2026-07-07 | A3 substep: SharedVoxelData read concurrency | ✅ закрыто. `SharedVoxelData::with_data` now uses a shared `RwLock` read guard and mutation paths use write guards, so independent read snapshots overlap while writes remain exclusive. Added `shared_voxel_data_allows_parallel_read_snapshots`. | `cargo test -p voxel-core` → 652 unit + 10 integration + 1 doc-test, 0 failed |
 | 2026-07-07 | A3 substep: per-LOD map locks + settings lock | ✅ закрыто. `SharedVoxelData` no longer wraps one `VoxelData` in a common data lock: settings are snapshotted from a separate lock, each LOD map has its own `RwLock`, mesh gather reads only the target LOD map, and terrain view/unview/load writes mutate only the target LOD map. Added `shared_voxel_data_allows_parallel_lod_map_writes`. | `cargo test -p voxel-core` → 653 unit + 10 integration + 1 doc-test, 0 failed |
 | 2026-07-07 | A5: task runner semaphore/staging + nonblocking terrain drain | ✅ закрыто. `ThreadedTaskRunner` stages enqueue work under a separate lock, wakes workers via `thread::Semaphore`, sorts cached priorities before end-pop, and keeps `wait_for_all_tasks` on condvar. `VoxelTerrainCore::process()` now drains completed tasks without blocking and dispatches load/mesh batches through `enqueue_many`. Added `enqueue_does_not_block_on_worker_queue_lock` and `process_does_not_wait_for_slow_load_tasks`. | `cargo test -p voxel-core` → 655 unit + 10 integration + 1 doc-test, 0 failed |
+| 2026-07-07 | Wave 2 stress: threaded edit/load/mesh validation | ✅ закрыто для macOS cargo stress. Added `threaded_edit_load_mesh_stress`: six runner workers mesh shared `SharedVoxelData` while two scoped mutator threads perform region-locked edits and load-style block inserts; asserts all mesh outputs complete, edit/load counters match, and region locks are released. | `cargo test -p voxel-core --test threaded_edit_load_mesh_stress` → 1 passed |
 
 Пункт #1 по снятию generator/mesher/data сериализации закрыт для текущего worker bridge.
 ABBA-риск с внешним generator/mesher lock снят; правило “не держать data lock через
 generator/mesher/stream” закреплено A4 для текущих load/gather путей. Переиспользование
 `MeshArrays`/`MesherOutput` остаётся отдельной perf-частью B3. До формального GO Фазы 4
-ещё нужен конкурентный stress/TSan.
+ещё нужен TSan-прогон на Linux/nightly.
 
 ## 10. Вывод
 
@@ -605,14 +608,15 @@ byte-parity тесты), но **два системных долга** треб�
 
 1. **Конкурентная модель** (§9.1): trait-level сериализация генерации/мешинга снята,
    callbacks больше не выполняются под data/map lock, а `SharedVoxelData` worker bridge
-   перешёл на settings lock + per-LOD map locks, а task runner получил semaphore/staging и
-   неблокирующий terrain drain. Формально закрыть GO Фазы 4 ещё мешает stress/TSan-проверка.
+   перешёл на settings lock + per-LOD map locks, task runner получил semaphore/staging и
+   неблокирующий terrain drain, macOS stress для edit/load/mesh зелёный. Формально закрыть
+   GO Фазы 4 ещё мешает TSan-проверка.
 2. **Горячий путь мешинга** (§9.2): адаптерный слой вернул абстракционные издержки, которые C++
    целенаправленно устранял; заявление H2 о 1.5× преимуществе не распространяется на end-to-end конвейер.
 
 План действий — три волны из §9.6: (1) волна 1 закрыта,
-(2) волна 2 — A3 и A5 закрыты, дальше TSan/stress
-(закрывает GO-критерий Фазы 4), (3) волна 3 — перф-фиксы горячего пути и graph runtime
+(2) волна 2 — A3, A5 и macOS stress закрыты, дальше TSan
+(закрывает GO-критерий Фазы 4 формально), (3) волна 3 — перф-фиксы горячего пути и graph runtime
 с перемером H2 end-to-end. Параллельно: настроить upstream-tracking (`cpp-reference`) и
 CI для `rust/` — сейчас Rust не собирается ни одним workflow.
 Multi-LOD paging начинать после волны 2 — уже на исправленной threading-модели.
