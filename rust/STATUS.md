@@ -11,10 +11,10 @@
 | 1 — Pure core (`util/{math,string,memory,io,testing}` + `expression_parser`) | ✅ COMPLETE | (cumulative) |
 | 2 — Mobile validation (gdext `.so` desktop + Android) | ✅ desktop+Android `.so` (on-device: pending SDK) | — |
 | 3 — Compute layer (storage, streams, meshers, generators, format) | ✅ COMPLETE | (cumulative) |
-| 4 — Terrain + threading (storage/streaming/meshing/paging/graph) | 🟡 IN PROGRESS | 653 unit + 10 integration |
+| 4 — Terrain + threading (storage/streaming/meshing/paging/graph) | 🟡 IN PROGRESS | 655 unit + 10 integration |
 | 5 — Godot binding + editor | ⏳ not started | — |
 
-**Total:** 653 unit tests + 10 integration + 1 doc-test, clippy clean.
+**Total:** 655 unit tests + 10 integration + 1 doc-test, clippy clean.
 
 ## Phase 4 — what works headlessly (no Godot)
 
@@ -49,7 +49,7 @@ VoxelTerrainCore (single-LOD paging orchestrator)
    • try_schedule_mesh_update (has_all_blocks_in_area gate)
    • LoadBlockForTerrainTask (stream first, generator fallback)
    • save-on-unload for modified data blocks
-   • full process() tick — viewers → loads → meshing → outputs → unload
+   • nonblocking process() tick — viewers → enqueue loads/meshing → drain completed outputs → unload
    ▼
 VoxelEngine foundation
    • generational volume/viewer registry
@@ -64,7 +64,7 @@ VoxelEngine foundation
 
 - **Multi-LOD paging** (`VoxelLodTerrain`): `VoxelLodTerrainUpdateData` + threaded update task + clipbox/octree strategy (~4k lines C++).
 - **`VoxelEngine` remaining subset**: main-thread time-spread/progressive queues, GPU queue, file locker, stats/profiling and volume callback dispatch.
-- **Concurrency audit follow-ups**: A5 task runner (semaphore + staging + nonblocking drain), plus stress/ThreadSanitizer coverage for the threaded edit/load/mesh path.
+- **Concurrency audit follow-ups**: stress/ThreadSanitizer coverage for the threaded edit/load/mesh path.
 - **Graph extensions**: Curve/Image range analysis, FastNoise2, Expression node (parser is ported, not wired), bytecode VM optimisation.
 - **`VoxelDataGrid`**, **ThreadSanitizer** end-to-end.
 - **Phase 5 Godot binding**: `Node3D` wrappers for `VoxelTerrainCore` + `RenderingServer` mesh upload + `EditorPlugin`.
@@ -104,7 +104,7 @@ rust/
 
 ```bash
 cd rust
-cargo test -p voxel-core       # 653 unit + 10 integration + 1 doc-test
+cargo test -p voxel-core       # 655 unit + 10 integration + 1 doc-test
 cargo build -p voxel-gdext     # GDExtension .so (loads in Godot 4.7)
 cargo clippy --workspace --all-targets   # clean
 cargo bench                    # transvoxel benches

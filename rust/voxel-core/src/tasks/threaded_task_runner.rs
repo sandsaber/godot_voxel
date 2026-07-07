@@ -7,6 +7,7 @@
 //! surfaces and hot resizing are intentionally deferred.
 
 use super::{TaskPriority, TaskRunOutcome, ThreadedTask, ThreadedTaskContext};
+use crate::thread::Semaphore;
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
@@ -73,33 +74,40 @@ impl ThreadedTaskRunner {
     }
 
     pub fn enqueue(&self, task: Box<dyn ThreadedTask>, serial: bool) {
-        let mut state = self.shared.lock_state();
-        state.tasks.push(TaskItem {
+        let mut staged_tasks = self.shared.lock_staged_tasks();
+        staged_tasks.push(TaskItem {
             task,
             cached_priority: TaskPriority::min(),
             is_serial: serial,
         });
-        self.shared.cvar.notify_all();
+        drop(staged_tasks);
+        self.shared.work_semaphore.post();
     }
 
     pub fn enqueue_many<I>(&self, tasks: I, serial: bool)
     where
         I: IntoIterator<Item = Box<dyn ThreadedTask>>,
     {
-        let mut state = self.shared.lock_state();
+        let mut staged_tasks = self.shared.lock_staged_tasks();
+        let mut count = 0;
         for task in tasks {
-            state.tasks.push(TaskItem {
+            staged_tasks.push(TaskItem {
                 task,
                 cached_priority: TaskPriority::min(),
                 is_serial: serial,
             });
+            count += 1;
         }
-        self.shared.cvar.notify_all();
+        drop(staged_tasks);
+
+        for _ in 0..count {
+            self.shared.work_semaphore.post();
+        }
     }
 
     pub fn wait_for_all_tasks(&self) {
         let mut state = self.shared.lock_state();
-        while state.has_pending_or_running_tasks() {
+        while state.has_pending_or_running_tasks() || self.shared.has_staged_tasks() {
             state = self.shared.wait(state);
         }
     }
@@ -128,7 +136,8 @@ impl ThreadedTaskRunner {
     /// not counted, matching the C++ debug remaining counter.
     pub fn remaining_task_count(&self) -> usize {
         let state = self.shared.lock_state();
-        state.tasks.len() + state.spinning_tasks.len() + state.running_count
+        let staged_tasks = self.shared.lock_staged_tasks();
+        staged_tasks.len() + state.tasks.len() + state.spinning_tasks.len() + state.running_count
     }
 
     pub fn shutdown(&mut self) {
@@ -140,10 +149,15 @@ impl ThreadedTaskRunner {
     }
 
     fn stop_threads(&mut self) {
+        let thread_count = self.handles.len();
         {
             let mut state = self.shared.lock_state();
             state.stopping = true;
             self.shared.cvar.notify_all();
+        }
+
+        for _ in 0..thread_count {
+            self.shared.work_semaphore.post();
         }
 
         for handle in self.handles.drain(..) {
@@ -166,6 +180,8 @@ impl Drop for ThreadedTaskRunner {
 
 struct Shared {
     state: Mutex<RunnerState>,
+    staged_tasks: Mutex<Vec<TaskItem>>,
+    work_semaphore: Semaphore,
     cvar: Condvar,
 }
 
@@ -173,6 +189,8 @@ impl Default for Shared {
     fn default() -> Self {
         Self {
             state: Mutex::new(RunnerState::default()),
+            staged_tasks: Mutex::new(Vec::new()),
+            work_semaphore: Semaphore::new(),
             cvar: Condvar::new(),
         }
     }
@@ -181,6 +199,16 @@ impl Default for Shared {
 impl Shared {
     fn lock_state(&self) -> MutexGuard<'_, RunnerState> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn lock_staged_tasks(&self) -> MutexGuard<'_, Vec<TaskItem>> {
+        self.staged_tasks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn has_staged_tasks(&self) -> bool {
+        !self.lock_staged_tasks().is_empty()
     }
 
     fn wait<'a>(&self, guard: MutexGuard<'a, RunnerState>) -> MutexGuard<'a, RunnerState> {
@@ -193,6 +221,7 @@ impl Shared {
 #[derive(Default)]
 struct RunnerState {
     tasks: Vec<TaskItem>,
+    tasks_sorted: bool,
     spinning_tasks: VecDeque<TaskItem>,
     completed_tasks: Vec<Box<dyn ThreadedTask>>,
     stopping: bool,
@@ -210,6 +239,10 @@ struct RunnerState {
 impl RunnerState {
     fn has_pending_or_running_tasks(&self) -> bool {
         !self.tasks.is_empty() || !self.spinning_tasks.is_empty() || self.running_count != 0
+    }
+
+    fn has_queued_tasks(&self) -> bool {
+        !self.tasks.is_empty() || !self.spinning_tasks.is_empty()
     }
 
     /// Returns true when the throttle window has elapsed since the last
@@ -231,32 +264,46 @@ struct TaskItem {
 
 fn worker_loop(shared: Arc<Shared>, thread_index: u8) {
     loop {
+        shared.work_semaphore.wait();
+
         let item = {
             let mut state = shared.lock_state();
-            loop {
-                if state.stopping {
-                    return;
-                }
-
-                let now = Instant::now();
-                if state.priority_refresh_due(now) {
-                    if refresh_priorities_and_complete_cancelled(&mut state) {
-                        shared.cvar.notify_all();
-                    }
-                    state.last_priority_update = Some(now);
-                }
-
-                if let Some(item) = pick_next_task(&mut state) {
-                    state.running_count += 1;
-                    break item;
-                }
-
-                state = shared.wait(state);
+            if state.stopping {
+                return;
             }
+
+            if drain_staged_tasks(&shared, &mut state) {
+                state.tasks_sorted = false;
+            }
+
+            let now = Instant::now();
+            if !state.tasks_sorted || state.priority_refresh_due(now) {
+                if refresh_priorities_and_complete_cancelled(&mut state) {
+                    shared.cvar.notify_all();
+                }
+                state.last_priority_update = Some(now);
+            }
+
+            let Some(item) = pick_next_task(&mut state) else {
+                continue;
+            };
+
+            state.running_count += 1;
+            item
         };
 
         run_task_item(&shared, thread_index, item);
     }
+}
+
+fn drain_staged_tasks(shared: &Shared, state: &mut RunnerState) -> bool {
+    let mut staged_tasks = shared.lock_staged_tasks();
+    if staged_tasks.is_empty() {
+        return false;
+    }
+
+    state.tasks.extend(staged_tasks.drain(..));
+    true
 }
 
 fn refresh_priorities_and_complete_cancelled(state: &mut RunnerState) -> bool {
@@ -273,6 +320,10 @@ fn refresh_priorities_and_complete_cancelled(state: &mut RunnerState) -> bool {
         }
         i += 1;
     }
+    state
+        .tasks
+        .sort_unstable_by_key(|item| item.cached_priority);
+    state.tasks_sorted = true;
     completed_cancelled
 }
 
@@ -307,20 +358,15 @@ fn pick_postponed_task(state: &mut RunnerState) -> Option<TaskItem> {
 }
 
 fn pick_prioritized_task(state: &mut RunnerState) -> Option<TaskItem> {
-    let mut best_index = None;
-    let mut best_priority = TaskPriority::min();
-
-    for (i, item) in state.tasks.iter().enumerate() {
-        if item.is_serial && state.serial_running {
-            continue;
-        }
-        if best_index.is_none() || item.cached_priority > best_priority {
-            best_index = Some(i);
-            best_priority = item.cached_priority;
-        }
+    if !state.serial_running {
+        return state.tasks.pop();
     }
 
-    best_index.map(|index| state.tasks.swap_remove(index))
+    state
+        .tasks
+        .iter()
+        .rposition(|item| !item.is_serial)
+        .map(|index| state.tasks.remove(index))
 }
 
 fn run_task_item(shared: &Shared, thread_index: u8, mut item: TaskItem) {
@@ -338,6 +384,7 @@ fn run_task_item(shared: &Shared, thread_index: u8, mut item: TaskItem) {
         state.serial_running = false;
     }
 
+    let mut should_post_work = false;
     match outcome {
         TaskRunOutcome::Complete(task) => {
             state.completed_tasks.push(task);
@@ -348,11 +395,18 @@ fn run_task_item(shared: &Shared, thread_index: u8, mut item: TaskItem) {
                 cached_priority: item.cached_priority,
                 is_serial: item.is_serial,
             });
+            should_post_work = true;
         }
         TaskRunOutcome::TakenOut => {}
     }
 
+    should_post_work |= item.is_serial && state.has_queued_tasks();
     shared.cvar.notify_all();
+    drop(state);
+
+    if should_post_work {
+        shared.work_semaphore.post();
+    }
 }
 
 #[cfg(test)]
@@ -641,6 +695,31 @@ mod tests {
 
         assert!(runner.drain_completed_tasks().is_empty());
         assert_eq!(runner.remaining_task_count(), 0);
+    }
+
+    #[test]
+    fn enqueue_does_not_block_on_worker_queue_lock() {
+        let runner = ThreadedTaskRunner::new(0);
+        let state_guard = runner.shared.lock_state();
+        let enqueued = Arc::new(AtomicBool::new(false));
+
+        thread::scope(|scope| {
+            let thread_enqueued = enqueued.clone();
+            let runner_ref = &runner;
+            scope.spawn(move || {
+                runner_ref.enqueue(Box::new(TakenOutTask), false);
+                thread_enqueued.store(true, Ordering::SeqCst);
+            });
+
+            thread::sleep(Duration::from_millis(50));
+            let completed_while_state_was_locked = enqueued.load(Ordering::SeqCst);
+            drop(state_guard);
+
+            assert!(
+                completed_while_state_was_locked,
+                "enqueue should use a staging queue instead of blocking on the worker queue lock"
+            );
+        });
     }
 
     #[test]

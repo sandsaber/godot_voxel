@@ -182,31 +182,26 @@ impl VoxelTerrainCore {
         &self.mesh_map
     }
 
-    /// Synchronous entry point: pump viewer updates, run pending tasks, apply
-    /// completed outputs. Returns the events emitted this tick.
+    /// Per-frame entry point: pump viewer updates, enqueue pending work, and
+    /// drain any task outputs that have completed so far. Returns the events
+    /// emitted this tick.
     ///
     /// Pass the desired viewer set via `viewers`; any paired viewer not in
     /// the list is treated as removed (its boxes shrink to empty, triggering
     /// unloads). This mirrors the C++ `process_viewers` + `process_meshing`
-    /// pair, plus the `apply_*_response` callbacks folded in (the Rust port
-    /// runs tasks synchronously through the runner inside this call).
+    /// pair, plus the `apply_*_response` callbacks folded in.
     pub fn process(&mut self, viewers: &[ViewerUpdate]) -> Vec<VoxelTerrainEvent> {
         self.events.clear();
         if !self.automatic_loading_enabled {
             return std::mem::take(&mut self.events);
         }
 
+        self.drain_completed_tasks();
         self.process_viewers(viewers);
-        // Run pending load + mesh tasks to completion before applying their
-        // outputs. The C++ side lets them finish async across frames; the
-        // Rust core drains them in-process for determinism (a real Godot
-        // binding can swap this for a per-frame budget later).
         self.send_data_load_requests();
-        self.task_runner.wait_for_all_tasks();
         self.drain_completed_tasks();
 
         self.process_meshing();
-        self.task_runner.wait_for_all_tasks();
         self.drain_completed_tasks();
 
         std::mem::take(&mut self.events)
@@ -473,13 +468,16 @@ impl VoxelTerrainCore {
         let positions = std::mem::take(&mut self.blocks_pending_load);
         let data = self.data.clone();
         let stream = self.stream.clone();
-        for bpos in positions {
+        let tasks = positions.into_iter().map(|bpos| {
             // Spawn a tiny task that loads the block from the stream and
-            // hands the result back via `BlockDataOutput`. The runner stores
-            // completed tasks; we drain them after the wait.
-            let task = LoadBlockForTerrainTask::new(bpos, data.clone(), stream.clone());
-            self.task_runner.enqueue(Box::new(task), false);
-        }
+            // hands the result back via `BlockDataOutput`.
+            Box::new(LoadBlockForTerrainTask::new(
+                bpos,
+                data.clone(),
+                stream.clone(),
+            )) as Box<dyn ThreadedTask>
+        });
+        self.task_runner.enqueue_many(tasks, false);
     }
 
     fn drain_completed_tasks(&mut self) {
@@ -504,6 +502,7 @@ impl VoxelTerrainCore {
         let positions = std::mem::take(&mut self.blocks_pending_update);
         let data = self.data.clone();
         let meshing_dependency = self.meshing_dependency.clone();
+        let mut tasks: Vec<Box<dyn ThreadedTask>> = Vec::with_capacity(positions.len());
         for bpos in positions {
             // Reset the in-list flag now that the task is being dispatched
             // (the C++ side does this at line 1978 of process_meshing).
@@ -518,8 +517,9 @@ impl VoxelTerrainCore {
                 collision_hint: false,
                 lod_hint: false,
             });
-            self.task_runner.enqueue(Box::new(task), false);
+            tasks.push(Box::new(task));
         }
+        self.task_runner.enqueue_many(tasks, false);
     }
 
     /// Apply a data-load result (the C++ `apply_data_block_response`).
@@ -818,6 +818,8 @@ mod tests {
     use crate::storage::{ChannelId, VoxelData};
     use crate::streams::LoadResult;
     use crate::tasks::{TaskPriority, TaskRunOutcome, ThreadedTask, ThreadedTaskContext};
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     /// A mesher that always emits one triangle, so we can tell from
     /// `mesh_blocks()[pos].is_loaded` whether the paging loop ran end-to-end.
@@ -887,6 +889,20 @@ mod tests {
         }
     }
 
+    struct SlowNotFoundStream {
+        delay: Duration,
+    }
+
+    impl VoxelStream for SlowNotFoundStream {
+        fn load_voxel_block(
+            &self,
+            _query: crate::streams::VoxelLoadQuery<'_>,
+        ) -> crate::streams::StreamResult<LoadResult> {
+            thread::sleep(self.delay);
+            Ok(LoadResult::NotFound)
+        }
+    }
+
     fn build_core() -> VoxelTerrainCore {
         build_core_with_stream(Arc::new(MemoryStream::new()))
     }
@@ -903,6 +919,54 @@ mod tests {
         let mesher: Arc<dyn VoxelMesher> = Arc::new(AlwaysOneTriangleMesher);
         let meshing_dependency = MeshingDependency::new(mesher, None);
         VoxelTerrainCore::new(data, stream, meshing_dependency)
+    }
+
+    fn process_until<F>(
+        core: &mut VoxelTerrainCore,
+        viewers: &[ViewerUpdate],
+        mut done: F,
+    ) -> Vec<VoxelTerrainEvent>
+    where
+        F: FnMut(&VoxelTerrainCore, &[VoxelTerrainEvent]) -> bool,
+    {
+        let mut last_events = Vec::new();
+        for _ in 0..100 {
+            let events = core.process(viewers);
+            if done(core, &events) {
+                return events;
+            }
+            last_events = events;
+            thread::sleep(Duration::from_millis(5));
+        }
+        panic!(
+            "terrain process condition was not reached; last events {last_events:?}, stats {:?}",
+            core.stats
+        );
+    }
+
+    #[test]
+    fn process_does_not_wait_for_slow_load_tasks() {
+        let stream: Arc<dyn VoxelStream> = Arc::new(SlowNotFoundStream {
+            delay: Duration::from_millis(250),
+        });
+        let mut core = build_core_with_stream(stream);
+        let bs = core.data_block_size();
+        let viewers = vec![ViewerUpdate {
+            id: 1,
+            world_position_voxels: Vector3i::zero(),
+            horizontal_view_distance_voxels: bs,
+            vertical_view_distance_voxels: bs,
+            requires_meshes: true,
+        }];
+
+        let started = Instant::now();
+        let _events = core.process(&viewers);
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < Duration::from_millis(100),
+            "process tick should only enqueue/drain tasks, elapsed {elapsed:?}"
+        );
     }
 
     #[test]
@@ -959,10 +1023,17 @@ mod tests {
             requires_meshes: true,
         }];
 
-        // First tick: schedules loads + mesh task; tasks run synchronously
-        // inside `process`. The central mesh block should be loaded by the
-        // end of this call.
-        let events = core.process(&viewers);
+        // Async ticks: the first call schedules loads, later calls drain load
+        // results, schedule meshing, and drain mesh outputs.
+        let events = process_until(&mut core, &viewers, |core, events| {
+            events
+                .iter()
+                .any(|e| matches!(e, VoxelTerrainEvent::MeshBlockEntered(_)))
+                && core
+                    .mesh_blocks()
+                    .get(&Vector3i::zero())
+                    .is_some_and(|e| e.is_loaded)
+        });
         assert!(
             events
                 .iter()
@@ -988,7 +1059,11 @@ mod tests {
             vertical_view_distance_voxels: bs,
             requires_meshes: true,
         }];
-        core.process(&viewer_near);
+        process_until(&mut core, &viewer_near, |core, _events| {
+            core.mesh_blocks()
+                .get(&Vector3i::zero())
+                .is_some_and(|entry| entry.is_loaded)
+        });
         let loaded_after_first = core.mesh_blocks().len();
         assert!(loaded_after_first > 0);
 
@@ -1001,7 +1076,11 @@ mod tests {
             vertical_view_distance_voxels: bs,
             requires_meshes: true,
         }];
-        let events = core.process(&viewer_far);
+        let events = process_until(&mut core, &viewer_far, |_core, events| {
+            events
+                .iter()
+                .any(|e| matches!(e, VoxelTerrainEvent::MeshBlockExited(_)))
+        });
         assert!(
             events
                 .iter()
@@ -1031,7 +1110,9 @@ mod tests {
             vertical_view_distance_voxels: bs,
             requires_meshes: true,
         }];
-        core.process(&viewer);
+        process_until(&mut core, &viewer, |core, _events| {
+            core.data().block_snapshot(Vector3i::zero(), 0).is_some()
+        });
 
         {
             let data = core.data();
@@ -1039,7 +1120,12 @@ mod tests {
             data.mark_area_modified(Box3i::new(edited_voxel, Vector3i::splat(1)), false);
         }
 
-        core.process(&[]);
+        let empty_viewers = Vec::new();
+        process_until(&mut core, &empty_viewers, |_core, _events| {
+            let mut loaded = VoxelBuffer::new(crate::storage::Allocator::Default);
+            stream.load_block(Vector3i::zero(), 0, &mut loaded) == LoadResult::Found
+                && loaded.get_voxel(1, 1, 1, channel) == 77
+        });
 
         let mut loaded = VoxelBuffer::new(crate::storage::Allocator::Default);
         assert_eq!(
@@ -1070,7 +1156,11 @@ mod tests {
                 requires_meshes: true,
             },
         ];
-        core.process(&two_viewers);
+        process_until(&mut core, &two_viewers, |core, _events| {
+            core.data()
+                .block_snapshot(Vector3i::zero(), 0)
+                .is_some_and(|block| block.viewers.get() == 2)
+        });
 
         let one_viewer = vec![ViewerUpdate {
             id: 1,
@@ -1079,7 +1169,11 @@ mod tests {
             vertical_view_distance_voxels: bs,
             requires_meshes: true,
         }];
-        core.process(&one_viewer);
+        process_until(&mut core, &one_viewer, |core, _events| {
+            core.data()
+                .block_snapshot(Vector3i::zero(), 0)
+                .is_some_and(|block| block.viewers.get() == 1)
+        });
 
         let data = core.data();
         let origin_block = data

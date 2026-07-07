@@ -203,7 +203,7 @@ godot_voxel (fork)
 - `VoxelEngine` foundation + task drain loop (volume/viewer registry + shared priority viewers + threaded task ownership/dequeue) ✅
 - generators::graph extensions: Curve/Image/Noise/SDF nodes, FastNoise2, range analysis, Expression node, bytecode VM — частично (SDF/Curve/Noise/math nodes готовы; Image/FastNoise2/range analysis/Expression/bytecode VM — далее)
 - Cubes/Blocky mesher adapters ✅ (TransvoxelMesher + CubesMesher + BlockyMesher — все три impl VoxelMesher)
-- `VoxelDataGrid`, A5 task runner (semaphore + staging + nonblocking drain), stress/TSan — далее
+- `VoxelDataGrid`, stress/TSan — далее
 - **GO-критерий:** стриминг бесконечного terrain'а работает, нет race conditions
   (проверка под ThreadSanitizer/loom)
 
@@ -302,7 +302,8 @@ godot_voxel (fork)
 | 2026-07-07 | Audit wave 2A: real SpatialLock3D | ✅ total 650 unit + 10 integration. `thread::SpatialLock3D` now tracks `(BoxBounds3i, mode)` entries behind `Mutex<Vec<_>> + Condvar`: overlapping reads coexist, overlapping writes block, disjoint writes proceed. Added tests `spatial_lock_3d_respects_overlap_and_mode` and `spatial_lock_3d_blocking_write_waits_for_overlapping_read` |
 | 2026-07-07 | Audit wave 2B: SharedVoxelData bridge + region guards | ✅ total 651 unit + 10 integration. `MeshBlockTask`, `LoadBlockForTerrainTask`, `VoxelTerrainCore` and e2e tests now use `Arc<SharedVoxelData>` instead of external `Arc<Mutex<VoxelData>>`; mesh gather and terrain data view/load paths take scoped `SpatialLock3D` read/write regions. Then-remaining A3 work: replace the bridge lock with per-LOD `RwLock` + settings lock |
 | 2026-07-07 | Audit wave 2C: SharedVoxelData read concurrency | ✅ total 652 unit + 10 integration. `SharedVoxelData::with_data` now takes a shared `RwLock` read guard while mutation paths take write guards, so independent read snapshots can overlap. Added regression test `shared_voxel_data_allows_parallel_read_snapshots`. Remaining A3 work: split the data `RwLock` into per-LOD map locks + settings lock |
-| 2026-07-07 | Audit wave 2D: SharedVoxelData per-LOD map locks | ✅ total 653 unit + 10 integration. `SharedVoxelData` no longer wraps one `VoxelData` in a common data lock: settings are snapshotted from their own lock, each LOD map has an independent `RwLock`, mesh gather reads only the target LOD map, and terrain view/unview/load writes mutate only the target LOD map. Added regression test `shared_voxel_data_allows_parallel_lod_map_writes`. Remaining wave 2 work: A5 task runner + stress/TSan |
+| 2026-07-07 | Audit wave 2D: SharedVoxelData per-LOD map locks | ✅ total 653 unit + 10 integration. `SharedVoxelData` no longer wraps one `VoxelData` in a common data lock: settings are snapshotted from their own lock, each LOD map has an independent `RwLock`, mesh gather reads only the target LOD map, and terrain view/unview/load writes mutate only the target LOD map. Added regression test `shared_voxel_data_allows_parallel_lod_map_writes`. Then-remaining wave 2 work: A5 task runner + stress/TSan |
+| 2026-07-07 | Audit wave 2E: ThreadedTaskRunner semaphore/staging + nonblocking terrain drain | ✅ total 655 unit + 10 integration. `ThreadedTaskRunner` now stages enqueued work under a separate lock, wakes workers with `thread::Semaphore`, sorts cached priorities before end-pop, and keeps condvar waiting for `wait_for_all_tasks`. `VoxelTerrainCore::process()` no longer blocks on two waits per tick; it drains completed work opportunistically and dispatches load/mesh batches via `enqueue_many`. Added regression tests `enqueue_does_not_block_on_worker_queue_lock` and `process_does_not_wait_for_slow_load_tasks`. Remaining wave 2 work: stress/TSan |
 
 ### Где остановились (для возобновления)
 
@@ -316,7 +317,7 @@ godot_voxel (fork)
 **Фаза 2 mobile-half — `.so` собран** (aarch64 + x86_64-android через NDK r29).
 **Фаза 3 (compute-слой) — ЗАВЕРШЕНА.** Все engine-agnostic компоненты
 портированы и повторно проверены audit pass'ом (439 unit тестов).
-**Фаза 4 — storage/streaming + meshing pipeline + single-LOD paging terrain + VoxelEngine foundation/task loop работают headlessly (653 unit + 10 integration тестов).**
+**Фаза 4 — storage/streaming + meshing pipeline + single-LOD paging terrain + VoxelEngine foundation/task loop работают headlessly (655 unit + 10 integration тестов).**
 Audit wave 1A after the 2026-07-06 audit removed the outer generator mutex:
 `VoxelGenerator` is shared via `Arc<dyn VoxelGenerator>` and called through `&self`.
 Audit wave 1B removed the outer mesher mutex:
@@ -363,9 +364,8 @@ empty-cell early-out по raw SDF, а case/interpolation/normals — после
      mesh для variable LOD остаётся отдельным пунктом.
    - **`VoxelDataGrid`** — terrain meshing query helper (оптимизация; текущий
      MeshBlockTask обходит это через прямой `voxel_data.get_block` lookup).
-   - **Concurrency audit follow-ups** — A5 task runner (semaphore + staging +
-     nonblocking drain), plus stress/ThreadSanitizer coverage for the threaded
-     edit/load/mesh path.
+   - **Concurrency audit follow-ups** — stress/ThreadSanitizer coverage for the
+     threaded edit/load/mesh path.
    - **ThreadSanitizer end-to-end** — когда `VoxelEngine` + real threading land.
    - **Godot binding (Phase 5)** — Node3D wrappers для VoxelTerrainCore +
      RenderingServer mesh upload + EditorPlugin.
@@ -482,6 +482,7 @@ Threading + terrain — самый сложный этап. Порядок по 
 | 4.6l | `storage::voxel_data` copy/paste + area queries | `storage/voxel_data.cpp` (`copy`, `paste`, `paste_masked*`, `is_area_loaded`, `has_all_blocks_in_area`, `get_missing_blocks`, `get_blocks_with_voxel_data`) | VoxelData, VoxelDataMap | ✅ VoxelData-level copy (с generator fallback для missing blocks), paste/paste_masked/paste_masked_with_destination_mask делегируют в LOD0 map; area queries: is_area_loaded (streaming-aware), has_all_blocks_in_area, get_missing_blocks, get_blocks_with_voxel_data (ZXY grid) |
 | 4.6m | `paste_masked` per-block + O(1) writability lookup | `storage/voxel_data_map.cpp` (`paste_masked`) | VoxelDataMap | ✅ Audit-driven optimization: per-block iteration (1 hashmap lookup/block вместо per-voxel), `WritabilityLookup` dense `Vec<bool>` для u16-fitting values (как C++ `DynamicBitset`), linear fallback для крупных значений, masked destination writes through `VoxelBuffer::read_write_area*` depth-hoisted helpers |
 | 4.6n | `ThreadedTaskRunner` priority throttle | `util/tasks/threaded_task_runner.cpp` (`_priority_update_period_ms`) | tasks | ✅ Audit-driven optimization: `priority_update_period` (default 32 ms как C++) + `last_priority_update`; worker вызывает `refresh_priorities_and_complete_cancelled` только когда окно прошло, не на каждом wake |
+| 4.6o | `ThreadedTaskRunner` semaphore/staging + terrain nonblocking drain | `util/tasks/threaded_task_runner.cpp` (`_tasks_semaphore`, `_staged_tasks`), `terrain/fixed_lod/voxel_terrain.cpp` (`process`) | tasks, terrain | ✅ Audit-driven concurrency fix: enqueue stages tasks under a separate lock, workers wake through `thread::Semaphore`, cached-priority queue is sorted before end-pop, and `VoxelTerrainCore::process()` drains completed work without blocking a tick |
 | 4.6 | `storage::voxel_data` | `storage/voxel_data.{h,cpp}` | VoxelDataMap, streams, generators, LOD | In progress: metadata, `VoxelDataGrid`, `try_set_block` with action_when_exists. `SharedVoxelData` worker bridge has settings lock + per-LOD map locks + `SpatialLock3D` regions |
 | 4.7 | `terrain::voxel_terrain` / `voxel_lod_terrain` | `terrain/*` | VoxelData, meshers, Node3D | VoxelTerrain node (без Godot binding — pure logic) |
 | 4.8 | `generators::graph` (runtime) | `generators/graph/*` | `string::expression_parser` (Phase 1 deferred) | Graph-based procedural gen без редактора |
@@ -500,7 +501,7 @@ conditions (проверка под ThreadSanitizer/loom).
 git clone https://github.com/sandsaber/godot_voxel.git
 cd godot_voxel && git checkout rust/pilot
 cd rust
-cargo test -p voxel-core       # 653 unit + 10 integration + 1 doc-test; 1 ignored diagnostic snapshot
+cargo test -p voxel-core       # 655 unit + 10 integration + 1 doc-test; 1 ignored diagnostic snapshot
 cargo build -p voxel-gdext     # GDExtension .so (грузится в Godot 4.7)
 cargo clippy --workspace --all-targets  # должен быть чистый
 cargo bench                    # transvoxel benches (16³=143 / 32³=199 / 64³=249 Melem/s)
