@@ -145,7 +145,7 @@ GraphGenerator (24+ узлов) / Waves / Flat / Noise / HeightmapNoise
    (нужны SDK+устройство вне окружения). Формально GO-критерий Фазы 2 не выполнен.
 3. **GO-критерий Фазы 4 недостижим текущим кодом**: «нет race conditions под ThreadSanitizer» —
    TSan не запускался; `SharedVoxelData` уже берёт `SpatialLock3D` regions в terrain/mesh
-   consumers, но map storage всё ещё защищён bridge mutex, и полноценный конкурентный edit+mesh
+   consumers, но map storage всё ещё защищён общим data `RwLock`, и полноценный конкурентный edit+mesh
    stress ещё не существует.
    Это честно задокументировано, но стоит держать в фокусе: реальная многопоточность может
    вскрыть проблемы в дизайне ownership.
@@ -162,7 +162,7 @@ GraphGenerator (24+ узлов) / Waves / Flat / Noise / HeightmapNoise
 
 Грубо, по C++ LOC ещё не тронутого кода (≈105k из 142k, минус N/A godot-shims ≈7,8k и tests ≈9k → ~88k «содержательных»):
 
-- **Фаза 4 остаток**: variable_lod (9,9k) + VoxelEngine остаток + VoxelDataGrid + `SharedVoxelData` bridge mutex → per-LOD `RwLock`/settings lock + TSan — крупнейший кусок: multi-LOD оркестратор.
+- **Фаза 4 остаток**: variable_lod (9,9k) + VoxelEngine остаток + VoxelDataGrid + `SharedVoxelData` data `RwLock` → per-LOD map locks/settings lock + TSan — крупнейший кусок: multi-LOD оркестратор.
 - **Фаза 5**: binding 75+ классов + editor (12,8k) + edition (7,8k) + modifiers (1,5k) + instancing (9,2k) + terrain root (2k) — по объёму сопоставимо со всем уже сделанным.
 - **Осознанно отложено/опционально**: GPU-путь (gpu + detail_rendering + shaders ≈7,1k), sqlite (2,2k), multipass (2,3k), FastNoise2 (3,1k), physics (Rapier, §9 плана — не начат).
 
@@ -190,8 +190,9 @@ GraphGenerator (24+ узлов) / Waves / Flat / Noise / HeightmapNoise
    зовутся конкурентно без внешнего замка. Корень: `generate_block(&mut self, ...)` — при том,
    что все 4 существующих генератора только читают `self`. Фикс: `&self` + `Arc<dyn VoxelGenerator>`
    (по образцу уже правильного `SharedVoxelStream = Arc<dyn VoxelStream>`).
-3. **`VoxelData` всё ещё за bridge `Mutex` внутри `SharedVoxelData`** — вместо C++ per-LOD `RWLock` + `SpatialLock3D`
-   (регионная эксклюзивность). Даже чистые чтения двух mesh-тасков в разных регионах сериализуются.
+3. **`VoxelData` всё ещё за общим data `RwLock` внутри `SharedVoxelData`** — вместо C++ per-LOD `RWLock` + `SpatialLock3D`
+   (регионная эксклюзивность). Чистые read-only snapshots уже пересекаются, но любая write/map-mutation
+   секция всё ещё блокирует весь `VoxelData`, даже если регионы или LOD не пересекаются.
    Примечательно: собственные `thread::RwLock` и реальный `SpatialLock3D` в крейте уже есть; `SpatialLock3D`
    уже подключён к terrain/mesh region paths, но map lock ещё не разложен по LOD.
 4. **Потенциальный ABBA-дедлок**: `LoadBlockForTerrainTask` берёт Data→Generator
@@ -295,11 +296,11 @@ so we can get rid of abstraction layers and conditionals»*):
 > и `VoxelMesher` переведены на shared immutable contract (`&self` + `Arc<dyn ...>`)
 > без внешних generator/mesher mutex. A4 lock-order rule тоже закрыт: текущие
 > generator/mesher/stream callbacks выполняются после выхода из `VoxelData` lock.
-> Оставшаяся часть #1: `SharedVoxelData` bridge mutex → per-LOD locking/settings lock.
+> Оставшаяся часть #1: `SharedVoxelData` data `RwLock` → per-LOD map locks/settings lock.
 
 | # | Что | Эффект | Стоимость |
 |---|---|---|---|
-| 1 | `generate_block(&self)` / `build(&self)` + `Arc<dyn>` вместо `Arc<Mutex<Box<dyn>>>`; `SharedVoxelData` bridge mutex → per-LOD RwLock/settings lock | разблокирует всю многопоточность; чем позже — тем дороже (breaking trait change) | средняя, **делать до multi-LOD и Фазы 5** |
+| 1 | `generate_block(&self)` / `build(&self)` + `Arc<dyn>` вместо `Arc<Mutex<Box<dyn>>>`; `SharedVoxelData` data `RwLock` → per-LOD map locks/settings lock | разблокирует всю многопоточность; чем позже — тем дороже (breaking trait change) | средняя, **делать до multi-LOD и Фазы 5** |
 | 2 | ABBA-дедлок Data↔Generator | устраняется п.1; иначе — фиксированный порядок замков | ~0 после п.1 |
 | 3 | Transvoxel-адаптер: depth-dispatch до цикла + `is_uniform` skip + reuse `MeshArrays` | крупнейший CPU-выигрыш мешинга | низкая-средняя, локально в `builtin.rs` |
 | 4 | `RegionFile`: dirty-flag вместо `save_header()` на каждый блок | ×N меньше записей при save-штормах | низкая |
@@ -386,8 +387,9 @@ pub struct VoxelData { lods: Box<[Lod]>, /* bounds, format, ... — иммута
 `Vec<(BoxBounds3i, Mode)>` под `Mutex` + `Condvar`, разрешает overlapping reads, блокирует
 overlapping writes и пропускает disjoint regions. Подшаг 2026-07-07 заменил внешний
 `Arc<Mutex<VoxelData>>` в terrain/mesh consumers на `Arc<SharedVoxelData>` и начал брать
-`SpatialLock3D` read/write regions в mesh-gather и data view/load paths. Остаток A3 —
-заменить bridge mutex внутри `SharedVoxelData` на per-LOD `RwLock` + settings lock.
+`SpatialLock3D` read/write regions в mesh-gather и data view/load paths. Подшаг 2026-07-07
+заменил bridge lock на shared data `RwLock`, так что read-only snapshots теперь
+пересекаются. Остаток A3 — split общего data `RwLock` на per-LOD map locks + settings lock.
 
 *Альтернативы (отвергнуты):* шардированный map (DashMap-стиль) — новая зависимость и другая
 семантика блокировок, теряем сверяемость с C++; actor-модель (один поток-владелец + каналы) —
@@ -396,8 +398,10 @@ overlapping writes и пропускает disjoint regions. Подшаг 2026-0
 *Миграция и подводные камни A3 (дополнено вторым проходом):*
 - У потребителей `Arc<Mutex<VoxelData>>` → `Arc<SharedVoxelData>` с внутренними
   замками (как C++ `std::shared_ptr<VoxelData>`) — ✅ bridge-подшаг закрыт для
-  `MeshBlockTask` / `VoxelTerrainCore` / `LoadBlockForTerrainTask`; следующий шаг —
-  убрать bridge mutex из самого `SharedVoxelData`.
+  `MeshBlockTask` / `VoxelTerrainCore` / `LoadBlockForTerrainTask`.
+- Bridge mutex внутри `SharedVoxelData` → data `RwLock` — ✅ закрыто: `with_data`
+  берёт shared read guard, mutation paths берут write guard. Следующий шаг —
+  split data `RwLock` на per-LOD map locks + settings lock.
 - Поля-настройки (`generator`, `stream`, `bounds`, `streaming_enabled`, ...) — в
   `RwLock<Settings>` (зеркало C++ `_settings_lock`): иначе `set_generator`/`set_bounds`
   потребуют `&mut VoxelData`, которого при `Arc<VoxelData>` больше нет. Это же отвечает
@@ -533,7 +537,7 @@ A4 (правило замков).
 Уже после этой волны mesh-build'ы и генерация исполняются параллельно (глобальный замок
 `VoxelData` остаётся только на gather — короткая секция).
 **DoD:** новый тест «N воркеров мешат M блоков» показывает масштабирование по потокам
-(время ~1/N, загрузка >1 ядра); 651+10 тестов и golden-парити зелёные.
+(время ~1/N, загрузка >1 ядра); 652+10 тестов и golden-парити зелёные.
 
 **Волна 2 — конкурентность до конца:**
 A3 (`Arc<SharedVoxelData>` + per-LOD RwLock/settings lock) → A5 (semaphore + staging +
@@ -557,7 +561,7 @@ paging-сценарий (движущийся viewer), сравнение с р�
 - **cargo-fuzz таргеты на парсеры** (`.vox`, `block_serializer`, `region`): C++-сторона уже
   фаззится (`fuzzer.yml`), Rust-парсеры — нет; баг D2 — ровно тот класс, который находит фаззер.
 
-Инварианты на всём протяжении: 651 unit + 10 integration + golden-парити остаются зелёными;
+Инварианты на всём протяжении: 652 unit + 10 integration + golden-парити остаются зелёными;
 clippy/fmt чистые; каждый шаг сверяется с соответствующим C++-файлом (ссылки в §9.1-9.3).
 
 ---
@@ -579,8 +583,9 @@ clippy/fmt чистые; каждый шаг сверяется с соотве�
 | 2026-07-07 | D4: storage hot-path write helpers | ✅ закрыто. `VoxelBuffer`/`VoxelDataMap` raw+float accessors are inline, `fill_area` writes by row base, and `downscale_to`/masked paste use safe depth-hoisted destination write helpers instead of per-voxel `set_voxel` dispatch | `cargo test -p voxel-core` → 649 unit + 10 integration + 1 doc-test, 0 failed |
 | 2026-07-07 | A3 substep: real SpatialLock3D | ✅ закрыто. `SpatialLock3D` now tracks `(BoxBounds3i, mode)` entries behind `Mutex<Vec<_>> + Condvar`: overlapping reads coexist, overlapping writes block, disjoint regions proceed. Added blocking/read-write regression tests. | `cargo test -p voxel-core` → 650 unit + 10 integration + 1 doc-test, 0 failed |
 | 2026-07-07 | A3 substep: SharedVoxelData bridge + region guards | ✅ закрыто. Terrain/mesh consumers now use `Arc<SharedVoxelData>` instead of external `Arc<Mutex<VoxelData>>`; mesh gather and data view/load paths take scoped `SpatialLock3D` read/write regions. Added region-lock regression test on `SharedVoxelData`. | `cargo test -p voxel-core` → 651 unit + 10 integration + 1 doc-test, 0 failed |
+| 2026-07-07 | A3 substep: SharedVoxelData read concurrency | ✅ закрыто. `SharedVoxelData::with_data` now uses a shared `RwLock` read guard and mutation paths use write guards, so independent read snapshots overlap while writes remain exclusive. Added `shared_voxel_data_allows_parallel_read_snapshots`. | `cargo test -p voxel-core` → 652 unit + 10 integration + 1 doc-test, 0 failed |
 
-Остаток пункта #1: заменить bridge mutex внутри `SharedVoxelData` на per-LOD `RwLock` + settings lock.
+Остаток пункта #1: split общего data `RwLock` внутри `SharedVoxelData` на per-LOD map locks + settings lock.
 ABBA-риск с внешним generator/mesher lock снят; правило “не держать data lock через
 generator/mesher/stream” закреплено A4 для текущих load/gather путей. Переиспользование
 `MeshArrays`/`MesherOutput` остаётся отдельной perf-частью B3, а полный per-region locking —
@@ -596,14 +601,14 @@ byte-parity тесты), но **два системных долга** треб�
 
 1. **Конкурентная модель** (§9.1): trait-level сериализация генерации и мешинга уже снята
    после аудита, и текущие generator/mesher/stream callbacks больше не выполняются под `VoxelData`
-   lock, но `SharedVoxelData` всё ещё защищает map storage bridge mutex'ом. Пул потоков
-   начнёт масштабироваться полноценно только после per-LOD `RwLock`/settings lock
+   lock, но `SharedVoxelData` всё ещё защищает map storage общим data `RwLock`. Пул потоков
+   начнёт масштабироваться полноценно только после per-LOD map locks/settings lock
    и stress/TSan-проверки.
 2. **Горячий путь мешинга** (§9.2): адаптерный слой вернул абстракционные издержки, которые C++
    целенаправленно устранял; заявление H2 о 1.5× преимуществе не распространяется на end-to-end конвейер.
 
 План действий — три волны из §9.6: (1) волна 1 закрыта,
-(2) волна 2 — per-LOD RwLock/settings lock + TSan/stress
+(2) волна 2 — per-LOD map locks/settings lock + TSan/stress
 (закрывает GO-критерий Фазы 4), (3) волна 3 — перф-фиксы горячего пути и graph runtime
 с перемером H2 end-to-end. Параллельно: настроить upstream-tracking (`cpp-reference`) и
 CI для `rust/` — сейчас Rust не собирается ни одним workflow.

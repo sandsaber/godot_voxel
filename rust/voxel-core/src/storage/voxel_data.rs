@@ -19,7 +19,10 @@ use crate::storage::{
 use crate::streams::VoxelStream;
 use crate::thread::SpatialLock3D;
 use std::fmt;
-use std::sync::{Arc, Mutex as StdMutex, MutexGuard as StdMutexGuard, TryLockError};
+use std::sync::{
+    Arc, RwLock as StdRwLock, RwLockReadGuard as StdRwLockReadGuard,
+    RwLockWriteGuard as StdRwLockWriteGuard, TryLockError,
+};
 
 #[derive(Debug)]
 struct VoxelDataLod {
@@ -62,29 +65,37 @@ pub type SharedVoxelStream = Arc<dyn VoxelStream>;
 ///
 /// This is the migration boundary between the earlier `Arc<Mutex<VoxelData>>`
 /// port and the C++ shape where terrain code passes a shared `VoxelData`
-/// pointer and each method scopes its own map/region locks. The data mutex
+/// pointer and each method scopes its own map/region locks. A data `RwLock`
 /// still protects the current `VoxelData` value while A3 is being migrated;
 /// the per-LOD [`SpatialLock3D`] guards are already real and are taken by
 /// mesh/read and edit/write regions before touching the data.
 pub struct SharedVoxelData {
-    data: StdMutex<VoxelData>,
+    data: StdRwLock<VoxelData>,
     spatial_locks: Vec<SpatialLock3D>,
 }
 
 impl SharedVoxelData {
     pub fn new(data: VoxelData) -> Self {
         Self {
-            data: StdMutex::new(data),
+            data: StdRwLock::new(data),
             spatial_locks: (0..MAX_LOD).map(|_| SpatialLock3D::new()).collect(),
         }
     }
 
-    pub fn lock(&self) -> StdMutexGuard<'_, VoxelData> {
-        self.data.lock().unwrap_or_else(|e| e.into_inner())
+    pub fn read(&self) -> StdRwLockReadGuard<'_, VoxelData> {
+        self.data.read().unwrap_or_else(|e| e.into_inner())
     }
 
-    pub fn try_lock(&self) -> Option<StdMutexGuard<'_, VoxelData>> {
-        match self.data.try_lock() {
+    pub fn lock(&self) -> StdRwLockWriteGuard<'_, VoxelData> {
+        self.write()
+    }
+
+    pub fn write(&self) -> StdRwLockWriteGuard<'_, VoxelData> {
+        self.data.write().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub fn try_lock(&self) -> Option<StdRwLockWriteGuard<'_, VoxelData>> {
+        match self.data.try_write() {
             Ok(guard) => Some(guard),
             Err(TryLockError::Poisoned(e)) => Some(e.into_inner()),
             Err(TryLockError::WouldBlock) => None,
@@ -92,12 +103,12 @@ impl SharedVoxelData {
     }
 
     pub fn with_data<R>(&self, f: impl FnOnce(&VoxelData) -> R) -> R {
-        let data = self.lock();
+        let data = self.read();
         f(&data)
     }
 
     pub fn with_data_mut<R>(&self, f: impl FnOnce(&mut VoxelData) -> R) -> R {
-        let mut data = self.lock();
+        let mut data = self.write();
         f(&mut data)
     }
 
@@ -160,7 +171,7 @@ impl SharedVoxelData {
 
 impl fmt::Debug for SharedVoxelData {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let data = self.lock();
+        let data = self.read();
         f.debug_struct("SharedVoxelData")
             .field("data", &*data)
             .field("spatial_lock_count", &self.spatial_locks.len())
@@ -1191,7 +1202,8 @@ mod tests {
     use crate::generators::base::{GenResult, VoxelGenerator, VoxelQueryData};
     use crate::math::{Box3i, Vector3i};
     use crate::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelDataBlock, VoxelFormat};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::time::Duration;
 
     #[derive(Default)]
     struct RecordingGenerator {
@@ -1786,6 +1798,43 @@ mod tests {
         assert_eq!(shared.locked_region_count(0), 1);
         drop(write);
         assert_eq!(shared.locked_region_count(0), 0);
+    }
+
+    #[test]
+    fn shared_voxel_data_allows_parallel_read_snapshots() {
+        let shared = Arc::new(SharedVoxelData::new(VoxelData::new()));
+        let entered = Arc::new((Mutex::new(0usize), Condvar::new()));
+
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let shared = shared.clone();
+                let entered = entered.clone();
+                std::thread::spawn(move || {
+                    shared.with_data(|_| {
+                        let (lock, cvar) = &*entered;
+                        let mut count = lock.lock().unwrap();
+                        *count += 1;
+                        cvar.notify_all();
+                        while *count < 2 {
+                            let (next, timeout) =
+                                cvar.wait_timeout(count, Duration::from_secs(1)).unwrap();
+                            count = next;
+                            if timeout.timed_out() && *count < 2 {
+                                return false;
+                            }
+                        }
+                        true
+                    })
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            assert!(
+                handle.join().unwrap(),
+                "SharedVoxelData read snapshots should overlap"
+            );
+        }
     }
 
     #[test]
