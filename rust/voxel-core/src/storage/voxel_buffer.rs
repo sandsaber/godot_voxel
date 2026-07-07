@@ -269,9 +269,9 @@ impl VoxelBuffer {
         }
     }
 
-    /// Create with a `Default` allocator and the given size; all channels at
-    /// `DEFAULT_CHANNEL_DEPTH`, uniform-zero. Convenience over [`new`](Self::new)
-    /// + [`create`](Self::create).
+    /// Create with a `Default` allocator and the given size; channels use the
+    /// engine's default per-channel depths and uniform defaults. Convenience
+    /// over [`new`](Self::new) + [`create`](Self::create).
     pub fn with_size(size: Vector3i) -> Self {
         let mut vb = Self::new(Allocator::Default);
         vb.create(size);
@@ -284,9 +284,10 @@ impl VoxelBuffer {
         self
     }
 
-    /// (Re)allocate to `size` voxels. Every channel is reset to uniform at its
-    /// default value (matching the C++ behavior when `new_format` is null).
-    /// Matches `create(Vector3i, ...)`.
+    /// (Re)allocate to `size` voxels. Every channel is reset to uniform at the
+    /// default value for its current depth. Matches the C++ behavior when
+    /// `new_format` is null: channel depths are preserved unless a caller
+    /// explicitly applies a [`VoxelFormat`](crate::storage::VoxelFormat).
     pub fn create(&mut self, size: Vector3i) {
         debug_assert!(size.x >= 0 && size.y >= 0 && size.z >= 0);
         debug_assert!(
@@ -298,9 +299,6 @@ impl VoxelBuffer {
         for (i, ch) in self.channels.iter_mut().enumerate() {
             free_channel_data(self.allocator, self.pool.as_ref(), ch);
             ch.compression = Compression::Uniform;
-            // Default depths: type channel at 16-bit, sdf at 16-bit, others 8-bit,
-            // matching the C++ DEFAULT_*_CHANNEL_DEPTH constants.
-            ch.depth = default_depth_for_channel_index(i);
             ch.defval = get_default_raw_value(channel_id_from_index(i).unwrap(), ch.depth);
         }
     }
@@ -887,6 +885,34 @@ mod tests {
         assert_eq!(
             vb.channel_default(ChannelId::Weights.index()),
             MIXEL4_DEFAULT_WEIGHTS
+        );
+    }
+
+    #[test]
+    fn create_preserves_existing_channel_depths() {
+        let mut vb = VoxelBuffer::with_size(Vector3i::new(2, 2, 2));
+        vb.set_channel_depth(ChannelId::Sdf.index(), ChannelDepth::Bit32);
+        vb.set_channel_depth(ChannelId::Color.index(), ChannelDepth::Bit16);
+        vb.set_voxel_f(-0.25, 0, 0, 0, ChannelId::Sdf.index());
+
+        vb.create(Vector3i::new(3, 3, 3));
+
+        assert_eq!(vb.size(), Vector3i::new(3, 3, 3));
+        assert_eq!(
+            vb.channel_depth(ChannelId::Sdf.index()),
+            ChannelDepth::Bit32
+        );
+        assert_eq!(
+            vb.channel_depth(ChannelId::Color.index()),
+            ChannelDepth::Bit16
+        );
+        assert_eq!(
+            vb.channel_compression(ChannelId::Sdf.index()),
+            Compression::Uniform
+        );
+        assert_eq!(
+            vb.get_voxel_f(0, 0, 0, ChannelId::Sdf.index()),
+            get_default_sdf_value(ChannelDepth::Bit32)
         );
     }
 

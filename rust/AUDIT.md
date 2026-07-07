@@ -272,8 +272,9 @@ so we can get rid of abstraction layers and conditionals»*):
 - **`.vox`-парсер не проверяет отрицательные размеры модели** (`parser.rs:287`): `0xFFFFFFFF` → `-1i32`
   проходит проверку `> MAX_MODEL_SIZE`, затем `volume_u64()` sign-extend'ит в ~1.8×10¹⁹ и `vec![0u8; ...]`
   при `panic=abort` **гарантированно роняет процесс** на битом/вредоносном файле. Фикс — проверка `0..=MAX`.
-- `VoxelBuffer::create()` безусловно сбрасывает кастомные channel depths — расходится и с C++
-  (сохраняет при `format==null`), и с собственным doc-комментарием; сегодня замаскировано call-site'ами.
+- `VoxelBuffer::create()` depth preservation после аудита закрыт 2026-07-07: в исходном
+  состоянии `create()` безусловно сбрасывал кастомные channel depths — расходилось с C++
+  (сохраняет при `format==null`), и с собственным doc-комментарием.
 - `unsafe` raw-pointer aliasing в `blocky/bake.rs:573-592` — обходит borrow checker вручную; путь
   одноразовый (bake), но хрупкий; заменяется безопасным compute-then-assign.
 
@@ -507,7 +508,7 @@ C++ `inner_group_start_index` / `skip_outer_group` (`voxel_generator_graph.cpp:9
 |---|---|---|
 | D1 | `RegionFile`: поле `header_dirty: bool` | ✅ закрыто 2026-07-06: `save_block` только метит; физическая запись header'а в `flush()`/`close()`/`Drop` (зеркало C++ `_header_modified`) |
 | D2 | `.vox`: `(0..=MAX_MODEL_SIZE).contains(&size.{x,y,z})` | закрывает abort на отрицательных размерах; заодно строже C++ |
-| D3 | `VoxelBuffer::create(size, format: Option<&VoxelFormat>)` | либо сохранять текущие depth при `None` (C++ семантика) + поправить doc-комментарий |
+| D3 | `VoxelBuffer::create(size, format: Option<&VoxelFormat>)` | ✅ закрыто 2026-07-07: `create()` сохраняет текущие channel depths при сбросе буфера и пересчитывает uniform default под текущий depth; явный `VoxelFormat::configure_buffer()` по-прежнему применяет формат |
 | D4 | `#[inline]` на `get_voxel`/`set_voxel`/`get_voxel_f`/`set_voxel_f` ×2 типа; `fill_area` — база строки за внутренний цикл (образец: свой же `fill_3d_region_zxy`); depth-hoisted helper для `downscale_to`/`paste_masked*` (аналог C++ `write_box_template`) | |
 | D5 | `HeightmapNoise::curve: Option<Arc<Curve>>` | ✅ закрыто 2026-07-06: клон 256×f32 на блок заменён на O(1) refcount (образец — graph-узел Curve) |
 | D6 | `blocky/bake.rs`: compute-then-assign вместо `unsafe` raw-pointer aliasing | считаем cutout-данные в локальный `Vec` под shared borrow, присваиваем после |
@@ -526,7 +527,7 @@ A4 (правило замков).
 Уже после этой волны mesh-build'ы и генерация исполняются параллельно (глобальный замок
 `VoxelData` остаётся только на gather — короткая секция).
 **DoD:** новый тест «N воркеров мешат M блоков» показывает масштабирование по потокам
-(время ~1/N, загрузка >1 ядра); 645+10 тестов и golden-парити зелёные.
+(время ~1/N, загрузка >1 ядра); 646+10 тестов и golden-парити зелёные.
 
 **Волна 2 — конкурентность до конца:**
 A3 (`Arc<VoxelData>` + per-LOD RwLock + реальный SpatialLock3D) → A5 (semaphore + staging +
@@ -550,7 +551,7 @@ paging-сценарий (движущийся viewer), сравнение с р�
 - **cargo-fuzz таргеты на парсеры** (`.vox`, `block_serializer`, `region`): C++-сторона уже
   фаззится (`fuzzer.yml`), Rust-парсеры — нет; баг D2 — ровно тот класс, который находит фаззер.
 
-Инварианты на всём протяжении: 645 unit + 10 integration + golden-парити остаются зелёными;
+Инварианты на всём протяжении: 646 unit + 10 integration + golden-парити остаются зелёными;
 clippy/fmt чистые; каждый шаг сверяется с соответствующим C++-файлом (ссылки в §9.1-9.3).
 
 ---
@@ -567,6 +568,7 @@ clippy/fmt чистые; каждый шаг сверяется с соотве�
 | 2026-07-06 | D5: HeightmapNoise shared curve | ✅ закрыто. `HeightmapNoise::curve` is now `Option<Arc<Curve>>`; `set_curve` preserves owned-curve compatibility and `set_curve_arc` supports shared storage without cloning baked points | `cargo test -p voxel-core` → 639 unit + 10 integration + 1 doc-test, 0 failed |
 | 2026-07-06 | D1: RegionFile deferred header write | ✅ закрыто. `RegionFile` keeps a `header_dirty` flag; `save_block` only marks the LUT dirty, while `flush()`/`close()`/`Drop` persist the header once | `cargo test -p voxel-core` → 640 unit + 10 integration + 1 doc-test, 0 failed |
 | 2026-07-06 | A4: data-lock ordering rule | ✅ закрыто. `LoadBlockForTerrainTask` snapshots stream/generator settings under `VoxelData` lock and runs stream/generator work after drop; `MeshBlockTask` now queues missing gather regions under lock, fills them outside the critical section, then calls the mesher after lock release. Regression tests assert `try_lock()` succeeds inside generator/mesher/stream callbacks, plus two mesh tasks can overlap inside one shared mesher | `cargo test -p voxel-core` → 645 unit + 10 integration + 1 doc-test, 0 failed |
+| 2026-07-07 | D3: `VoxelBuffer::create` depth preservation | ✅ закрыто. `create()` now preserves existing per-channel depths when no explicit `VoxelFormat` is applied, resets channels to uniform defaults for those depths, and keeps `VoxelFormat::configure_buffer()` as the explicit format path | `cargo test -p voxel-core` → 646 unit + 10 integration + 1 doc-test, 0 failed |
 
 Остаток пункта #1: `VoxelData` per-LOD `RwLock`/real `SpatialLock3D`.
 ABBA-риск с внешним generator/mesher lock снят; правило “не держать data lock через

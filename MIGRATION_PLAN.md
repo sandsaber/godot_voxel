@@ -296,6 +296,7 @@ godot_voxel (fork)
 | 2026-07-06 | Audit wave 1F: HeightmapNoise shared curve | ✅ total 639 unit + 10 integration. `HeightmapNoise::curve` now stores `Option<Arc<Curve>>`; `set_curve` wraps owned curves and `set_curve_arc` supports shared curve storage. Added regression test `heightmap_noise_curve_can_be_arc_shared` |
 | 2026-07-06 | Audit wave 1G: RegionFile deferred header write | ✅ total 640 unit + 10 integration. `RegionFile` now tracks `header_dirty`: `save_block` marks the LUT dirty and `flush()`/`close()`/`Drop` persist the header once. Added regression test `save_block_defers_header_rewrite_until_flush` |
 | 2026-07-06 | Audit wave 1H: data-lock ordering rule | ✅ total 645 unit + 10 integration. `LoadBlockForTerrainTask` snapshots stream/generator settings under `VoxelData` lock and performs stream/generator work after drop; `MeshBlockTask` queues missing gather regions under lock, fills them outside the critical section, then calls the mesher after lock release. Added four `try_lock()` guard tests covering generator/mesher/stream callbacks plus a deterministic shared-mesher overlap test |
+| 2026-07-07 | Audit fix D3: VoxelBuffer create depth preservation | ✅ total 646 unit + 10 integration. `VoxelBuffer::create()` now preserves current per-channel depths when no explicit `VoxelFormat` is applied and resets channels to uniform defaults for those depths. `VoxelFormat::configure_buffer()` remains the explicit format application path. Added regression test `create_preserves_existing_channel_depths` |
 
 ### Где остановились (для возобновления)
 
@@ -309,7 +310,7 @@ godot_voxel (fork)
 **Фаза 2 mobile-half — `.so` собран** (aarch64 + x86_64-android через NDK r29).
 **Фаза 3 (compute-слой) — ЗАВЕРШЕНА.** Все engine-agnostic компоненты
 портированы и повторно проверены audit pass'ом (439 unit тестов).
-**Фаза 4 — storage/streaming + meshing pipeline + single-LOD paging terrain + VoxelEngine foundation/task loop работают headlessly (645 unit + 10 integration тестов).**
+**Фаза 4 — storage/streaming + meshing pipeline + single-LOD paging terrain + VoxelEngine foundation/task loop работают headlessly (646 unit + 10 integration тестов).**
 Audit wave 1A after the 2026-07-06 audit removed the outer generator mutex:
 `VoxelGenerator` is shared via `Arc<dyn VoxelGenerator>` and called through `&self`.
 Audit wave 1B removed the outer mesher mutex:
@@ -487,7 +488,7 @@ conditions (проверка под ThreadSanitizer/loom).
 git clone https://github.com/sandsaber/godot_voxel.git
 cd godot_voxel && git checkout rust/pilot
 cd rust
-cargo test -p voxel-core       # 645 unit + 10 integration + 1 doc-test; 1 ignored diagnostic snapshot
+cargo test -p voxel-core       # 646 unit + 10 integration + 1 doc-test; 1 ignored diagnostic snapshot
 cargo build -p voxel-gdext     # GDExtension .so (грузится в Godot 4.7)
 cargo clippy --workspace --all-targets  # должен быть чистый
 cargo bench                    # transvoxel benches (16³=143 / 32³=199 / 64³=249 Melem/s)
