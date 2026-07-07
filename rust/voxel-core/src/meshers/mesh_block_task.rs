@@ -126,7 +126,7 @@ impl MeshBlockTask {
 
         let generator_handle = self.meshing_dependency.generator();
 
-        let data_block_size = self.data.with_data(|data| data.block_size() as i32);
+        let data_block_size = self.data.block_size() as i32;
         let lod_block_size = data_block_size << u32::from(self.lod_index);
         let read_box = Box3i::new(
             (self.position_in_blocks - Vector3i::splat(1)) * lod_block_size,
@@ -136,14 +136,13 @@ impl MeshBlockTask {
         let mut voxels = VoxelBuffer::with_size(Vector3i::zero());
         let gather_plan = {
             let _read_region = self.data.read_region(self.lod_index as usize, read_box);
-            let data = self.data.lock();
-            gather_voxels_cpu_snapshot(
+            gather_voxels_cpu_shared_snapshot(
                 &mut voxels,
                 min_padding,
                 max_padding,
                 channels_mask,
                 generator_handle.is_some(),
-                &data,
+                &self.data,
                 self.lod_index,
                 self.position_in_blocks,
             )
@@ -336,6 +335,100 @@ fn gather_voxels_cpu_snapshot(
                 // Else: no generator and missing block — `dst` keeps the
                 // format default for that region (matches C++ behaviour
                 // when no generator is installed).
+            }
+        }
+    }
+
+    GatherVoxelPlan {
+        origin_in_voxels,
+        format,
+        data_block_size,
+        channels,
+        missing_regions,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn gather_voxels_cpu_shared_snapshot(
+    dst: &mut VoxelBuffer,
+    min_padding: i32,
+    max_padding: i32,
+    channels_mask: u32,
+    queue_missing_regions: bool,
+    voxel_data: &SharedVoxelData,
+    lod_index: u8,
+    mesh_block_pos: Vector3i,
+) -> GatherVoxelPlan {
+    let data_block_size = voxel_data.block_size() as i32;
+    let mesh_block_size = data_block_size; // factor == 1
+    let padded_size = mesh_block_size + min_padding + max_padding;
+    let format = voxel_data.format();
+
+    if dst.size() != Vector3i::splat(padded_size) {
+        *dst = VoxelBuffer::with_size(Vector3i::splat(padded_size));
+    }
+    format.configure_buffer(dst);
+
+    let channels: Vec<usize> = (0..8u32)
+        .filter(|ci| (channels_mask & (1u32 << ci)) != 0)
+        .map(|ci| ci as usize)
+        .collect();
+    let mut missing_regions = Vec::new();
+
+    let origin_in_voxels_without_padding = mesh_block_pos * mesh_block_size;
+    let origin_in_voxels = origin_in_voxels_without_padding - Vector3i::splat(min_padding);
+
+    let lod_loaded = usize::from(lod_index) < voxel_data.lod_count();
+    let mut visit_neighbour = |neighbour_block_pos: Vector3i,
+                               dst_offset: Vector3i,
+                               src: Option<&VoxelBuffer>| {
+        if let Some(src) = src {
+            for &channel_index in &channels {
+                dst.copy_channel_from_area(
+                    src,
+                    Vector3i::zero(),
+                    src.size(),
+                    dst_offset,
+                    channel_index,
+                );
+            }
+        } else if queue_missing_regions {
+            let neighbour_origin = (neighbour_block_pos * data_block_size) << u32::from(lod_index);
+            missing_regions.push(MissingVoxelRegion {
+                dst_offset,
+                origin_in_voxels: neighbour_origin,
+            });
+        }
+    };
+
+    if lod_loaded {
+        voxel_data.with_lod_map(lod_index as usize, |map| {
+            for dz in -1..=1 {
+                for dx in -1..=1 {
+                    for dy in -1..=1 {
+                        let neighbour_block_pos = mesh_block_pos + Vector3i::new(dx, dy, dz);
+                        let dst_offset = Vector3i::new(dx, dy, dz) * data_block_size
+                            + Vector3i::splat(min_padding);
+
+                        let src = map
+                            .get_block(neighbour_block_pos)
+                            .filter(|block| block.has_voxels())
+                            .map(|block| block.voxels());
+                        visit_neighbour(neighbour_block_pos, dst_offset, src);
+                    }
+                }
+            }
+        });
+    } else {
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    let neighbour_block_pos = mesh_block_pos + Vector3i::new(dx, dy, dz);
+                    let dst_offset =
+                        Vector3i::new(dx, dy, dz) * data_block_size + Vector3i::splat(min_padding);
+
+                    visit_neighbour(neighbour_block_pos, dst_offset, None);
+                }
             }
         }
     }

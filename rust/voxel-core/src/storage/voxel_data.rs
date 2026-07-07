@@ -61,55 +61,384 @@ pub type SharedVoxelGenerator = Arc<dyn VoxelGenerator>;
 /// lets multiple task instances reach the same stream.
 pub type SharedVoxelStream = Arc<dyn VoxelStream>;
 
+#[derive(Debug)]
+struct SharedVoxelDataLod {
+    map: StdRwLock<VoxelDataMap>,
+}
+
+struct SharedVoxelDataSettings {
+    format: VoxelFormat,
+    bounds_in_voxels: Box3i,
+    full_load_completed: bool,
+    streaming_enabled: bool,
+    generator: Option<SharedVoxelGenerator>,
+    stream: Option<SharedVoxelStream>,
+}
+
+#[derive(Clone)]
+pub struct SharedVoxelDataSettingsSnapshot {
+    pub format: VoxelFormat,
+    pub bounds_in_voxels: Box3i,
+    pub full_load_completed: bool,
+    pub streaming_enabled: bool,
+    pub generator: Option<SharedVoxelGenerator>,
+    pub stream: Option<SharedVoxelStream>,
+}
+
 /// Shared voxel-data handle for worker tasks.
 ///
 /// This is the migration boundary between the earlier `Arc<Mutex<VoxelData>>`
 /// port and the C++ shape where terrain code passes a shared `VoxelData`
-/// pointer and each method scopes its own map/region locks. A data `RwLock`
-/// still protects the current `VoxelData` value while A3 is being migrated;
-/// the per-LOD [`SpatialLock3D`] guards are already real and are taken by
-/// mesh/read and edit/write regions before touching the data.
+/// pointer and each method scopes its own map/region locks. Settings now live
+/// behind their own lock, each LOD map has an independent lock, and the
+/// per-LOD [`SpatialLock3D`] guards are taken by mesh/read and edit/write
+/// regions before touching voxel data.
 pub struct SharedVoxelData {
-    data: StdRwLock<VoxelData>,
+    lods: Vec<SharedVoxelDataLod>,
+    settings: StdRwLock<SharedVoxelDataSettings>,
     spatial_locks: Vec<SpatialLock3D>,
 }
 
 impl SharedVoxelData {
     pub fn new(data: VoxelData) -> Self {
+        let VoxelData {
+            lods,
+            format,
+            bounds_in_voxels,
+            full_load_completed,
+            streaming_enabled,
+            generator,
+            stream,
+        } = data;
         Self {
-            data: StdRwLock::new(data),
+            lods: lods
+                .into_iter()
+                .map(|lod| SharedVoxelDataLod {
+                    map: StdRwLock::new(lod.map),
+                })
+                .collect(),
+            settings: StdRwLock::new(SharedVoxelDataSettings {
+                format,
+                bounds_in_voxels,
+                full_load_completed,
+                streaming_enabled,
+                generator,
+                stream,
+            }),
             spatial_locks: (0..MAX_LOD).map(|_| SpatialLock3D::new()).collect(),
         }
     }
 
-    pub fn read(&self) -> StdRwLockReadGuard<'_, VoxelData> {
-        self.data.read().unwrap_or_else(|e| e.into_inner())
+    pub const fn block_size(&self) -> u32 {
+        VoxelDataMap::BLOCK_SIZE
     }
 
-    pub fn lock(&self) -> StdRwLockWriteGuard<'_, VoxelData> {
-        self.write()
+    pub const fn block_size_po2(&self) -> u8 {
+        VoxelDataMap::BLOCK_SIZE_PO2
     }
 
-    pub fn write(&self) -> StdRwLockWriteGuard<'_, VoxelData> {
-        self.data.write().unwrap_or_else(|e| e.into_inner())
+    pub fn lod_count(&self) -> usize {
+        self.lods.len()
     }
 
-    pub fn try_lock(&self) -> Option<StdRwLockWriteGuard<'_, VoxelData>> {
-        match self.data.try_write() {
+    pub fn settings_snapshot(&self) -> SharedVoxelDataSettingsSnapshot {
+        let settings = self.settings.read().unwrap_or_else(|e| e.into_inner());
+        SharedVoxelDataSettingsSnapshot {
+            format: settings.format,
+            bounds_in_voxels: settings.bounds_in_voxels,
+            full_load_completed: settings.full_load_completed,
+            streaming_enabled: settings.streaming_enabled,
+            generator: settings.generator.clone(),
+            stream: settings.stream.clone(),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_settings<R>(&self, f: impl FnOnce(&SharedVoxelDataSettings) -> R) -> R {
+        let settings = self.settings.read().unwrap_or_else(|e| e.into_inner());
+        f(&settings)
+    }
+
+    pub fn format(&self) -> VoxelFormat {
+        self.settings_snapshot().format
+    }
+
+    pub fn bounds(&self) -> Box3i {
+        self.settings_snapshot().bounds_in_voxels
+    }
+
+    pub fn generator(&self) -> Option<SharedVoxelGenerator> {
+        self.settings_snapshot().generator
+    }
+
+    pub fn stream(&self) -> Option<SharedVoxelStream> {
+        self.settings_snapshot().stream
+    }
+
+    pub fn set_generator(&self, generator: Option<SharedVoxelGenerator>) {
+        self.settings
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .generator = generator;
+    }
+
+    pub fn with_lod_map<R>(&self, lod_index: usize, f: impl FnOnce(&VoxelDataMap) -> R) -> R {
+        let lod = self
+            .lods
+            .get(lod_index)
+            .expect("LOD index is outside the loaded range");
+        let map = lod.map.read().unwrap_or_else(|e| e.into_inner());
+        f(&map)
+    }
+
+    pub fn with_lod_map_mut<R>(
+        &self,
+        lod_index: usize,
+        f: impl FnOnce(&mut VoxelDataMap) -> R,
+    ) -> R {
+        let lod = self
+            .lods
+            .get(lod_index)
+            .expect("LOD index is outside the loaded range");
+        let mut map = lod.map.write().unwrap_or_else(|e| e.into_inner());
+        f(&mut map)
+    }
+
+    pub fn try_lock(&self) -> Option<StdRwLockWriteGuard<'_, VoxelDataMap>> {
+        self.try_lod_map_write(0)
+    }
+
+    pub fn try_lod_map_write(
+        &self,
+        lod_index: usize,
+    ) -> Option<StdRwLockWriteGuard<'_, VoxelDataMap>> {
+        let lod = self.lods.get(lod_index)?;
+        match lod.map.try_write() {
             Ok(guard) => Some(guard),
             Err(TryLockError::Poisoned(e)) => Some(e.into_inner()),
             Err(TryLockError::WouldBlock) => None,
         }
     }
 
-    pub fn with_data<R>(&self, f: impl FnOnce(&VoxelData) -> R) -> R {
-        let data = self.read();
-        f(&data)
+    pub fn try_lod_map_read(
+        &self,
+        lod_index: usize,
+    ) -> Option<StdRwLockReadGuard<'_, VoxelDataMap>> {
+        let lod = self.lods.get(lod_index)?;
+        match lod.map.try_read() {
+            Ok(guard) => Some(guard),
+            Err(TryLockError::Poisoned(e)) => Some(e.into_inner()),
+            Err(TryLockError::WouldBlock) => None,
+        }
     }
 
-    pub fn with_data_mut<R>(&self, f: impl FnOnce(&mut VoxelData) -> R) -> R {
-        let mut data = self.write();
-        f(&mut data)
+    pub fn has_all_blocks_in_area(&self, blocks_box: Box3i, lod_index: usize) -> bool {
+        if lod_index >= self.lods.len() {
+            return false;
+        }
+        self.with_lod_map(lod_index, |map| {
+            blocks_box.all_cells_match(|pos| map.has_block(pos))
+        })
+    }
+
+    pub fn try_set_block(&self, block_pos: Vector3i, block: VoxelDataBlock) -> bool {
+        let lod_index = usize::from(block.lod_index());
+        assert!(lod_index < self.lods.len(), "block LOD is not loaded");
+        if block.has_voxels() {
+            assert_eq!(
+                block.voxels().size(),
+                Vector3i::splat(self.block_size() as i32),
+                "block voxels must match VoxelData block size"
+            );
+        }
+        self.with_lod_map_mut(lod_index, |map| {
+            if map.has_block(block_pos) {
+                return false;
+            }
+            map.set_block(block_pos, block, false);
+            true
+        })
+    }
+
+    pub fn view_area(
+        &self,
+        mut blocks_box: Box3i,
+        lod_index: usize,
+        missing_blocks: Option<&mut Vec<Vector3i>>,
+        found_blocks_positions: Option<&mut Vec<Vector3i>>,
+        found_blocks: Option<&mut Vec<VoxelDataBlock>>,
+    ) {
+        let bounds_in_blocks = self.bounds().downscaled(self.block_size() as i32);
+        blocks_box = blocks_box.clipped(bounds_in_blocks);
+
+        if lod_index >= self.lods.len() {
+            return;
+        }
+
+        let mut missing_local = Vec::new();
+        let mut found_positions_local = Vec::new();
+        let mut found_blocks_local: Vec<VoxelDataBlock> = Vec::new();
+
+        self.with_lod_map_mut(lod_index, |map| {
+            for bpos in blocks_box.iter_cells_zxy() {
+                match map.get_block_mut(bpos) {
+                    Some(block) => {
+                        block.viewers.add();
+                        if found_blocks.is_some() {
+                            found_blocks_local.push(clone_block(block));
+                        }
+                        if found_blocks_positions.is_some() {
+                            found_positions_local.push(bpos);
+                        }
+                    }
+                    None => {
+                        if missing_blocks.is_some() {
+                            missing_local.push(bpos);
+                        }
+                    }
+                }
+            }
+        });
+
+        if let Some(out) = missing_blocks {
+            out.extend(missing_local);
+        }
+        if let Some(out) = found_blocks_positions {
+            out.extend(found_positions_local);
+        }
+        if let Some(out) = found_blocks {
+            out.extend(found_blocks_local);
+        }
+    }
+
+    pub fn unview_area(
+        &self,
+        mut blocks_box: Box3i,
+        lod_index: usize,
+        removed_blocks: Option<&mut Vec<Vector3i>>,
+        missing_blocks: Option<&mut Vec<Vector3i>>,
+        mut to_save: Option<&mut Vec<BlockToSave>>,
+    ) {
+        let bounds_in_blocks = self.bounds().downscaled(self.block_size() as i32);
+        blocks_box = blocks_box.clipped(bounds_in_blocks);
+
+        if lod_index >= self.lods.len() {
+            if let Some(out) = missing_blocks {
+                out.extend(blocks_box.iter_cells_zxy());
+            }
+            return;
+        }
+
+        let mut removed_local = Vec::new();
+        let mut missing_local = Vec::new();
+
+        self.with_lod_map_mut(lod_index, |map| {
+            for bpos in blocks_box.iter_cells_zxy() {
+                let should_remove = match map.get_block_mut(bpos) {
+                    Some(block) => {
+                        block.viewers.remove();
+                        block.viewers.get() == 0
+                    }
+                    None => {
+                        missing_local.push(bpos);
+                        continue;
+                    }
+                };
+
+                if should_remove {
+                    if let Some(block) = map.remove_block(bpos) {
+                        if let Some(out) = to_save.as_deref_mut() {
+                            if block.is_modified() {
+                                out.push(BlockToSave {
+                                    voxels: block.into_voxels(),
+                                    position: bpos,
+                                    lod_index: lod_index as u8,
+                                });
+                            }
+                        }
+                        removed_local.push(bpos);
+                    }
+                }
+            }
+        });
+
+        if let Some(out) = removed_blocks {
+            out.extend(removed_local);
+        }
+        if let Some(out) = missing_blocks {
+            out.extend(missing_local);
+        }
+    }
+
+    pub fn try_set_voxel(&self, value: u64, pos: Vector3i, channel_index: usize) -> bool {
+        let settings = self.settings_snapshot();
+        if !settings.bounds_in_voxels.contains_point(pos) {
+            return false;
+        }
+        let block_pos = VoxelDataMap::voxel_to_block_b(pos, self.block_size_po2());
+        let block_size = self.block_size() as i32;
+        self.with_lod_map_mut(0, |map| {
+            let block_state = map.get_block(block_pos).map(|block| block.has_voxels());
+
+            match block_state {
+                Some(true) => {}
+                Some(false) => {
+                    let voxels = create_block_buffer(block_size, settings.format);
+                    map.set_block_buffer(block_pos, voxels, true);
+                }
+                None => {
+                    if settings.streaming_enabled || !settings.full_load_completed {
+                        return false;
+                    }
+                    let voxels = create_block_buffer(block_size, settings.format);
+                    map.set_block_buffer(block_pos, voxels, true);
+                }
+            }
+
+            map.set_voxel(value, pos, channel_index);
+            true
+        })
+    }
+
+    pub fn mark_area_modified(&self, voxel_box: Box3i, require_lod_updates: bool) -> Vec<Vector3i> {
+        let blocks_box = voxel_box.downscaled(self.block_size() as i32);
+        let mut newly_needing_lod = Vec::new();
+        self.with_lod_map_mut(0, |map| {
+            for block_pos in blocks_box.iter_cells_zxy() {
+                let Some(block) = map.get_block_mut(block_pos) else {
+                    continue;
+                };
+                if !block.has_voxels() {
+                    continue;
+                }
+                block.set_modified(true);
+                block.set_edited(true);
+                if require_lod_updates && !block.needs_lodding() {
+                    block.set_needs_lodding(true);
+                    newly_needing_lod.push(block_pos);
+                }
+            }
+        });
+        newly_needing_lod
+    }
+
+    pub fn block_snapshot(&self, block_pos: Vector3i, lod_index: usize) -> Option<VoxelDataBlock> {
+        if lod_index >= self.lods.len() {
+            return None;
+        }
+        self.with_lod_map(lod_index, |map| map.get_block(block_pos).map(clone_block))
+    }
+
+    pub fn block_count(&self) -> usize {
+        self.lods
+            .iter()
+            .map(|lod| {
+                lod.map
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .block_count()
+            })
+            .sum()
     }
 
     pub fn read_region(&self, lod_index: usize, voxel_box: Box3i) -> SharedVoxelDataReadRegion<'_> {
@@ -171,9 +500,15 @@ impl SharedVoxelData {
 
 impl fmt::Debug for SharedVoxelData {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let data = self.read();
+        let settings = self.settings.read().unwrap_or_else(|e| e.into_inner());
         f.debug_struct("SharedVoxelData")
-            .field("data", &*data)
+            .field("lod_count", &self.lods.len())
+            .field("format", &settings.format)
+            .field("bounds_in_voxels", &settings.bounds_in_voxels)
+            .field("streaming_enabled", &settings.streaming_enabled)
+            .field("full_load_completed", &settings.full_load_completed)
+            .field("has_generator", &settings.generator.is_some())
+            .field("has_stream", &settings.stream.is_some())
             .field("spatial_lock_count", &self.spatial_locks.len())
             .finish()
     }
@@ -205,6 +540,12 @@ impl Drop for SharedVoxelDataWriteRegion<'_> {
 
 fn bounds_from_box(voxel_box: Box3i) -> BoxBounds3i {
     BoxBounds3i::from_box(voxel_box.position, voxel_box.size)
+}
+
+fn create_block_buffer(block_size: i32, format: VoxelFormat) -> VoxelBuffer {
+    let mut voxels = VoxelBuffer::with_size(Vector3i::splat(block_size));
+    format.configure_buffer(&mut voxels);
+    voxels
 }
 
 /// Aggregate voxel storage.
@@ -1810,7 +2151,7 @@ mod tests {
                 let shared = shared.clone();
                 let entered = entered.clone();
                 std::thread::spawn(move || {
-                    shared.with_data(|_| {
+                    shared.with_settings(|_| {
                         let (lock, cvar) = &*entered;
                         let mut count = lock.lock().unwrap();
                         *count += 1;
@@ -1833,6 +2174,45 @@ mod tests {
             assert!(
                 handle.join().unwrap(),
                 "SharedVoxelData read snapshots should overlap"
+            );
+        }
+    }
+
+    #[test]
+    fn shared_voxel_data_allows_parallel_lod_map_writes() {
+        let mut data = VoxelData::new();
+        data.set_lod_count(2);
+        let shared = Arc::new(SharedVoxelData::new(data));
+        let entered = Arc::new((Mutex::new(0usize), Condvar::new()));
+
+        let handles: Vec<_> = (0..2)
+            .map(|lod_index| {
+                let shared = shared.clone();
+                let entered = entered.clone();
+                std::thread::spawn(move || {
+                    shared.with_lod_map_mut(lod_index, |_| {
+                        let (lock, cvar) = &*entered;
+                        let mut count = lock.lock().unwrap();
+                        *count += 1;
+                        cvar.notify_all();
+                        while *count < 2 {
+                            let (next, timeout) =
+                                cvar.wait_timeout(count, Duration::from_secs(1)).unwrap();
+                            count = next;
+                            if timeout.timed_out() && *count < 2 {
+                                return false;
+                            }
+                        }
+                        true
+                    })
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            assert!(
+                handle.join().unwrap(),
+                "SharedVoxelData writes to different LOD maps should overlap"
             );
         }
     }

@@ -172,9 +172,8 @@ impl VoxelTerrainCore {
     /// `VoxelData`. The current port assumes mesh block size == data block
     /// size (factor 1).
     fn data_block_size(&self) -> i32 {
-        // Lock just long enough to read the constant; matches the C++ inline
-        // `get_data_block_size()`.
-        self.data.with_data(|data| data.block_size() as i32)
+        // Matches the C++ inline `get_data_block_size()`.
+        self.data.block_size() as i32
     }
 
     /// Reference to the underlying mesh-block hashmap (read-only). Tests and
@@ -323,8 +322,7 @@ impl VoxelTerrainCore {
         {
             let voxel_box = block_box_to_voxel_box(box_to_load, self.data_block_size());
             let _write_region = self.data.write_region(0, voxel_box);
-            let mut data = self.data.lock();
-            data.view_area(
+            self.data.view_area(
                 box_to_load,
                 0,
                 Some(&mut missing),
@@ -351,8 +349,7 @@ impl VoxelTerrainCore {
         {
             let voxel_box = block_box_to_voxel_box(box_to_unload, self.data_block_size());
             let _write_region = self.data.write_region(0, voxel_box);
-            let mut data = self.data.lock();
-            data.unview_area(
+            self.data.unview_area(
                 box_to_unload,
                 0,
                 Some(&mut removed_positions),
@@ -442,8 +439,7 @@ impl VoxelTerrainCore {
         let data_box = Box3i::new(bpos, Vector3i::splat(1)).padded(1);
         let voxel_box = block_box_to_voxel_box(data_box, self.data_block_size());
         let _read_region = self.data.read_region(0, voxel_box);
-        let data = self.data.lock();
-        if !data.has_all_blocks_in_area(data_box, 0) {
+        if !self.data.has_all_blocks_in_area(data_box, 0) {
             return;
         }
         let entry = self
@@ -554,8 +550,7 @@ impl VoxelTerrainCore {
                     let bs = self.data_block_size();
                     let voxel_box = Box3i::new(bpos * bs, Vector3i::splat(bs));
                     let _write_region = self.data.write_region(0, voxel_box);
-                    let mut data = self.data.lock();
-                    data.try_set_block(bpos, block)
+                    self.data.try_set_block(bpos, block)
                 };
                 if inserted {
                     self.stats.blocks_loaded += 1;
@@ -757,9 +752,10 @@ impl ThreadedTask for LoadBlockForTerrainTask {
         _ctx: crate::tasks::ThreadedTaskContext,
     ) -> crate::tasks::TaskRunOutcome {
         // Try the stream first. If it has nothing, ask the generator.
-        let (bs, format, generator) = self
-            .data
-            .with_data(|data| (data.block_size() as i32, data.format(), data.generator()));
+        let settings = self.data.settings_snapshot();
+        let bs = self.data.block_size() as i32;
+        let format = settings.format;
+        let generator = settings.generator;
         let mut voxels = VoxelBuffer::with_size(Vector3i::splat(bs));
         format.configure_buffer(&mut voxels);
         let query = crate::streams::VoxelLoadQuery::new(&mut voxels, self.position, 0);
@@ -912,11 +908,9 @@ mod tests {
     #[test]
     fn load_task_releases_data_lock_before_generator_fallback() {
         let data = Arc::new(SharedVoxelData::new(VoxelData::new()));
-        data.with_data_mut(|data_guard| {
-            data_guard.set_generator(Some(Arc::new(VoxelDataLockProbeGenerator {
-                data: Arc::downgrade(&data),
-            })));
-        });
+        data.set_generator(Some(Arc::new(VoxelDataLockProbeGenerator {
+            data: Arc::downgrade(&data),
+        })));
 
         let task =
             LoadBlockForTerrainTask::new(Vector3i::zero(), data, Arc::new(MemoryStream::new()));
@@ -1041,7 +1035,6 @@ mod tests {
 
         {
             let data = core.data();
-            let mut data = data.lock();
             assert!(data.try_set_voxel(77, edited_voxel, channel));
             data.mark_area_modified(Box3i::new(edited_voxel, Vector3i::splat(1)), false);
         }
@@ -1089,9 +1082,8 @@ mod tests {
         core.process(&one_viewer);
 
         let data = core.data();
-        let data = data.lock();
         let origin_block = data
-            .get_block(Vector3i::zero(), 0)
+            .block_snapshot(Vector3i::zero(), 0)
             .expect("origin block should stay loaded while one viewer still references it");
         assert_eq!(origin_block.viewers.get(), 1);
     }

@@ -11,10 +11,10 @@
 | 1 — Pure core (`util/{math,string,memory,io,testing}` + `expression_parser`) | ✅ COMPLETE | (cumulative) |
 | 2 — Mobile validation (gdext `.so` desktop + Android) | ✅ desktop+Android `.so` (on-device: pending SDK) | — |
 | 3 — Compute layer (storage, streams, meshers, generators, format) | ✅ COMPLETE | (cumulative) |
-| 4 — Terrain + threading (storage/streaming/meshing/paging/graph) | 🟡 IN PROGRESS | 652 unit + 10 integration |
+| 4 — Terrain + threading (storage/streaming/meshing/paging/graph) | 🟡 IN PROGRESS | 653 unit + 10 integration |
 | 5 — Godot binding + editor | ⏳ not started | — |
 
-**Total:** 652 unit tests + 10 integration + 1 doc-test, clippy clean.
+**Total:** 653 unit tests + 10 integration + 1 doc-test, clippy clean.
 
 ## Phase 4 — what works headlessly (no Godot)
 
@@ -25,7 +25,7 @@ GraphGenerator (24+ node kinds: SDF/Curve/Noise/math/IO; uniform output compress
    │  or  Waves / Flat / Noise / HeightmapNoise (simple generators; shared Arc curve)
    ▼
 VoxelData
-   • SharedVoxelData worker handle (data RwLock + SpatialLock3D read/write regions)
+   • SharedVoxelData worker handle (settings lock + per-LOD map RwLocks + SpatialLock3D read/write regions)
    • LOD maps + format + bounds + streaming flags
    • view_area / unview_area (refcount-pinned block residency)
    • copy / paste / paste_masked (per-block, O(1) writability)
@@ -64,9 +64,9 @@ VoxelEngine foundation
 
 - **Multi-LOD paging** (`VoxelLodTerrain`): `VoxelLodTerrainUpdateData` + threaded update task + clipbox/octree strategy (~4k lines C++).
 - **`VoxelEngine` remaining subset**: main-thread time-spread/progressive queues, GPU queue, file locker, stats/profiling and volume callback dispatch.
-- **Concurrency audit follow-ups**: split `SharedVoxelData`'s data `RwLock` into per-LOD map locks + settings lock, plus stress/ThreadSanitizer coverage for the threaded edit/load/mesh path.
+- **Concurrency audit follow-ups**: A5 task runner (semaphore + staging + nonblocking drain), plus stress/ThreadSanitizer coverage for the threaded edit/load/mesh path.
 - **Graph extensions**: Curve/Image range analysis, FastNoise2, Expression node (parser is ported, not wired), bytecode VM optimisation.
-- **`VoxelDataGrid`**, **per-LOD `RwLock` inside `SharedVoxelData`/`VoxelData`**, **ThreadSanitizer** end-to-end.
+- **`VoxelDataGrid`**, **ThreadSanitizer** end-to-end.
 - **Phase 5 Godot binding**: `Node3D` wrappers for `VoxelTerrainCore` + `RenderingServer` mesh upload + `EditorPlugin`.
 
 ## Crate layout
@@ -104,7 +104,7 @@ rust/
 
 ```bash
 cd rust
-cargo test -p voxel-core       # 652 unit + 10 integration + 1 doc-test
+cargo test -p voxel-core       # 653 unit + 10 integration + 1 doc-test
 cargo build -p voxel-gdext     # GDExtension .so (loads in Godot 4.7)
 cargo clippy --workspace --all-targets   # clean
 cargo bench                    # transvoxel benches
