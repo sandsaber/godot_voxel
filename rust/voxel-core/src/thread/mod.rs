@@ -215,8 +215,7 @@ fn write_unpoisoned<T>(lock: &StdRwLock<T>) -> StdRwLockWriteGuard<'_, T> {
 }
 
 /// Counting semaphore. Ported from `util/thread/semaphore.h` (header-only,
-/// built on `std::mutex` + `std::condition_variable`). Used as the blocking
-/// primitive inside [`SpatialLock3D`].
+/// built on `std::mutex` + `std::condition_variable`).
 ///
 /// Hand-rolled with `Mutex<usize>` + `Condvar` to keep the crate dependency-
 /// free (the stdlib `Semaphore` is unstable; `parking_lot::Semaphore` would
@@ -279,25 +278,19 @@ pub enum SpatialLockMode {
 
 /// Region-based read/write lock over 3D integer boxes.
 ///
-/// **Stub implementation.** Ported from `util/thread/spatial_lock_3d.{h,cpp}`
-/// to preserve the C++ transcription surface — methods take the same
-/// arguments and the [`SpatialLock3D::Read`] / [`SpatialLock3D::Write`]
-/// guards exist so future port work on `VoxelData` can keep the per-method
-/// guard variables 1:1 with C++. The guards here are **no-ops**: they
-/// record nothing and provide no actual exclusion. Safety today comes from
-/// `VoxelData` taking `&mut self` for every mutation (the borrow checker
-/// enforces exclusivity at the type level).
-///
-/// When terrain worker threads land, replace this with a real
-/// `Vec<Box<Mode>>` + [`Semaphore`] retry loop (see C++
-/// `spatial_lock_3d.h:48-104`). The public API and guard types are designed
-/// to remain stable across that swap.
+/// Ported from `util/thread/spatial_lock_3d.{h,cpp}`. Multiple read locks may
+/// overlap; a write lock excludes every overlapping read or write lock.
+/// Disjoint boxes can proceed concurrently.
 #[derive(Debug, Default)]
 pub struct SpatialLock3D {
-    // Intentionally empty: the no-op stub provides no tracking. The field
-    // exists so the type still has non-zero size and a stable layout when
-    // the real implementation replaces it.
-    _placeholder: (),
+    state: StdMutex<Vec<SpatialLockEntry>>,
+    cvar: Condvar,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SpatialLockEntry {
+    bounds: crate::math::BoxBounds3i,
+    mode: SpatialLockMode,
 }
 
 impl SpatialLock3D {
@@ -305,32 +298,88 @@ impl SpatialLock3D {
         Self::default()
     }
 
-    /// No-op: always succeeds. Real impl: returns `false` if an overlapping
-    /// box is held in a conflicting mode.
-    pub fn try_lock_read(&self, _bounds: crate::math::BoxBounds3i) -> bool {
-        true
+    /// Returns `false` if an overlapping box is currently held for writing.
+    pub fn try_lock_read(&self, bounds: crate::math::BoxBounds3i) -> bool {
+        let mut entries = lock_unpoisoned(&self.state);
+        if spatial_lock_can_acquire(&entries, bounds, SpatialLockMode::Read) {
+            entries.push(SpatialLockEntry {
+                bounds,
+                mode: SpatialLockMode::Read,
+            });
+            true
+        } else {
+            false
+        }
     }
 
-    /// No-op: always succeeds immediately.
-    pub fn lock_read(&self, _bounds: crate::math::BoxBounds3i) {}
-
-    /// No-op.
-    pub fn unlock_read(&self, _bounds: crate::math::BoxBounds3i) {}
-
-    /// No-op: always succeeds.
-    pub fn try_lock_write(&self, _bounds: crate::math::BoxBounds3i) -> bool {
-        true
+    /// Block until no overlapping write lock exists.
+    pub fn lock_read(&self, bounds: crate::math::BoxBounds3i) {
+        let mut entries = lock_unpoisoned(&self.state);
+        while !spatial_lock_can_acquire(&entries, bounds, SpatialLockMode::Read) {
+            entries = wait_unpoisoned(&self.cvar, entries);
+        }
+        entries.push(SpatialLockEntry {
+            bounds,
+            mode: SpatialLockMode::Read,
+        });
     }
 
-    /// No-op: always succeeds immediately.
-    pub fn lock_write(&self, _bounds: crate::math::BoxBounds3i) {}
+    pub fn unlock_read(&self, bounds: crate::math::BoxBounds3i) {
+        self.unlock(bounds, SpatialLockMode::Read);
+    }
 
-    /// No-op.
-    pub fn unlock_write(&self, _bounds: crate::math::BoxBounds3i) {}
+    /// Returns `false` if any overlapping read or write lock exists.
+    pub fn try_lock_write(&self, bounds: crate::math::BoxBounds3i) -> bool {
+        let mut entries = lock_unpoisoned(&self.state);
+        if spatial_lock_can_acquire(&entries, bounds, SpatialLockMode::Write) {
+            entries.push(SpatialLockEntry {
+                bounds,
+                mode: SpatialLockMode::Write,
+            });
+            true
+        } else {
+            false
+        }
+    }
 
-    /// No-op stub returns 0.
+    /// Block until no overlapping lock exists.
+    pub fn lock_write(&self, bounds: crate::math::BoxBounds3i) {
+        let mut entries = lock_unpoisoned(&self.state);
+        while !spatial_lock_can_acquire(&entries, bounds, SpatialLockMode::Write) {
+            entries = wait_unpoisoned(&self.cvar, entries);
+        }
+        entries.push(SpatialLockEntry {
+            bounds,
+            mode: SpatialLockMode::Write,
+        });
+    }
+
+    pub fn unlock_write(&self, bounds: crate::math::BoxBounds3i) {
+        self.unlock(bounds, SpatialLockMode::Write);
+    }
+
     pub fn locked_boxes_count(&self) -> usize {
-        0
+        lock_unpoisoned(&self.state).len()
+    }
+
+    fn unlock(&self, bounds: crate::math::BoxBounds3i, mode: SpatialLockMode) {
+        let mut entries = lock_unpoisoned(&self.state);
+        let Some(index) = entries
+            .iter()
+            .position(|entry| entry.bounds == bounds && entry.mode == mode)
+        else {
+            debug_assert_eq!(
+                entries
+                    .iter()
+                    .filter(|entry| entry.bounds == bounds && entry.mode == mode)
+                    .count(),
+                1,
+                "unlock called for a SpatialLock3D entry that is not held"
+            );
+            return;
+        };
+        entries.swap_remove(index);
+        self.cvar.notify_all();
     }
 
     /// Convenience: acquire a read lock for `bounds` and return an RAII guard.
@@ -348,8 +397,7 @@ impl SpatialLock3D {
     }
 }
 
-/// RAII read guard for [`SpatialLock3D`]. Releases on drop. No-op in the
-/// current stub; will call `unlock_read` once the lock is real.
+/// RAII read guard for [`SpatialLock3D`]. Releases on drop.
 #[derive(Debug)]
 pub struct SpatialLockReadGuard<'a> {
     lock: &'a SpatialLock3D,
@@ -373,6 +421,22 @@ impl Drop for SpatialLockWriteGuard<'_> {
     fn drop(&mut self) {
         self.lock.unlock_write(self.bounds);
     }
+}
+
+fn spatial_lock_can_acquire(
+    entries: &[SpatialLockEntry],
+    bounds: crate::math::BoxBounds3i,
+    mode: SpatialLockMode,
+) -> bool {
+    entries.iter().all(|entry| {
+        if !entry.bounds.intersects(&bounds) {
+            return true;
+        }
+        matches!(
+            (mode, entry.mode),
+            (SpatialLockMode::Read, SpatialLockMode::Read)
+        )
+    })
 }
 
 #[cfg(test)]
@@ -454,19 +518,61 @@ mod tests {
     }
 
     #[test]
-    fn spatial_lock_3d_stub_provides_no_op_read_and_write_guards() {
+    fn spatial_lock_3d_respects_overlap_and_mode() {
         use super::SpatialLock3D;
-        use crate::math::BoxBounds3i;
+        use crate::math::{BoxBounds3i, Vector3i};
         let lock = SpatialLock3D::new();
-        let bounds = BoxBounds3i::from_position(crate::math::Vector3i::new(1, 2, 3));
-        // Locks always succeed in the stub.
-        assert!(lock.try_lock_read(bounds));
-        assert!(lock.try_lock_write(bounds));
-        // Guards drop without panicking.
-        {
-            let _read = lock.read(bounds);
-            let _write = lock.write(bounds);
-        }
+        let area = BoxBounds3i::new(Vector3i::zero(), Vector3i::new(4, 4, 4));
+        let overlap = BoxBounds3i::new(Vector3i::new(2, 2, 2), Vector3i::new(6, 6, 6));
+        let disjoint = BoxBounds3i::new(Vector3i::new(8, 8, 8), Vector3i::new(10, 10, 10));
+
+        let read = lock.read(area);
+        assert!(lock.try_lock_read(overlap), "overlapping reads may coexist");
+        assert_eq!(lock.locked_boxes_count(), 2);
+        assert!(
+            !lock.try_lock_write(overlap),
+            "overlapping write must wait for readers"
+        );
+        assert!(
+            lock.try_lock_write(disjoint),
+            "disjoint write can run alongside reads"
+        );
+        assert_eq!(lock.locked_boxes_count(), 3);
+        lock.unlock_write(disjoint);
+        lock.unlock_read(overlap);
+        drop(read);
+
+        assert!(lock.try_lock_write(overlap));
+        assert_eq!(lock.locked_boxes_count(), 1);
+        lock.unlock_write(overlap);
         assert_eq!(lock.locked_boxes_count(), 0);
+    }
+
+    #[test]
+    fn spatial_lock_3d_blocking_write_waits_for_overlapping_read() {
+        use super::SpatialLock3D;
+        use crate::math::{BoxBounds3i, Vector3i};
+
+        let lock = Arc::new(SpatialLock3D::new());
+        let bounds = BoxBounds3i::new(Vector3i::zero(), Vector3i::new(4, 4, 4));
+        let read = lock.read(bounds);
+        let worker_lock = lock.clone();
+        let (attempt_tx, attempt_rx) = mpsc::channel();
+        let (acquired_tx, acquired_rx) = mpsc::channel();
+
+        let handle = std::thread::spawn(move || {
+            attempt_tx.send(()).unwrap();
+            let _write = worker_lock.write(bounds);
+            acquired_tx.send(()).unwrap();
+        });
+
+        attempt_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(
+            acquired_rx.recv_timeout(Duration::from_millis(50)).is_err(),
+            "writer acquired overlapping region before read guard was dropped"
+        );
+        drop(read);
+        acquired_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        handle.join().unwrap();
     }
 }
