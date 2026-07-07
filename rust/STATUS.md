@@ -15,8 +15,9 @@
 | 5 — Godot binding + editor | ⏳ not started | — |
 
 **Total:** 655 unit tests + 11 integration + 1 doc-test, clippy clean.
-**CI:** `.github/workflows/rust.yml` runs fmt, workspace tests, clippy, workspace build,
-and Android aarch64 GDExtension smoke for Rust path changes.
+**CI:** automatic Rust workflow is intentionally disabled for now. `.github/workflows/rust.yml`
+is manual-only (`workflow_dispatch`) and can run fmt, workspace tests, clippy, workspace build,
+and Android aarch64 GDExtension smoke when triggered by hand.
 
 ## Phase 4 — what works headlessly (no Godot)
 
@@ -67,7 +68,7 @@ VoxelEngine foundation
 - **Multi-LOD paging** (`VoxelLodTerrain`): `VoxelLodTerrainUpdateData` + threaded update task + clipbox/octree strategy (~4k lines C++).
 - **`VoxelEngine` remaining subset**: main-thread time-spread/progressive queues, GPU queue, file locker, stats/profiling and volume callback dispatch.
 - **Concurrency audit follow-ups**: ThreadSanitizer coverage for the threaded edit/load/mesh path; macOS cargo stress is covered by `threaded_edit_load_mesh_stress`.
-- **Infra follow-ups**: H2-MT benchmark smoke and optional x86_64-android emulator smoke in CI; basic Rust workspace CI and Android aarch64 smoke are covered by `.github/workflows/rust.yml`.
+- **Infra follow-ups**: re-enable automatic Rust CI when GitHub flow is ready; add H2-MT benchmark smoke and optional x86_64-android emulator smoke.
 - **Graph extensions**: Curve/Image range analysis, FastNoise2, Expression node (parser is ported, not wired), bytecode VM optimisation.
 - **`VoxelDataGrid`**, **ThreadSanitizer** end-to-end.
 - **Phase 5 Godot binding**: `Node3D` wrappers for `VoxelTerrainCore` + `RenderingServer` mesh upload + `EditorPlugin`.
