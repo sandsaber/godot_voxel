@@ -298,6 +298,7 @@ godot_voxel (fork)
 | 2026-07-06 | Audit wave 1H: data-lock ordering rule | ✅ total 645 unit + 10 integration. `LoadBlockForTerrainTask` snapshots stream/generator settings under `VoxelData` lock and performs stream/generator work after drop; `MeshBlockTask` queues missing gather regions under lock, fills them outside the critical section, then calls the mesher after lock release. Added four `try_lock()` guard tests covering generator/mesher/stream callbacks plus a deterministic shared-mesher overlap test |
 | 2026-07-07 | Audit fix D3: VoxelBuffer create depth preservation | ✅ total 646 unit + 10 integration. `VoxelBuffer::create()` now preserves current per-channel depths when no explicit `VoxelFormat` is applied and resets channels to uniform defaults for those depths. `VoxelFormat::configure_buffer()` remains the explicit format application path. Added regression test `create_preserves_existing_channel_depths` |
 | 2026-07-07 | Audit fix D6: safe blocky cutout bake | ✅ total 647 unit + 10 integration. `generate_library_cutout_sides` no longer uses raw-pointer aliasing; it computes cutout surfaces on a local `BakedModel` copy under shared library borrow and moves `cutout_side_surfaces` back. Added safety regression test `bake_module_uses_safe_cutout_driver` |
+| 2026-07-07 | Audit fix D4: storage hot-path write helpers | ✅ total 649 unit + 10 integration. `VoxelBuffer`/`VoxelDataMap` hot accessors are now inline; `VoxelBuffer::fill_area` writes by row base; `downscale_to` and masked paste use safe depth-hoisted destination write helpers. Added structural guards `voxel_buffer_hot_paths_use_depth_hoisted_helpers` and `masked_paste_uses_depth_hoisted_destination_writes` |
 
 ### Где остановились (для возобновления)
 
@@ -311,7 +312,7 @@ godot_voxel (fork)
 **Фаза 2 mobile-half — `.so` собран** (aarch64 + x86_64-android через NDK r29).
 **Фаза 3 (compute-слой) — ЗАВЕРШЕНА.** Все engine-agnostic компоненты
 портированы и повторно проверены audit pass'ом (439 unit тестов).
-**Фаза 4 — storage/streaming + meshing pipeline + single-LOD paging terrain + VoxelEngine foundation/task loop работают headlessly (647 unit + 10 integration тестов).**
+**Фаза 4 — storage/streaming + meshing pipeline + single-LOD paging terrain + VoxelEngine foundation/task loop работают headlessly (649 unit + 10 integration тестов).**
 Audit wave 1A after the 2026-07-06 audit removed the outer generator mutex:
 `VoxelGenerator` is shared via `Arc<dyn VoxelGenerator>` and called through `&self`.
 Audit wave 1B removed the outer mesher mutex:
@@ -403,7 +404,7 @@ Compute-слой. Каждый модуль — отдельный коммит,
 |---|---|---|
 | `storage::voxel_memory_pool` | `storage/voxel_memory_pool.{h,cpp}` | ✅ +7 тестов (power-of-two block pool: 21 bucket до 1MiB, thread-safe recycle через Mutex<Vec> + atomics; идиоматичный Rust — owned Vec вместо raw pointers) |
 | `storage::funcs` | `storage/funcs.{h,cpp}` | ✅ +9 тестов (copy_3d_region_zxy, fill_3d_region_zxy, transform_3d_array_zxy через OrthoBasis, snorm s8/s16↔float квантизация) |
-| `storage::voxel_buffer` | `storage/voxel_buffer.{h,cpp}` | ✅ +15 тестов (полный multi-channel dense store: 8 каналов, depth 8/16/32/64-bit, UNIFORM/NONE компрессия, Default+Pool аллокаторы, get/set voxel raw+float, fill/fill_area, compress_uniform_channels, copy_channel_from, create-depth preservation, Drop возвращает пулу) |
+| `storage::voxel_buffer` | `storage/voxel_buffer.{h,cpp}` | ✅ +16 тестов (полный multi-channel dense store: 8 каналов, depth 8/16/32/64-bit, UNIFORM/NONE компрессия, Default+Pool аллокаторы, get/set voxel raw+float, fill/fill_area, compress_uniform_channels, copy_channel_from, create-depth preservation, depth-hoisted write-area helper for downscale/masked writes, Drop возвращает пулу) |
 | `storage::voxel_format` | `storage/voxel_format.{h,cpp}` | ✅ +5 тестов (per-channel depth descriptor + supported-depth ranges + default raw values) |
 | `format::vox` | `streams/vox/vox_data.{h,cpp}` | ✅ +23 теста (MagicaVoxel `.vox` парсер: header SIZE/XYZI/RGBA/nTRN/nGRP/nSHP/LAYR/MATL чанки, scene-graph валидация, rotation-byte→Basis3f decode c fallback на identity для out-of-spec байт, default palette parity с C++ `g_default_palette`, `magica_to_opengl` axis swap). `Node` → идиоматичный Rust enum вместо C++ inheritance; `FileAccess` → `&[u8]` cursor с `Result<_, VoxError>`. Godot-shim `vox_loader.cpp` отложен до binding-слоя) |
 | `io::serialization` (расширение) | `util/io/serialization.h` (MemoryReader) | ✅ +fallible API: `try_get_8/16/32/float` + `try_take` возвращают `Option` (без panic на EOF) и `set_endianness` для on-the-fly переключения byte order. Нужно для `instance_data` (чтение из untrusted-источников) и legacy v0 big-endian форматов |
@@ -469,7 +470,7 @@ Threading + terrain — самый сложный этап. Порядок по 
 | 4.6j | `storage::voxel_data` viewers + view/unview | `storage/voxel_data_block.h` (`RefCount`), `storage/voxel_data.cpp` (`view_area`, `unview_area`) | VoxelDataBlock, VoxelData | ✅ `Viewers` refcount (saturating add/remove) on VoxelDataBlock; `view_area` increments + reports found/missing; `unview_area` decrements + removes zero-count blocks, returns modified for save |
 | 4.6k | `storage::voxel_data` generator/stream ownership | `storage/voxel_data.{h,cpp}` (`set_generator`, `set_stream`) | VoxelData, VoxelGenerator, VoxelStream | ✅ `SharedVoxelGenerator = Arc<dyn VoxelGenerator>`, `SharedVoxelStream = Arc<dyn VoxelStream>`; `with_generator` helper; `VoxelGenerator: Send + Sync` and `generate_block(&self)`. `get_voxel` generator fallback (`generate_single`) is done |
 | 4.6l | `storage::voxel_data` copy/paste + area queries | `storage/voxel_data.cpp` (`copy`, `paste`, `paste_masked*`, `is_area_loaded`, `has_all_blocks_in_area`, `get_missing_blocks`, `get_blocks_with_voxel_data`) | VoxelData, VoxelDataMap | ✅ VoxelData-level copy (с generator fallback для missing blocks), paste/paste_masked/paste_masked_with_destination_mask делегируют в LOD0 map; area queries: is_area_loaded (streaming-aware), has_all_blocks_in_area, get_missing_blocks, get_blocks_with_voxel_data (ZXY grid) |
-| 4.6m | `paste_masked` per-block + O(1) writability lookup | `storage/voxel_data_map.cpp` (`paste_masked`) | VoxelDataMap | ✅ Audit-driven optimization: per-block iteration (1 hashmap lookup/block вместо per-voxel), `WritabilityLookup` dense `Vec<bool>` для u16-fitting values (как C++ `DynamicBitset`), linear fallback для крупных значений |
+| 4.6m | `paste_masked` per-block + O(1) writability lookup | `storage/voxel_data_map.cpp` (`paste_masked`) | VoxelDataMap | ✅ Audit-driven optimization: per-block iteration (1 hashmap lookup/block вместо per-voxel), `WritabilityLookup` dense `Vec<bool>` для u16-fitting values (как C++ `DynamicBitset`), linear fallback для крупных значений, masked destination writes through `VoxelBuffer::read_write_area*` depth-hoisted helpers |
 | 4.6n | `ThreadedTaskRunner` priority throttle | `util/tasks/threaded_task_runner.cpp` (`_priority_update_period_ms`) | tasks | ✅ Audit-driven optimization: `priority_update_period` (default 32 ms как C++) + `last_priority_update`; worker вызывает `refresh_priorities_and_complete_cancelled` только когда окно прошло, не на каждом wake |
 | 4.6 | `storage::voxel_data` | `storage/voxel_data.{h,cpp}` | VoxelDataMap, streams, generators, LOD | In progress: `get_voxel` generator fallback (`generate_single`), metadata, `VoxelDataGrid`, `try_set_block` with action_when_exists. SpatialLock3D + per-LOD RWLock отложены (пока single-threaded через borrow checker) |
 | 4.7 | `terrain::voxel_terrain` / `voxel_lod_terrain` | `terrain/*` | VoxelData, meshers, Node3D | VoxelTerrain node (без Godot binding — pure logic) |
@@ -489,7 +490,7 @@ conditions (проверка под ThreadSanitizer/loom).
 git clone https://github.com/sandsaber/godot_voxel.git
 cd godot_voxel && git checkout rust/pilot
 cd rust
-cargo test -p voxel-core       # 647 unit + 10 integration + 1 doc-test; 1 ignored diagnostic snapshot
+cargo test -p voxel-core       # 649 unit + 10 integration + 1 doc-test; 1 ignored diagnostic snapshot
 cargo build -p voxel-gdext     # GDExtension .so (грузится в Godot 4.7)
 cargo clippy --workspace --all-targets  # должен быть чистый
 cargo bench                    # transvoxel benches (16³=143 / 32³=199 / 64³=249 Melem/s)

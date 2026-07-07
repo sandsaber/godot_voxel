@@ -358,6 +358,7 @@ impl VoxelBuffer {
     }
 
     /// Get a voxel as a raw `u64` at `depth` width. Matches `get_voxel`.
+    #[inline]
     pub fn get_voxel(&self, x: i32, y: i32, z: i32, channel_index: usize) -> u64 {
         let ch = &self.channels[channel_index];
         if ch.compression == Compression::Uniform {
@@ -369,6 +370,7 @@ impl VoxelBuffer {
 
     /// Set a voxel from a raw `u64`. Matches `set_voxel`. Decompresses the
     /// channel on first write into it.
+    #[inline]
     pub fn set_voxel(&mut self, value: u64, x: i32, y: i32, z: i32, channel_index: usize) {
         self.decompress_channel(channel_index);
         let depth = self.channels[channel_index].depth;
@@ -378,12 +380,14 @@ impl VoxelBuffer {
     }
 
     /// Get a voxel as float. Matches `get_voxel_f`.
+    #[inline]
     pub fn get_voxel_f(&self, x: i32, y: i32, z: i32, channel_index: usize) -> f32 {
         let raw = self.get_voxel(x, y, z, channel_index);
         raw_voxel_to_real(raw, self.channels[channel_index].depth)
     }
 
     /// Set a voxel from float. Matches `set_voxel_f`.
+    #[inline]
     pub fn set_voxel_f(&mut self, value: f32, x: i32, y: i32, z: i32, channel_index: usize) {
         let depth = self.channels[channel_index].depth;
         self.set_voxel(real_to_raw_voxel(value, depth), x, y, z, channel_index);
@@ -404,41 +408,180 @@ impl VoxelBuffer {
         ch.compression = Compression::Uniform;
     }
 
-    /// Fill a rectangular area with a raw value. Matches `fill_area`. Always
-    /// decompresses the channel.
+    /// Fill a rectangular area with a raw value. Matches `fill_area`.
     pub fn fill_area(&mut self, value: u64, min: Vector3i, max: Vector3i, channel_index: usize) {
+        let size = self.size;
+        let Some((lo, hi)) = clipped_area(size, min, max) else {
+            return;
+        };
+        if self.channels[channel_index].compression == Compression::Uniform
+            && self.channels[channel_index].defval == value
+        {
+            return;
+        }
         self.decompress_channel(channel_index);
         let depth = self.channels[channel_index].depth;
         let bytes = depth.byte_count() as usize;
-        let ch = &mut self.channels[channel_index];
+        let le = encode_raw(value, depth);
+        let data = &mut self.channels[channel_index].data;
+        for z in lo.z..hi.z {
+            for x in lo.x..hi.x {
+                let row_index = voxel_index(size, x as usize, lo.y as usize, z as usize);
+                let row_len = (hi.y - lo.y) as usize;
+                match depth {
+                    ChannelDepth::Bit8 => {
+                        let start = row_index;
+                        data[start..start + row_len].fill(value as u8);
+                    }
+                    ChannelDepth::Bit16 | ChannelDepth::Bit32 | ChannelDepth::Bit64 => {
+                        let start = row_index * bytes;
+                        let end = start + row_len * bytes;
+                        for chunk in data[start..end].chunks_exact_mut(bytes) {
+                            chunk.copy_from_slice(&le[..bytes]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Apply `action` to every voxel in a local area of one channel.
+    ///
+    /// This is the safe Rust counterpart of C++ `write_box_template`: the
+    /// channel is decompressed once, its depth is dispatched once, and the
+    /// inner loop mutates contiguous ZXY rows by flat index.
+    pub(crate) fn read_write_area<F>(
+        &mut self,
+        min: Vector3i,
+        max: Vector3i,
+        channel_index: usize,
+        mut action: F,
+    ) where
+        F: FnMut(Vector3i, u64) -> u64,
+    {
         let size = self.size;
-        // Fill row-by-row in byte form. We can't use fill_3d_region_zxy< T >
-        // generically, so cast the data slice to a per-element layout via bytes.
-        let mut lo = min;
-        let mut hi = max;
-        crate::math::Vector3i::sort_min_max(&mut lo, &mut hi);
-        lo.x = crate::math::funcs::clamp(lo.x, 0, size.x);
-        lo.y = crate::math::funcs::clamp(lo.y, 0, size.y);
-        lo.z = crate::math::funcs::clamp(lo.z, 0, size.z);
-        hi.x = crate::math::funcs::clamp(hi.x, 0, size.x);
-        hi.y = crate::math::funcs::clamp(hi.y, 0, size.y);
-        hi.z = crate::math::funcs::clamp(hi.z, 0, size.z);
-        let area = hi - lo;
-        if area.x <= 0 || area.y <= 0 || area.z <= 0 {
+        let Some((lo, hi)) = clipped_area(size, min, max) else {
+            return;
+        };
+        self.decompress_channel(channel_index);
+        let depth = self.channels[channel_index].depth;
+        let data = &mut self.channels[channel_index].data;
+        match depth {
+            ChannelDepth::Bit8 => {
+                for_each_index_and_pos(size, lo, hi, |i, pos| {
+                    let current = data[i] as u64;
+                    data[i] = action(pos, current) as u8;
+                });
+            }
+            ChannelDepth::Bit16 => {
+                for_each_index_and_pos(size, lo, hi, |i, pos| {
+                    let off = i * 2;
+                    let current = u16::from_le_bytes([data[off], data[off + 1]]) as u64;
+                    data[off..off + 2]
+                        .copy_from_slice(&(action(pos, current) as u16).to_le_bytes());
+                });
+            }
+            ChannelDepth::Bit32 => {
+                for_each_index_and_pos(size, lo, hi, |i, pos| {
+                    let off = i * 4;
+                    let current = u32::from_le_bytes([
+                        data[off],
+                        data[off + 1],
+                        data[off + 2],
+                        data[off + 3],
+                    ]) as u64;
+                    data[off..off + 4]
+                        .copy_from_slice(&(action(pos, current) as u32).to_le_bytes());
+                });
+            }
+            ChannelDepth::Bit64 => {
+                for_each_index_and_pos(size, lo, hi, |i, pos| {
+                    let off = i * 8;
+                    let current = u64::from_le_bytes(data[off..off + 8].try_into().unwrap());
+                    data[off..off + 8].copy_from_slice(&action(pos, current).to_le_bytes());
+                });
+            }
+        }
+    }
+
+    /// Like [`read_write_area`](Self::read_write_area), while also reading a
+    /// second channel at the same voxel index before the write. Used by masked
+    /// paste so destination-mask checks use the original mask channel value
+    /// without redispatching the written channel depth for every voxel.
+    pub(crate) fn read_write_area_with_channel<F>(
+        &mut self,
+        min: Vector3i,
+        max: Vector3i,
+        write_channel_index: usize,
+        read_channel_index: usize,
+        mut action: F,
+    ) where
+        F: FnMut(Vector3i, u64, u64) -> u64,
+    {
+        if write_channel_index == read_channel_index {
+            self.read_write_area(min, max, write_channel_index, |pos, current| {
+                action(pos, current, current)
+            });
             return;
         }
-        let le = encode_raw(value, depth);
-        for z in 0..area.z {
-            for x in 0..area.x {
-                for y in 0..area.y {
-                    let i = voxel_index(
-                        size,
-                        (lo.x + x) as usize,
-                        (lo.y + y) as usize,
-                        (lo.z + z) as usize,
-                    );
-                    ch.data[i * bytes..i * bytes + bytes].copy_from_slice(&le[..bytes]);
-                }
+
+        let size = self.size;
+        let Some((lo, hi)) = clipped_area(size, min, max) else {
+            return;
+        };
+        self.decompress_channel(write_channel_index);
+        let (write_channel, read_channel) =
+            channel_pair_mut(&mut self.channels, write_channel_index, read_channel_index);
+        let read_depth = read_channel.depth;
+        let read_defval = read_channel.defval;
+        let read_is_uniform = read_channel.compression == Compression::Uniform;
+        let read_data = &read_channel.data;
+        let write_depth = write_channel.depth;
+        let write_data = &mut write_channel.data;
+
+        match write_depth {
+            ChannelDepth::Bit8 => {
+                for_each_index_and_pos(size, lo, hi, |i, pos| {
+                    let current = write_data[i] as u64;
+                    let read_value =
+                        read_channel_value(read_data, i, read_depth, read_defval, read_is_uniform);
+                    write_data[i] = action(pos, current, read_value) as u8;
+                });
+            }
+            ChannelDepth::Bit16 => {
+                for_each_index_and_pos(size, lo, hi, |i, pos| {
+                    let off = i * 2;
+                    let current = u16::from_le_bytes([write_data[off], write_data[off + 1]]) as u64;
+                    let read_value =
+                        read_channel_value(read_data, i, read_depth, read_defval, read_is_uniform);
+                    write_data[off..off + 2]
+                        .copy_from_slice(&(action(pos, current, read_value) as u16).to_le_bytes());
+                });
+            }
+            ChannelDepth::Bit32 => {
+                for_each_index_and_pos(size, lo, hi, |i, pos| {
+                    let off = i * 4;
+                    let current = u32::from_le_bytes([
+                        write_data[off],
+                        write_data[off + 1],
+                        write_data[off + 2],
+                        write_data[off + 3],
+                    ]) as u64;
+                    let read_value =
+                        read_channel_value(read_data, i, read_depth, read_defval, read_is_uniform);
+                    write_data[off..off + 4]
+                        .copy_from_slice(&(action(pos, current, read_value) as u32).to_le_bytes());
+                });
+            }
+            ChannelDepth::Bit64 => {
+                for_each_index_and_pos(size, lo, hi, |i, pos| {
+                    let off = i * 8;
+                    let current = u64::from_le_bytes(write_data[off..off + 8].try_into().unwrap());
+                    let read_value =
+                        read_channel_value(read_data, i, read_depth, read_defval, read_is_uniform);
+                    write_data[off..off + 8]
+                        .copy_from_slice(&action(pos, current, read_value).to_le_bytes());
+                });
             }
         }
     }
@@ -663,31 +806,20 @@ impl VoxelBuffer {
 
             // ZXY iteration matches the C++ loop order so downscaled buffers
             // remain byte-comparable with the reference implementation.
-            let mut dst_pos = dst_min;
-            while dst_pos.z < dst_max.z {
-                dst_pos.x = dst_min.x;
-                while dst_pos.x < dst_max.x {
-                    dst_pos.y = dst_min.y;
-                    while dst_pos.y < dst_max.y {
-                        let src_pos = src_min + ((dst_pos - dst_min) << 1);
-                        // Source bounds were clamped above; verify defensively.
-                        debug_assert!(src_pos.x >= 0 && src_pos.y >= 0 && src_pos.z >= 0);
-                        debug_assert!(src_pos.x < self.size.x);
-                        debug_assert!(src_pos.y < self.size.y);
-                        debug_assert!(src_pos.z < self.size.z);
+            dst.read_write_area(dst_min, dst_max, channel_index, |dst_pos, _dst_value| {
+                let src_pos = src_min + ((dst_pos - dst_min) << 1);
+                // Source bounds were clamped above; verify defensively.
+                debug_assert!(src_pos.x >= 0 && src_pos.y >= 0 && src_pos.z >= 0);
+                debug_assert!(src_pos.x < self.size.x);
+                debug_assert!(src_pos.y < self.size.y);
+                debug_assert!(src_pos.z < self.size.z);
 
-                        let value = if src_compression == Compression::Uniform {
-                            src_defval
-                        } else {
-                            self.get_voxel(src_pos.x, src_pos.y, src_pos.z, channel_index)
-                        };
-                        dst.set_voxel(value, dst_pos.x, dst_pos.y, dst_pos.z, channel_index);
-                        dst_pos.y += 1;
-                    }
-                    dst_pos.x += 1;
+                if src_compression == Compression::Uniform {
+                    src_defval
+                } else {
+                    self.get_voxel(src_pos.x, src_pos.y, src_pos.z, channel_index)
                 }
-                dst_pos.z += 1;
-            }
+            });
         }
     }
 
@@ -750,6 +882,67 @@ impl Drop for VoxelBuffer {
 }
 
 // ---- free helpers ----
+
+fn clipped_area(size: Vector3i, min: Vector3i, max: Vector3i) -> Option<(Vector3i, Vector3i)> {
+    let mut lo = min;
+    let mut hi = max;
+    Vector3i::sort_min_max(&mut lo, &mut hi);
+    lo.x = crate::math::funcs::clamp(lo.x, 0, size.x);
+    lo.y = crate::math::funcs::clamp(lo.y, 0, size.y);
+    lo.z = crate::math::funcs::clamp(lo.z, 0, size.z);
+    hi.x = crate::math::funcs::clamp(hi.x, 0, size.x);
+    hi.y = crate::math::funcs::clamp(hi.y, 0, size.y);
+    hi.z = crate::math::funcs::clamp(hi.z, 0, size.z);
+    if hi.x <= lo.x || hi.y <= lo.y || hi.z <= lo.z {
+        return None;
+    }
+    Some((lo, hi))
+}
+
+#[inline]
+fn for_each_index_and_pos<F>(size: Vector3i, min: Vector3i, max: Vector3i, mut f: F)
+where
+    F: FnMut(usize, Vector3i),
+{
+    for z in min.z..max.z {
+        for x in min.x..max.x {
+            let row_start = voxel_index(size, x as usize, min.y as usize, z as usize);
+            for (i, y) in (row_start..).zip(min.y..max.y) {
+                f(i, Vector3i::new(x, y, z));
+            }
+        }
+    }
+}
+
+fn channel_pair_mut(
+    channels: &mut [Channel; MAX_CHANNELS],
+    write_channel_index: usize,
+    read_channel_index: usize,
+) -> (&mut Channel, &Channel) {
+    debug_assert_ne!(write_channel_index, read_channel_index);
+    if write_channel_index < read_channel_index {
+        let (left, right) = channels.split_at_mut(read_channel_index);
+        (&mut left[write_channel_index], &right[0])
+    } else {
+        let (left, right) = channels.split_at_mut(write_channel_index);
+        (&mut right[0], &left[read_channel_index])
+    }
+}
+
+#[inline]
+fn read_channel_value(
+    data: &[u8],
+    i: usize,
+    depth: ChannelDepth,
+    defval: u64,
+    is_uniform: bool,
+) -> u64 {
+    if is_uniform {
+        defval
+    } else {
+        read_raw(data, i, depth)
+    }
+}
 
 /// Index into a flat ZXY channel. Matches `get_index(x,y,z) = y + sy*(x + sx*z)`.
 #[inline]
@@ -1312,5 +1505,39 @@ mod tests {
         // dst(2,1,1) = src(2,0,0) = 42.
         assert_eq!(dst.get_voxel(1, 1, 1, channel), 5);
         assert_eq!(dst.get_voxel(2, 1, 1, channel), 42);
+    }
+
+    #[test]
+    fn voxel_buffer_hot_paths_use_depth_hoisted_helpers() {
+        let source = include_str!("voxel_buffer.rs");
+        for name in ["get_voxel", "set_voxel", "get_voxel_f", "set_voxel_f"] {
+            let marker = ["#[inline]\n    pub fn ", name].concat();
+            assert!(
+                source.contains(&marker),
+                "{name} should stay inline on the hot voxel path"
+            );
+        }
+
+        let row_index_marker = ["fn for_each", "_index_and_pos"].concat();
+        assert!(
+            source.contains(&row_index_marker),
+            "fill/downscale helpers should compute the ZXY row base outside the inner Y loop"
+        );
+
+        let read_write_marker = ["read_write", "_area"].concat();
+        assert!(
+            source.contains(&read_write_marker),
+            "downscale/write-box style loops should dispatch channel depth once before iterating voxels"
+        );
+
+        let old_downscale_write = [
+            "dst",
+            ".set_voxel(value, dst_pos.x, dst_pos.y, dst_pos.z, channel_index)",
+        ]
+        .concat();
+        assert!(
+            !source.contains(&old_downscale_write),
+            "downscale_to should write through the depth-hoisted area helper"
+        );
     }
 }

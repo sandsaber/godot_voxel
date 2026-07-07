@@ -81,6 +81,7 @@ impl VoxelDataMap {
         block_pos * Self::BLOCK_SIZE as i32
     }
 
+    #[inline]
     pub fn get_voxel(&self, pos: Vector3i, channel_index: usize) -> u64 {
         let block_pos = self.voxel_to_block(pos);
         let Some(block) = self.get_block(block_pos) else {
@@ -95,6 +96,7 @@ impl VoxelDataMap {
             .get_voxel(local_pos.x, local_pos.y, local_pos.z, channel_index)
     }
 
+    #[inline]
     pub fn set_voxel(&mut self, value: u64, pos: Vector3i, channel_index: usize) {
         let local_pos = self.to_local(pos);
         let block = self.get_or_create_block_at_voxel_pos(pos);
@@ -103,6 +105,7 @@ impl VoxelDataMap {
             .set_voxel(value, local_pos.x, local_pos.y, local_pos.z, channel_index);
     }
 
+    #[inline]
     pub fn get_voxel_f(&self, pos: Vector3i, channel_index: usize) -> f32 {
         let block_pos = self.voxel_to_block(pos);
         let Some(block) = self.get_block(block_pos) else {
@@ -117,6 +120,7 @@ impl VoxelDataMap {
             .get_voxel_f(local_pos.x, local_pos.y, local_pos.z, channel_index)
     }
 
+    #[inline]
     pub fn set_voxel_f(&mut self, value: f32, pos: Vector3i, channel_index: usize) {
         let local_pos = self.to_local(pos);
         let block = self.get_or_create_block_at_voxel_pos(pos);
@@ -361,26 +365,23 @@ impl VoxelDataMap {
             );
 
             let voxels = block.voxels_mut();
-            for lz in local_min.z..local_max.z {
-                for lx in local_min.x..local_max.x {
-                    for ly in local_min.y..local_max.y {
-                        let src_pos = Vector3i::new(lx, ly, lz) - dst_base_pos;
-                        if src_buffer.get_voxel(src_pos.x, src_pos.y, src_pos.z, src_mask_channel)
-                            == src_mask_value
-                        {
-                            continue;
-                        }
-                        for &channel_index in &channels {
-                            let value = src_buffer.get_voxel(
-                                src_pos.x,
-                                src_pos.y,
-                                src_pos.z,
-                                channel_index,
-                            );
-                            voxels.set_voxel(value, lx, ly, lz, channel_index);
-                        }
+            for &channel_index in &channels {
+                voxels.read_write_area(local_min, local_max, channel_index, |local_pos, dst_v| {
+                    let src_pos = local_pos - dst_base_pos;
+                    let mask_value = if channel_index == src_mask_channel {
+                        src_buffer.get_voxel(src_pos.x, src_pos.y, src_pos.z, channel_index)
+                    } else {
+                        src_buffer.get_voxel(src_pos.x, src_pos.y, src_pos.z, src_mask_channel)
+                    };
+                    if mask_value == src_mask_value {
+                        return dst_v;
                     }
-                }
+                    if channel_index == src_mask_channel {
+                        mask_value
+                    } else {
+                        src_buffer.get_voxel(src_pos.x, src_pos.y, src_pos.z, channel_index)
+                    }
+                });
             }
         }
     }
@@ -443,30 +444,55 @@ impl VoxelDataMap {
             );
 
             let voxels = block.voxels_mut();
-            for lz in local_min.z..local_max.z {
-                for lx in local_min.x..local_max.x {
-                    for ly in local_min.y..local_max.y {
-                        let src_pos = Vector3i::new(lx, ly, lz) - dst_base_pos;
+            for &channel_index in channels
+                .iter()
+                .filter(|&&channel_index| channel_index != dst_mask_channel)
+            {
+                voxels.read_write_area_with_channel(
+                    local_min,
+                    local_max,
+                    channel_index,
+                    dst_mask_channel,
+                    |local_pos, dst_v, dst_mask_value| {
+                        let src_pos = local_pos - dst_base_pos;
                         if src_buffer.get_voxel(src_pos.x, src_pos.y, src_pos.z, src_mask_channel)
                             == src_mask_value
                         {
-                            continue;
+                            return dst_v;
                         }
-                        let dst_mask_value = voxels.get_voxel(lx, ly, lz, dst_mask_channel);
                         if !writability_lookup.is_writable(dst_mask_value) {
-                            continue;
+                            return dst_v;
                         }
-                        for &channel_index in &channels {
-                            let value = src_buffer.get_voxel(
-                                src_pos.x,
-                                src_pos.y,
-                                src_pos.z,
-                                channel_index,
-                            );
-                            voxels.set_voxel(value, lx, ly, lz, channel_index);
+                        src_buffer.get_voxel(src_pos.x, src_pos.y, src_pos.z, channel_index)
+                    },
+                );
+            }
+
+            if channels.contains(&dst_mask_channel) {
+                voxels.read_write_area(
+                    local_min,
+                    local_max,
+                    dst_mask_channel,
+                    |local_pos, dst_mask_value| {
+                        let src_pos = local_pos - dst_base_pos;
+                        let src_value = if dst_mask_channel == src_mask_channel {
+                            src_buffer.get_voxel(src_pos.x, src_pos.y, src_pos.z, dst_mask_channel)
+                        } else {
+                            src_buffer.get_voxel(src_pos.x, src_pos.y, src_pos.z, src_mask_channel)
+                        };
+                        if src_value == src_mask_value {
+                            return dst_mask_value;
                         }
-                    }
-                }
+                        if !writability_lookup.is_writable(dst_mask_value) {
+                            return dst_mask_value;
+                        }
+                        if dst_mask_channel == src_mask_channel {
+                            src_value
+                        } else {
+                            src_buffer.get_voxel(src_pos.x, src_pos.y, src_pos.z, dst_mask_channel)
+                        }
+                    },
+                );
             }
         }
     }
@@ -954,5 +980,21 @@ mod tests {
         // The single-voxel outline of the area was masked out, so it remains
         // at the block default rather than `write_value`.
         assert_ne!(map.get_voxel(area.position, channel), write_value);
+    }
+
+    #[test]
+    fn masked_paste_uses_depth_hoisted_destination_writes() {
+        let source = include_str!("voxel_data_map.rs");
+        let helper_marker = [".read_write", "_area"].concat();
+        assert!(
+            source.contains(&helper_marker),
+            "masked paste should mutate destination blocks through VoxelBuffer's depth-hoisted area helper"
+        );
+
+        let old_write_marker = ["voxels", ".set_voxel(value, lx, ly, lz, channel_index)"].concat();
+        assert!(
+            !source.contains(&old_write_marker),
+            "masked paste should not redispatch destination channel depth for every voxel write"
+        );
     }
 }
