@@ -36,6 +36,7 @@ use crate::io::serialization::{MemoryReader, MemoryWriter};
 use crate::storage::voxel_buffer::{Compression, MAX_CHANNELS, MAX_SIZE};
 use crate::storage::{ChannelDepth, VoxelBuffer};
 use crate::streams::compressed_data;
+use crate::streams::decode_limits::{DecodeLimitError, DecodeLimits};
 
 /// Latest on-disk version, written by [`serialize`].
 pub const BLOCK_FORMAT_VERSION: u8 = 4;
@@ -67,6 +68,8 @@ pub enum Error {
     MetadataSkipped,
     /// Compression envelope failure (LZ4/ZSTD).
     Compress(compressed_data::Error),
+    /// Declared decoded size exceeded caller-provided limits or allocation failed.
+    Limit(DecodeLimitError),
 }
 
 impl std::fmt::Display for Error {
@@ -88,6 +91,7 @@ impl std::fmt::Display for Error {
                 "block_serializer: metadata section present but skipped (Variant codec not ported)"
             ),
             Error::Compress(e) => write!(f, "block_serializer: compression error: {e}"),
+            Error::Limit(e) => write!(f, "block_serializer: decode limit: {e}"),
         }
     }
 }
@@ -207,6 +211,15 @@ fn read_raw_by_depth(r: &mut MemoryReader<'_>, depth: ChannelDepth) -> Option<u6
 /// returned so the caller can decide whether to treat it as a warning. Legacy
 /// v2/v3 migration is deferred — see the module docs.
 pub fn deserialize(src: &[u8], buffer: &mut VoxelBuffer) -> Result<(), Error> {
+    deserialize_with_limits(src, buffer, DecodeLimits::default())
+}
+
+/// Deserialize `src` into `buffer` with explicit allocation limits.
+pub fn deserialize_with_limits(
+    src: &[u8],
+    buffer: &mut VoxelBuffer,
+    limits: DecodeLimits,
+) -> Result<(), Error> {
     // Quick corruption check: the last 4 bytes must be the trailing magic.
     if src.len() < BLOCK_TRAILING_MAGIC_SIZE {
         return Err(Error::UnexpectedEof);
@@ -235,7 +248,21 @@ pub fn deserialize(src: &[u8], buffer: &mut VoxelBuffer) -> Result<(), Error> {
     let size_x = r.try_get_16().ok_or(Error::UnexpectedEof)? as i32;
     let size_y = r.try_get_16().ok_or(Error::UnexpectedEof)? as i32;
     let size_z = r.try_get_16().ok_or(Error::UnexpectedEof)? as i32;
-    buffer.create(crate::math::Vector3i::new(size_x, size_y, size_z));
+    let size = crate::math::Vector3i::new(size_x, size_y, size_z);
+    let voxel_count = size.volume_u64();
+    limits
+        .check_block_voxels(voxel_count)
+        .map_err(Error::Limit)?;
+    let voxel_count_usize = usize::try_from(voxel_count)
+        .map_err(|_| Error::InvalidFormat("block voxel count overflows usize".to_string()))?;
+    let worst_case_bytes = voxel_count_usize
+        .checked_mul(MAX_CHANNELS)
+        .and_then(|v| v.checked_mul(std::mem::size_of::<u64>()))
+        .ok_or_else(|| Error::InvalidFormat("block byte count overflow".to_string()))?;
+    limits
+        .check_bytes("block voxel bytes", worst_case_bytes)
+        .map_err(Error::Limit)?;
+    buffer.create(size);
 
     for ci in 0..MAX_CHANNELS {
         let fmt = r.try_get_8().ok_or(Error::UnexpectedEof)?;
@@ -316,11 +343,20 @@ pub fn serialize_and_compress(
 /// Decompress `src`, then deserialize. Ported from
 /// `BlockSerializer::decompress_and_deserialize`.
 pub fn decompress_and_deserialize(src: &[u8], buffer: &mut VoxelBuffer) -> Result<(), Error> {
+    decompress_and_deserialize_with_limits(src, buffer, DecodeLimits::default())
+}
+
+/// Decompress `src`, then deserialize with explicit allocation limits.
+pub fn decompress_and_deserialize_with_limits(
+    src: &[u8],
+    buffer: &mut VoxelBuffer,
+    limits: DecodeLimits,
+) -> Result<(), Error> {
     let mut raw = Vec::new();
-    compressed_data::decompress(src, &mut raw)?;
+    compressed_data::decompress_with_limits(src, &mut raw, limits)?;
     // If the inner block carried metadata we couldn't decode, surface it as a
     // non-fatal warning: the voxel data is still loaded correctly.
-    match deserialize(&raw, buffer) {
+    match deserialize_with_limits(&raw, buffer, limits) {
         Ok(()) => Ok(()),
         Err(Error::MetadataSkipped) => Ok(()),
         Err(e) => Err(e),
@@ -355,6 +391,31 @@ mod tests {
         bytes.extend_from_slice(&(metadata.len() as u32).to_le_bytes());
         bytes.extend_from_slice(metadata);
         bytes.extend_from_slice(&magic);
+    }
+
+    fn header_only_block(size: Vector3i) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.push(BLOCK_FORMAT_VERSION);
+        bytes.extend_from_slice(&(size.x as u16).to_le_bytes());
+        bytes.extend_from_slice(&(size.y as u16).to_le_bytes());
+        bytes.extend_from_slice(&(size.z as u16).to_le_bytes());
+        bytes.extend_from_slice(&BLOCK_TRAILING_MAGIC.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn deserialize_rejects_block_voxel_count_over_limit_before_create() {
+        let bytes = header_only_block(Vector3i::new(8, 8, 8));
+        let limits = crate::streams::DecodeLimits {
+            max_block_voxels: 16,
+            ..crate::streams::DecodeLimits::default()
+        };
+        let mut dst = VoxelBuffer::new(Allocator::Default);
+
+        let err = deserialize_with_limits(&bytes, &mut dst, limits).unwrap_err();
+
+        assert!(matches!(err, Error::Limit(_)));
+        assert_eq!(dst.size(), Vector3i::zero());
     }
 
     #[test]

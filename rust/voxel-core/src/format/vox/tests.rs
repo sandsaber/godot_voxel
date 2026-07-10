@@ -13,7 +13,8 @@
 
 use super::data::{Data, MaterialType, Node, PALETTE_SIZE};
 use super::parser::{
-    default_palette, i32_from_u32, magica_to_opengl, parse, parse_basis, VoxError,
+    default_palette, i32_from_u32, magica_to_opengl, parse, parse_basis, parse_with_limits,
+    VoxError,
 };
 use crate::math::{Color8, Vector3i};
 
@@ -245,6 +246,51 @@ fn parse_default_palette_loaded_implicitly() {
     let data = parse(&bytes).unwrap();
     assert_eq!(data.palette()[1], Color8::new(0xff, 0xff, 0xff, 0xff));
     assert_eq!(data.palette()[0], Color8::new(0, 0, 0, 0));
+}
+
+#[test]
+fn parse_with_limits_rejects_dense_model_allocation_over_limit() {
+    let mut size = Vec::new();
+    size.extend_from_slice(&u32_le(16));
+    size.extend_from_slice(&u32_le(16));
+    size.extend_from_slice(&u32_le(16));
+    let mut xyzi = Vec::new();
+    xyzi.extend_from_slice(&u32_le(0));
+    let bytes = vox_file(&[(b"SIZE", size), (b"XYZI", xyzi)]);
+    let limits = crate::streams::DecodeLimits {
+        max_vox_total_voxels: 16,
+        ..crate::streams::DecodeLimits::default()
+    };
+
+    match parse_with_limits(&bytes, limits).unwrap_err() {
+        VoxError::InvalidData(message) => assert!(message.contains("vox total voxels")),
+        other => panic!("expected InvalidData, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_with_limits_rejects_too_many_models() {
+    let mut chunks = Vec::new();
+    for _ in 0..2 {
+        let mut size = Vec::new();
+        size.extend_from_slice(&u32_le(1));
+        size.extend_from_slice(&u32_le(1));
+        size.extend_from_slice(&u32_le(1));
+        let mut xyzi = Vec::new();
+        xyzi.extend_from_slice(&u32_le(0));
+        chunks.push((b"SIZE", size));
+        chunks.push((b"XYZI", xyzi));
+    }
+    let bytes = vox_file(&chunks);
+    let limits = crate::streams::DecodeLimits {
+        max_vox_models: 1,
+        ..crate::streams::DecodeLimits::default()
+    };
+
+    match parse_with_limits(&bytes, limits).unwrap_err() {
+        VoxError::InvalidData(message) => assert!(message.contains("vox models")),
+        other => panic!("expected InvalidData, got {other:?}"),
+    }
 }
 
 // ===========================================================================

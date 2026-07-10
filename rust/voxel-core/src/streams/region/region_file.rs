@@ -16,11 +16,10 @@ use std::path::Path;
 use crate::io::voxel_file::{StdVoxelFile, VoxelFile};
 use crate::math::{Color8, Vector3i};
 use crate::storage::{ChannelDepth, VoxelBuffer};
-use crate::streams::block_serializer;
-use crate::streams::compressed_data;
 use crate::streams::region::format::{
     RegionBlockInfo, RegionFormat, FORMAT_VERSION, MAGIC, MAGIC_AND_VERSION_SIZE,
 };
+use crate::streams::{block_serializer, compressed_data, DecodeLimits};
 
 /// Why a region operation failed. Mirrors the C++ `Error` returns.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -422,6 +421,16 @@ impl<F: VoxelFile> RegionFile<F> {
         position: Vector3i,
         out_block: &mut VoxelBuffer,
     ) -> Result<(), RegionError> {
+        self.load_block_with_limits(position, out_block, DecodeLimits::default())
+    }
+
+    /// Load a block from disk with explicit decode limits.
+    pub fn load_block_with_limits(
+        &mut self,
+        position: Vector3i,
+        out_block: &mut VoxelBuffer,
+        limits: DecodeLimits,
+    ) -> Result<(), RegionError> {
         if self.file.is_none() {
             panic!("RegionFile::load_block: file not open");
         }
@@ -454,7 +463,26 @@ impl<F: VoxelFile> RegionFile<F> {
         }
         let block_data_size = u32::from_le_bytes(size_buf) as usize;
 
-        let mut payload = vec![0u8; block_data_size];
+        let max_payload_in_slot = (bi.sector_count() as usize)
+            .checked_mul(self.header.format.sector_size as usize)
+            .and_then(|v| v.checked_sub(4))
+            .ok_or_else(|| RegionError::BadHeader("invalid block sector allocation".into()))?;
+        if block_data_size > max_payload_in_slot {
+            return Err(RegionError::BadHeader(format!(
+                "block payload length {block_data_size} exceeds sector allocation {max_payload_in_slot}"
+            )));
+        }
+        limits
+            .check_bytes("region block payload", block_data_size)
+            .map_err(|e| RegionError::BadHeader(e.to_string()))?;
+
+        let mut payload = Vec::new();
+        payload.try_reserve(block_data_size).map_err(|_| {
+            RegionError::BadHeader(format!(
+                "region block payload allocation failed for {block_data_size} bytes"
+            ))
+        })?;
+        payload.resize(block_data_size, 0);
         let pn = file.read(&mut payload).map_err(io)?;
         if pn != block_data_size {
             return Err(RegionError::Io(format!(
@@ -462,7 +490,7 @@ impl<F: VoxelFile> RegionFile<F> {
             )));
         }
 
-        block_serializer::decompress_and_deserialize(&payload, out_block)
+        block_serializer::decompress_and_deserialize_with_limits(&payload, out_block, limits)
             .map_err(RegionError::BlockSerializer)?;
         Ok(())
     }
@@ -769,6 +797,35 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn load_block_rejects_payload_larger_than_sector_allocation() {
+        let mut rf = open_memory(small_format());
+        let position = Vector3i::new(0, 0, 0);
+        rf.save_block(
+            position,
+            &sample_block(42),
+            compressed_data::Compression::None,
+        )
+        .unwrap();
+
+        let bi = rf.header.blocks[rf.block_index(position).unwrap()];
+        let block_begin =
+            rf.blocks_begin_offset + bi.sector_index() as u64 * rf.header.format.sector_size as u64;
+        let declared_payload = bi.sector_count() * rf.header.format.sector_size;
+        let file = rf.file.as_mut().expect("memory file is open");
+        file.seek(block_begin).unwrap();
+        file.write(&declared_payload.to_le_bytes()).unwrap();
+
+        let mut loaded = VoxelBuffer::new(Allocator::Default);
+        let err = rf
+            .load_block_with_limits(position, &mut loaded, DecodeLimits::default())
+            .unwrap_err();
+
+        assert!(
+            matches!(err, RegionError::BadHeader(message) if message.contains("exceeds sector allocation"))
+        );
     }
 
     #[test]

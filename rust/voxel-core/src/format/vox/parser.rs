@@ -27,6 +27,7 @@ use crate::format::vox::data::{
     TransformNode, MAX_MODEL_SIZE, PALETTE_SIZE,
 };
 use crate::math::{Basis3f, Color8, Vector3f, Vector3i};
+use crate::streams::DecodeLimits;
 
 /// Parse error. Mirrors the `Error` codes returned by the C++ `_load_from_file`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -194,13 +195,16 @@ pub(crate) fn parse_basis(data: u8) -> Basis3f {
 
 /// Parse a length-prefixed UTF-8 string. Matches `parse_string`. The C++
 /// version caps the length at 4096 and rejects negative sizes.
-fn parse_string(r: &mut Reader<'_>) -> Result<String> {
+fn parse_string(r: &mut Reader<'_>, limits: DecodeLimits) -> Result<String> {
     let size = i32_from_u32(r.u32()?);
-    if !(0..=4096).contains(&size) {
+    if size < 0 {
         return Err(VoxError::InvalidData(format!(
             "string length out of range: {size}"
         )));
     }
+    limits
+        .check_string_bytes(size as usize)
+        .map_err(|e| VoxError::InvalidData(e.to_string()))?;
     let bytes = r.take(size as usize)?;
     std::str::from_utf8(bytes)
         .map(|s| s.to_owned())
@@ -208,7 +212,7 @@ fn parse_string(r: &mut Reader<'_>) -> Result<String> {
 }
 
 /// Parse a `{key,value}` dictionary. Matches `parse_dictionary` (≤256 entries).
-fn parse_dictionary(r: &mut Reader<'_>) -> Result<HashMap<String, String>> {
+fn parse_dictionary(r: &mut Reader<'_>, limits: DecodeLimits) -> Result<HashMap<String, String>> {
     let item_count = i32_from_u32(r.u32()?);
     if !(0..=256).contains(&item_count) {
         return Err(VoxError::InvalidData(format!(
@@ -217,8 +221,8 @@ fn parse_dictionary(r: &mut Reader<'_>) -> Result<HashMap<String, String>> {
     }
     let mut dict = HashMap::with_capacity(item_count as usize);
     for _ in 0..item_count {
-        let key = parse_string(r)?;
-        let value = parse_string(r)?;
+        let key = parse_string(r, limits)?;
+        let value = parse_string(r, limits)?;
         dict.insert(key, value);
     }
     Ok(dict)
@@ -230,6 +234,7 @@ fn parse_dictionary(r: &mut Reader<'_>) -> Result<HashMap<String, String>> {
 fn parse_node_common_header(
     r: &mut Reader<'_>,
     scene_graph: &HashMap<i32, Node>,
+    limits: DecodeLimits,
 ) -> Result<NodeCommon> {
     let node_id = i32_from_u32(r.u32()?);
     if scene_graph.contains_key(&node_id) {
@@ -237,7 +242,7 @@ fn parse_node_common_header(
             "node with id {node_id} already exists"
         )));
     }
-    let attributes = parse_dictionary(r)?;
+    let attributes = parse_dictionary(r, limits)?;
     Ok(NodeCommon {
         id: node_id,
         attributes,
@@ -247,6 +252,11 @@ fn parse_node_common_header(
 /// `Data::load_from_file` — the public entry point. `bytes` is the raw file
 /// contents (e.g. read with `std::fs::read`).
 pub fn parse(bytes: &[u8]) -> Result<Data> {
+    parse_with_limits(bytes, DecodeLimits::default())
+}
+
+/// `Data::load_from_file` with explicit allocation limits.
+pub fn parse_with_limits(bytes: &[u8], limits: DecodeLimits) -> Result<Data> {
     let mut r = Reader::new(bytes);
     // `Data::default` seeds the palette with the documented MagicaVoxel
     // default; an `RGBA` chunk overrides entries 1..255 (index 0 stays
@@ -254,6 +264,8 @@ pub fn parse(bytes: &[u8]) -> Result<Data> {
     let mut data = Data::default();
 
     let mut last_size = Vector3i::default();
+    let mut total_dense_voxels = 0u64;
+    let mut scene_node_count = 0usize;
 
     // --- file header -------------------------------------------------------
     let magic = r.tag()?;
@@ -294,12 +306,38 @@ pub fn parse(bytes: &[u8]) -> Result<Data> {
             }
             last_size = magica_to_opengl(size);
         } else if &chunk_id == b"XYZI" {
+            let num_voxels = r.u32()?;
+            limits
+                .check_vox_models(data.models.len() + 1)
+                .map_err(|e| VoxError::InvalidData(e.to_string()))?;
+            let dense_voxels = last_size.volume_u64();
+            if u64::from(num_voxels) > dense_voxels {
+                return Err(VoxError::InvalidData(format!(
+                    "XYZI voxel count {num_voxels} exceeds model volume {dense_voxels}"
+                )));
+            }
+            total_dense_voxels = total_dense_voxels
+                .checked_add(dense_voxels)
+                .ok_or_else(|| VoxError::InvalidData("vox total voxel count overflow".into()))?;
+            limits
+                .check_vox_total_voxels(total_dense_voxels)
+                .map_err(|e| VoxError::InvalidData(e.to_string()))?;
+            let color_index_len = usize::try_from(dense_voxels)
+                .map_err(|_| VoxError::InvalidData("model color index length overflow".into()))?;
+            limits
+                .check_bytes("vox model color indexes", color_index_len)
+                .map_err(|e| VoxError::InvalidData(e.to_string()))?;
+            let mut color_indexes = Vec::new();
+            color_indexes.try_reserve(color_index_len).map_err(|_| {
+                VoxError::InvalidData(format!(
+                    "model color index allocation failed for {color_index_len} bytes"
+                ))
+            })?;
+            color_indexes.resize(color_index_len, 0u8);
             let mut model = Model {
                 size: last_size,
-                color_indexes: vec![0u8; last_size.volume_u64() as usize],
+                color_indexes,
             };
-
-            let num_voxels = r.u32()?;
             for _ in 0..num_voxels {
                 let pos = Vector3i::new(r.u8()? as i32, r.u8()? as i32, r.u8()? as i32);
                 let c = r.u8()?;
@@ -334,7 +372,7 @@ pub fn parse(bytes: &[u8]) -> Result<Data> {
             // Trailing reserved u32 (matches `f.get_32()` discard).
             let _ = r.u32()?;
         } else if &chunk_id == b"nTRN" {
-            let mut common = parse_node_common_header(&mut r, &data.scene_graph)?;
+            let mut common = parse_node_common_header(&mut r, &data.scene_graph, limits)?;
             let mut node = TransformNode::default();
             if let Some(name) = common.attributes.remove("_name") {
                 node.name = name;
@@ -361,7 +399,7 @@ pub fn parse(bytes: &[u8]) -> Result<Data> {
                 )));
             }
 
-            let frame = parse_dictionary(&mut r)?;
+            let frame = parse_dictionary(&mut r, limits)?;
             if let Some(t) = frame.get("_t") {
                 // Three space-separated integers in text form.
                 let coords: Vec<i32> = t.split(' ').filter_map(|s| s.parse().ok()).collect();
@@ -380,10 +418,14 @@ pub fn parse(bytes: &[u8]) -> Result<Data> {
                 };
             }
 
+            scene_node_count += 1;
+            limits
+                .check_vox_nodes(scene_node_count)
+                .map_err(|e| VoxError::InvalidData(e.to_string()))?;
             data.scene_graph
                 .insert(node.common.id, Node::Transform(node));
         } else if &chunk_id == b"nGRP" {
-            let common = parse_node_common_header(&mut r, &data.scene_graph)?;
+            let common = parse_node_common_header(&mut r, &data.scene_graph, limits)?;
             let child_count = r.u32()?;
             if child_count > 65536 {
                 return Err(VoxError::InvalidData(format!(
@@ -394,6 +436,10 @@ pub fn parse(bytes: &[u8]) -> Result<Data> {
             for _ in 0..child_count {
                 child_node_ids.push(i32_from_u32(r.u32()?));
             }
+            scene_node_count += 1;
+            limits
+                .check_vox_nodes(scene_node_count)
+                .map_err(|e| VoxError::InvalidData(e.to_string()))?;
             data.scene_graph.insert(
                 common.id,
                 Node::Group(GroupNode {
@@ -402,7 +448,7 @@ pub fn parse(bytes: &[u8]) -> Result<Data> {
                 }),
             );
         } else if &chunk_id == b"nSHP" {
-            let mut common = parse_node_common_header(&mut r, &data.scene_graph)?;
+            let mut common = parse_node_common_header(&mut r, &data.scene_graph, limits)?;
             let model_count = r.u32()?;
             if model_count != 1 {
                 return Err(VoxError::InvalidData(format!(
@@ -415,8 +461,12 @@ pub fn parse(bytes: &[u8]) -> Result<Data> {
                     "nSHP model_id out of range: {model_id}"
                 )));
             }
-            let model_attributes = parse_dictionary(&mut r)?;
+            let model_attributes = parse_dictionary(&mut r, limits)?;
             common.take_attributes(Default::default()); // common keeps its own attrs
+            scene_node_count += 1;
+            limits
+                .check_vox_nodes(scene_node_count)
+                .map_err(|e| VoxError::InvalidData(e.to_string()))?;
             data.scene_graph.insert(
                 common.id,
                 Node::Shape(ShapeNode {
@@ -432,7 +482,7 @@ pub fn parse(bytes: &[u8]) -> Result<Data> {
                     "layer with id {layer_id} already exists"
                 )));
             }
-            let mut attributes = parse_dictionary(&mut r)?;
+            let mut attributes = parse_dictionary(&mut r, limits)?;
             let name = attributes.remove("_name").unwrap_or_default();
             let hidden = match attributes.remove("_hidden") {
                 Some(v) => v == "1",
@@ -462,7 +512,7 @@ pub fn parse(bytes: &[u8]) -> Result<Data> {
                     "material id {material_id} already exists"
                 )));
             }
-            let attributes = parse_dictionary(&mut r)?;
+            let attributes = parse_dictionary(&mut r, limits)?;
             let mut material = Material {
                 id: material_id,
                 ..Default::default()

@@ -18,6 +18,7 @@
 //! feature because the `zstd` crate bundles a C library.
 
 use crate::io::serialization::{Endianness, MemoryReader, MemoryWriter};
+use crate::streams::decode_limits::{reserve_vec, DecodeLimitError, DecodeLimits};
 
 /// Size of the on-disk header when a `u32` decompressed-size prefix is present
 /// (one tag byte + four size bytes). Matches the C++ `header_size` constant.
@@ -81,6 +82,8 @@ pub enum Error {
     /// ZSTD encode/decode returned an error.
     #[cfg(feature = "zstd")]
     Zstd(String),
+    /// Declared decoded size exceeded caller-provided limits or allocation failed.
+    Limit(DecodeLimitError),
 }
 
 impl std::fmt::Display for Error {
@@ -95,6 +98,7 @@ impl std::fmt::Display for Error {
             Error::Unsupported => write!(f, "compressed_data: zstd not compiled in"),
             #[cfg(feature = "zstd")]
             Error::Zstd(m) => write!(f, "compressed_data: zstd error: {m}"),
+            Error::Limit(e) => write!(f, "compressed_data: decode limit: {e}"),
         }
     }
 }
@@ -110,6 +114,11 @@ type Result<T> = std::result::Result<T, Error>;
 /// Decompress `src` into `dst`, clearing it first. Ported from
 /// `CompressedData::decompress`.
 pub fn decompress(src: &[u8], dst: &mut Vec<u8>) -> Result<()> {
+    decompress_with_limits(src, dst, DecodeLimits::default())
+}
+
+/// Decompress `src` into `dst` with explicit allocation limits.
+pub fn decompress_with_limits(src: &[u8], dst: &mut Vec<u8>, limits: DecodeLimits) -> Result<()> {
     let mut r = MemoryReader::little(src);
     let tag = r.try_get_8().ok_or(Error::UnexpectedEof)?;
     let comp = Compression::from_u8(tag).ok_or(Error::InvalidCompression(tag))?;
@@ -117,23 +126,43 @@ pub fn decompress(src: &[u8], dst: &mut Vec<u8>) -> Result<()> {
     match comp {
         Compression::None => {
             // No size header; the rest of `src` is the payload verbatim.
+            let payload = &src[1..];
+            limits
+                .check_bytes("uncompressed payload", payload.len())
+                .map_err(Error::Limit)?;
             dst.clear();
-            dst.extend_from_slice(&src[1..]);
+            reserve_vec(dst, "uncompressed payload", payload.len()).map_err(Error::Limit)?;
+            dst.extend_from_slice(payload);
             Ok(())
         }
         Compression::Lz4Be => {
             // Legacy path: switch the reader to big-endian for the size prefix.
             r.set_endianness(Endianness::BigEndian);
-            decompress_lz4(&mut r, src, dst)
+            decompress_lz4(&mut r, src, dst, limits)
         }
-        Compression::Lz4 => decompress_lz4(&mut r, src, dst),
-        Compression::Zstd => decompress_zstd(&mut r, src, dst),
+        Compression::Lz4 => decompress_lz4(&mut r, src, dst, limits),
+        Compression::Zstd => decompress_zstd(&mut r, src, dst, limits),
     }
+}
+
+fn prepare_output(dst: &mut Vec<u8>, len: usize, limits: DecodeLimits) -> Result<()> {
+    limits
+        .check_bytes("decompressed bytes", len)
+        .map_err(Error::Limit)?;
+    dst.clear();
+    reserve_vec(dst, "decompressed bytes", len).map_err(Error::Limit)?;
+    dst.resize(len, 0);
+    Ok(())
 }
 
 /// Shared LZ4 path for both [`Compression::Lz4`] and [`Compression::Lz4Be`];
 /// the reader's endianness is set by the caller. Matches `decompress_lz4`.
-fn decompress_lz4(r: &mut MemoryReader<'_>, src: &[u8], dst: &mut Vec<u8>) -> Result<()> {
+fn decompress_lz4(
+    r: &mut MemoryReader<'_>,
+    src: &[u8],
+    dst: &mut Vec<u8>,
+    limits: DecodeLimits,
+) -> Result<()> {
     let decompressed_size = i64::from(r.try_get_32().ok_or(Error::UnexpectedEof)?);
     if !(0..=MAX_DECOMPRESSED_SIZE).contains(&decompressed_size) {
         return Err(Error::InvalidSize(decompressed_size));
@@ -143,7 +172,7 @@ fn decompress_lz4(r: &mut MemoryReader<'_>, src: &[u8], dst: &mut Vec<u8>) -> Re
     // Compressed payload starts right after the tag+size header.
     let payload = src.get(SIZE_HEADER_LEN..).ok_or(Error::UnexpectedEof)?;
 
-    dst.resize(decompressed_size, 0);
+    prepare_output(dst, decompressed_size, limits)?;
     // `decompress_into` mirrors `LZ4_decompress_safe`: it refuses to write past
     // `dst.len()` and errors out if `payload` is malformed.
     let written =
@@ -158,7 +187,14 @@ fn decompress_lz4(r: &mut MemoryReader<'_>, src: &[u8], dst: &mut Vec<u8>) -> Re
 }
 
 #[cfg(feature = "zstd")]
-fn decompress_zstd(r: &mut MemoryReader<'_>, src: &[u8], dst: &mut Vec<u8>) -> Result<()> {
+fn decompress_zstd(
+    r: &mut MemoryReader<'_>,
+    src: &[u8],
+    dst: &mut Vec<u8>,
+    limits: DecodeLimits,
+) -> Result<()> {
+    use std::io::Read;
+
     let decompressed_size = i64::from(r.try_get_32().ok_or(Error::UnexpectedEof)?);
     if !(0..=MAX_DECOMPRESSED_SIZE).contains(&decompressed_size) {
         return Err(Error::InvalidSize(decompressed_size));
@@ -166,9 +202,20 @@ fn decompress_zstd(r: &mut MemoryReader<'_>, src: &[u8], dst: &mut Vec<u8>) -> R
     let decompressed_size = decompressed_size as usize;
 
     let payload = src.get(SIZE_HEADER_LEN..).ok_or(Error::UnexpectedEof)?;
-    dst.clear();
-    dst.resize(decompressed_size, 0);
-    let written = zstd::stream::decode_all(payload).map_err(|e| Error::Zstd(e.to_string()))?;
+    prepare_output(dst, decompressed_size, limits)?;
+    let decoder =
+        zstd::stream::read::Decoder::new(payload).map_err(|e| Error::Zstd(e.to_string()))?;
+    let mut limited = decoder.take(decompressed_size as u64 + 1);
+    let mut written = Vec::new();
+    reserve_vec(
+        &mut written,
+        "zstd decompressed bytes",
+        decompressed_size + 1,
+    )
+    .map_err(Error::Limit)?;
+    limited
+        .read_to_end(&mut written)
+        .map_err(|e| Error::Zstd(e.to_string()))?;
     if written.len() != decompressed_size {
         return Err(Error::Zstd(format!(
             "expected {decompressed_size} bytes, got {}",
@@ -180,7 +227,12 @@ fn decompress_zstd(r: &mut MemoryReader<'_>, src: &[u8], dst: &mut Vec<u8>) -> R
 }
 
 #[cfg(not(feature = "zstd"))]
-fn decompress_zstd(_r: &mut MemoryReader<'_>, _src: &[u8], _dst: &mut Vec<u8>) -> Result<()> {
+fn decompress_zstd(
+    _r: &mut MemoryReader<'_>,
+    _src: &[u8],
+    _dst: &mut Vec<u8>,
+    _limits: DecodeLimits,
+) -> Result<()> {
     Err(Error::Unsupported)
 }
 
@@ -269,6 +321,38 @@ mod tests {
             *b = (i as u8).wrapping_mul(7);
         }
         v
+    }
+
+    #[test]
+    fn lz4_decode_rejects_declared_size_over_limit_before_resizing() {
+        let mut bytes = vec![Compression::Lz4 as u8];
+        bytes.extend_from_slice(&9u32.to_le_bytes());
+        bytes.extend_from_slice(&[0u8; 1]);
+        let mut dst = Vec::new();
+        let limits = crate::streams::DecodeLimits {
+            max_bytes: 8,
+            ..crate::streams::DecodeLimits::default()
+        };
+
+        let err = decompress_with_limits(&bytes, &mut dst, limits).unwrap_err();
+
+        assert!(matches!(err, Error::Limit(_)));
+        assert!(dst.is_empty());
+    }
+
+    #[test]
+    fn none_decode_rejects_payload_over_limit_before_copying() {
+        let bytes = vec![Compression::None as u8, 1, 2, 3, 4, 5];
+        let mut dst = Vec::new();
+        let limits = crate::streams::DecodeLimits {
+            max_bytes: 4,
+            ..crate::streams::DecodeLimits::default()
+        };
+
+        let err = decompress_with_limits(&bytes, &mut dst, limits).unwrap_err();
+
+        assert!(matches!(err, Error::Limit(_)));
+        assert!(dst.is_empty());
     }
 
     fn randomish_sample() -> Vec<u8> {
