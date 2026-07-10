@@ -99,7 +99,12 @@ impl<F: VoxelFile> RegionFile<F> {
     /// Build an unopened handle with the given default format (used when
     /// creating new files).
     pub fn with_format(format: RegionFormat) -> Self {
-        let block_count = format.region_size.volume_u64() as usize;
+        format
+            .validate_result()
+            .expect("RegionFile::with_format requires a valid region format");
+        let block_count = format
+            .block_count_checked()
+            .expect("validated region format has checked block count");
         Self {
             file: None,
             header: Header {
@@ -190,7 +195,12 @@ impl<F: VoxelFile> RegionFile<F> {
         // Build the header in a buffer, then write it in one go. This matches
         // the C++ approach (sequential store_8/store_16/store_buffer) but is
         // friendlier to the VoxelFile trait's bulk write.
-        let mut buf: Vec<u8> = Vec::with_capacity(self.header.format.header_size_v3());
+        let header_size = self
+            .header
+            .format
+            .header_size_v3_checked()
+            .map_err(|e| RegionError::BadHeader(e.to_string()))?;
+        let mut buf: Vec<u8> = Vec::with_capacity(header_size);
         buf.extend_from_slice(MAGIC);
         buf.push(self.header.version);
         buf.push(self.header.format.block_size_po2);
@@ -215,7 +225,7 @@ impl<F: VoxelFile> RegionFile<F> {
             buf.extend_from_slice(&bi.data.to_le_bytes());
         }
 
-        debug_assert_eq!(buf.len(), self.header.format.header_size_v3());
+        debug_assert_eq!(buf.len(), header_size);
         file.write(&buf).map_err(io)?;
         self.header_dirty = false;
         Ok(())
@@ -257,7 +267,17 @@ impl<F: VoxelFile> RegionFile<F> {
             Vector3i::new(fixed[o] as i32, fixed[o + 1] as i32, fixed[o + 2] as i32);
         o += 3;
         for d in &mut self.header.format.channel_depths {
-            *d = ChannelDepth::from_u8_discard_invalid(fixed[o]);
+            *d = match fixed[o] {
+                0 => ChannelDepth::Bit8,
+                1 => ChannelDepth::Bit16,
+                2 => ChannelDepth::Bit32,
+                3 => ChannelDepth::Bit64,
+                other => {
+                    return Err(RegionError::BadHeader(format!(
+                        "invalid channel depth byte {other:#x}"
+                    )));
+                }
+            };
             o += 1;
         }
         self.header.format.sector_size = u16::from_le_bytes([fixed[o], fixed[o + 1]]) as u32;
@@ -292,8 +312,26 @@ impl<F: VoxelFile> RegionFile<F> {
         }
 
         // LUT.
-        let block_count = self.header.format.region_size.volume_u64() as usize;
-        let lut_bytes = block_count * std::mem::size_of::<RegionBlockInfo>();
+        self.header
+            .format
+            .validate_result()
+            .map_err(|e| RegionError::BadHeader(e.to_string()))?;
+        let block_count = self
+            .header
+            .format
+            .block_count_checked()
+            .map_err(|e| RegionError::BadHeader(e.to_string()))?;
+        let lut_bytes = block_count
+            .checked_mul(std::mem::size_of::<RegionBlockInfo>())
+            .ok_or_else(|| RegionError::BadHeader("region LUT size overflow".into()))?;
+        let expected_header_size = self
+            .header
+            .format
+            .header_size_v3_checked()
+            .map_err(|e| RegionError::BadHeader(e.to_string()))?;
+        if file_len < expected_header_size as u64 {
+            return Err(RegionError::BadHeader("truncated block LUT".into()));
+        }
         let mut lut = vec![0u8; lut_bytes];
         let ln = file.read(&mut lut).map_err(io)?;
         if ln != lut_bytes {
@@ -306,11 +344,53 @@ impl<F: VoxelFile> RegionFile<F> {
             })
             .collect();
         self.header.version = version;
-        self.blocks_begin_offset = self.header.format.header_size_v3() as u64;
+        self.blocks_begin_offset = expected_header_size as u64;
+        self.validate_lut(file_len)?;
 
         // Rebuild the reverse sector map by scanning present blocks in order.
         self.rebuild_sectors();
         self.header_dirty = false;
+
+        Ok(())
+    }
+
+    fn validate_lut(&self, file_len: u64) -> Result<(), RegionError> {
+        let sector_size = self.header.format.sector_size as u64;
+        let data_len = file_len.saturating_sub(self.blocks_begin_offset);
+        let sector_capacity = data_len.div_ceil(sector_size);
+        let mut occupied: Vec<(u32, u32, Vector3i)> = Vec::new();
+
+        for (i, bi) in self.header.blocks.iter().copied().enumerate() {
+            if !bi.is_present() {
+                continue;
+            }
+            if bi.sector_count() == 0 {
+                return Err(RegionError::BadHeader(
+                    "present LUT entry has zero sectors".into(),
+                ));
+            }
+            let start = bi.sector_index();
+            let end = start
+                .checked_add(bi.sector_count())
+                .ok_or_else(|| RegionError::BadHeader("LUT sector interval overflow".into()))?;
+            if end as u64 > sector_capacity {
+                return Err(RegionError::BadHeader(format!(
+                    "LUT sector interval {start}..{end} outside file sector capacity {sector_capacity}"
+                )));
+            }
+            occupied.push((start, end, self.block_position_from_index(i as u32)));
+        }
+
+        occupied.sort_by_key(|(start, _, _)| *start);
+        for pair in occupied.windows(2) {
+            let (_, prev_end, prev_pos) = pair[0];
+            let (next_start, _, next_pos) = pair[1];
+            if next_start < prev_end {
+                return Err(RegionError::BadHeader(format!(
+                    "LUT sectors overlap between {prev_pos:?} and {next_pos:?}"
+                )));
+            }
+        }
 
         Ok(())
     }
@@ -392,13 +472,16 @@ impl<F: VoxelFile> RegionFile<F> {
         // Update the in-memory LUT: this block's count shrinks; later blocks
         // shift their sector_index down by `count`.
         let bi = &mut self.header.blocks[lut_index];
-        bi.set_sector_count(old_count - count);
+        bi.try_set_sector_count(old_count - count)
+            .map_err(|e| RegionError::BadHeader(e.to_string()))?;
         if bi.sector_count() == 0 {
             self.header.blocks[lut_index] = RegionBlockInfo::EMPTY;
         }
         for other in &mut self.header.blocks {
             if other.is_present() && other.sector_index() > old_index {
-                other.set_sector_index(other.sector_index() - count);
+                other
+                    .try_set_sector_index(other.sector_index() - count)
+                    .map_err(|e| RegionError::BadHeader(e.to_string()))?;
             }
         }
         // Erase the removed sectors from the reverse map. They are the last
@@ -538,7 +621,9 @@ impl<F: VoxelFile> RegionFile<F> {
             self.write_payload(block_offset, &payload)?;
 
             let sector_index = ((block_offset - self.blocks_begin_offset) / sector_size) as u32;
-            self.header.blocks[lut_index] = RegionBlockInfo::new(sector_index, new_sector_count);
+            self.header.blocks[lut_index] =
+                RegionBlockInfo::try_new(sector_index, new_sector_count)
+                    .map_err(|e| RegionError::BadHeader(e.to_string()))?;
             for _ in 0..new_sector_count {
                 self.sectors.push(position);
             }
@@ -569,7 +654,8 @@ impl<F: VoxelFile> RegionFile<F> {
                 self.write_payload(block_offset, &payload)?;
                 let sector_index = ((block_offset - self.blocks_begin_offset) / sector_size) as u32;
                 self.header.blocks[lut_index] =
-                    RegionBlockInfo::new(sector_index, new_sector_count);
+                    RegionBlockInfo::try_new(sector_index, new_sector_count)
+                        .map_err(|e| RegionError::BadHeader(e.to_string()))?;
                 for _ in 0..new_sector_count {
                     self.sectors.push(position);
                 }
@@ -610,7 +696,11 @@ impl RegionFile<StdVoxelFile> {
             rf.load_header()?;
         } else if create_if_not_found {
             rf.file = Some(StdVoxelFile::create(path).map_err(io)?);
-            rf.blocks_begin_offset = rf.header.format.header_size_v3() as u64;
+            rf.blocks_begin_offset =
+                rf.header
+                    .format
+                    .header_size_v3_checked()
+                    .map_err(|e| RegionError::BadHeader(e.to_string()))? as u64;
             rf.save_header()?;
         } else {
             return Err(RegionError::Io(format!(
@@ -635,22 +725,6 @@ impl<F: VoxelFile> Drop for RegionFile<F> {
 /// Shorthand for wrapping `io::Error` into [`RegionError::Io`].
 fn io(e: std::io::Error) -> RegionError {
     RegionError::Io(e.to_string())
-}
-
-// A small extension trait so the header reader can decode depth bytes without
-// pulling in the full enum API. Kept private to this module.
-impl ChannelDepth {
-    fn from_u8_discard_invalid(v: u8) -> Self {
-        match v {
-            0 => Self::Bit8,
-            1 => Self::Bit16,
-            2 => Self::Bit32,
-            3 => Self::Bit64,
-            // Unknown depths default to 8-bit (the C++ would error; we degrade
-            // gracefully since the format is otherwise valid).
-            _ => Self::Bit8,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1051,5 +1125,83 @@ mod tests {
         // Valid magic but version 2 (legacy, needs migration).
         rf.file = Some(MemoryFile::with_data(b"VXR_\x02".to_vec()));
         assert_eq!(rf.load_header(), Err(RegionError::UnsupportedVersion(2)));
+    }
+
+    #[test]
+    fn load_header_rejects_zero_region_axis_before_lut_allocation() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MAGIC);
+        bytes.push(FORMAT_VERSION);
+        bytes.push(4);
+        bytes.extend_from_slice(&[0, 16, 16]);
+        bytes.extend_from_slice(&[ChannelDepth::Bit8 as u8; MAX_CHANNELS]);
+        bytes.extend_from_slice(&512u16.to_le_bytes());
+        bytes.push(0x00);
+
+        let mut rf = RegionFile::<MemoryFile>::with_format(small_format());
+        rf.file = Some(MemoryFile::with_data(bytes));
+        let err = rf.load_header().unwrap_err();
+
+        assert!(
+            matches!(err, RegionError::BadHeader(message) if message.contains("invalid region x axis"))
+        );
+    }
+
+    #[test]
+    fn load_header_rejects_invalid_channel_depth() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MAGIC);
+        bytes.push(FORMAT_VERSION);
+        bytes.push(4);
+        bytes.extend_from_slice(&[16, 16, 16]);
+        bytes.extend_from_slice(&[0xff; MAX_CHANNELS]);
+        bytes.extend_from_slice(&512u16.to_le_bytes());
+        bytes.push(0x00);
+
+        let mut rf = RegionFile::<MemoryFile>::with_format(small_format());
+        rf.file = Some(MemoryFile::with_data(bytes));
+        let err = rf.load_header().unwrap_err();
+
+        assert!(
+            matches!(err, RegionError::BadHeader(message) if message.contains("channel depth"))
+        );
+    }
+
+    #[test]
+    fn load_header_rejects_lut_sector_outside_file() {
+        let rf = open_memory(small_format());
+        let mut bytes = rf.file.as_ref().unwrap().data().to_vec();
+        let lut_offset = rf.blocks_begin_offset as usize
+            - rf.header.blocks.len() * std::mem::size_of::<RegionBlockInfo>();
+        bytes[lut_offset..lut_offset + 4]
+            .copy_from_slice(&RegionBlockInfo::new(10, 1).data.to_le_bytes());
+
+        let mut reopened = RegionFile::<MemoryFile>::with_format(small_format());
+        reopened.file = Some(MemoryFile::with_data(bytes));
+        let err = reopened.load_header().unwrap_err();
+
+        assert!(matches!(err, RegionError::BadHeader(message) if message.contains("outside file")));
+    }
+
+    #[test]
+    fn load_header_rejects_overlapping_lut_sectors() {
+        let rf = open_memory(small_format());
+        let mut bytes = rf.file.as_ref().unwrap().data().to_vec();
+        let lut_offset = rf.blocks_begin_offset as usize
+            - rf.header.blocks.len() * std::mem::size_of::<RegionBlockInfo>();
+        let first = RegionBlockInfo::new(0, 1).data.to_le_bytes();
+        let second = RegionBlockInfo::new(0, 1).data.to_le_bytes();
+        bytes[lut_offset..lut_offset + 4].copy_from_slice(&first);
+        bytes[lut_offset + 4..lut_offset + 8].copy_from_slice(&second);
+        bytes.resize(
+            rf.blocks_begin_offset as usize + rf.header.format.sector_size as usize,
+            0,
+        );
+
+        let mut reopened = RegionFile::<MemoryFile>::with_format(small_format());
+        reopened.file = Some(MemoryFile::with_data(bytes));
+        let err = reopened.load_header().unwrap_err();
+
+        assert!(matches!(err, RegionError::BadHeader(message) if message.contains("overlap")));
     }
 }
