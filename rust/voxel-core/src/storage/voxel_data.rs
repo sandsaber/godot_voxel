@@ -61,6 +61,24 @@ pub type SharedVoxelGenerator = Arc<dyn VoxelGenerator>;
 /// lets multiple task instances reach the same stream.
 pub type SharedVoxelStream = Arc<dyn VoxelStream>;
 
+/// Test-only checkpoints for the transactional `SharedVoxelData` edit path.
+///
+/// When `try_edit_voxel` is implemented, it must notify these phases in order:
+/// first after acquiring the spatial write region and before taking a LOD map
+/// lock, then after `map.set_voxel` but before modification flags, and finally
+/// after modification flags while still inside the same map write closure.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SharedVoxelDataEditPhase {
+    SpatialWriteAcquiredBeforeMapLock,
+    VoxelWrittenBeforeDirtyFlags,
+    DirtyFlagsSetBeforeMapWriteUnlock,
+}
+
+#[cfg(test)]
+pub type SharedVoxelDataEditPhaseHook =
+    Arc<dyn Fn(SharedVoxelDataEditPhase) + Send + Sync + 'static>;
+
 #[derive(Debug)]
 struct SharedVoxelDataLod {
     map: StdRwLock<VoxelDataMap>,
@@ -97,6 +115,8 @@ pub struct SharedVoxelData {
     lods: Vec<SharedVoxelDataLod>,
     settings: StdRwLock<SharedVoxelDataSettings>,
     spatial_locks: Vec<SpatialLock3D>,
+    #[cfg(test)]
+    edit_phase_hook: StdRwLock<Option<SharedVoxelDataEditPhaseHook>>,
 }
 
 impl SharedVoxelData {
@@ -126,6 +146,8 @@ impl SharedVoxelData {
                 stream,
             }),
             spatial_locks: (0..MAX_LOD).map(|_| SpatialLock3D::new()).collect(),
+            #[cfg(test)]
+            edit_phase_hook: StdRwLock::new(None),
         }
     }
 
@@ -157,6 +179,31 @@ impl SharedVoxelData {
     fn with_settings<R>(&self, f: impl FnOnce(&SharedVoxelDataSettings) -> R) -> R {
         let settings = self.settings.read().unwrap_or_else(|e| e.into_inner());
         f(&settings)
+    }
+
+    /// Registers a test-only edit lifecycle observer.
+    ///
+    /// This has no production build surface. `try_edit_voxel` deliberately
+    /// does not exist yet; Task 2 must call [`Self::notify_test_edit_phase`]
+    /// at the ordered checkpoints documented on [`SharedVoxelDataEditPhase`].
+    #[cfg(test)]
+    pub fn set_test_edit_phase_hook(&self, hook: SharedVoxelDataEditPhaseHook) {
+        *self
+            .edit_phase_hook
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = Some(hook);
+    }
+
+    #[cfg(test)]
+    fn notify_test_edit_phase(&self, phase: SharedVoxelDataEditPhase) {
+        let hook = self
+            .edit_phase_hook
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(hook) = hook {
+            hook(phase);
+        }
     }
 
     pub fn format(&self) -> VoxelFormat {
@@ -1539,7 +1586,9 @@ fn clone_block(block: &VoxelDataBlock) -> VoxelDataBlock {
 
 #[cfg(test)]
 mod tests {
-    use super::{BlockLocation, SharedVoxelData, SharedVoxelGenerator, VoxelData};
+    use super::{
+        BlockLocation, SharedVoxelData, SharedVoxelDataEditPhase, SharedVoxelGenerator, VoxelData,
+    };
     use crate::generators::base::{GenResult, VoxelGenerator, VoxelQueryData};
     use crate::math::{Box3i, Vector3i};
     use crate::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelDataBlock, VoxelFormat};
@@ -2139,6 +2188,452 @@ mod tests {
         assert_eq!(shared.locked_region_count(0), 1);
         drop(write);
         assert_eq!(shared.locked_region_count(0), 0);
+    }
+
+    #[test]
+    fn shared_edit_voxel_materializes_procedural_block_and_marks_it_dirty() {
+        let mut data = VoxelData::new();
+        data.set_bounds(Box3i::new(Vector3i::zero(), Vector3i::splat(16)));
+        data.set_streaming_enabled(false);
+        data.set_full_load_completed(true);
+        data.set_generator(Some(Arc::new(RecordingGenerator::default())));
+        let shared = SharedVoxelData::new(data);
+        let channel = ChannelId::Type.index();
+
+        assert!(shared.try_edit_voxel(99, Vector3i::new(1, 1, 1), channel));
+
+        let block = shared.block_snapshot(Vector3i::zero(), 0).unwrap();
+        assert_eq!(block.voxels().get_voxel(1, 1, 1, channel), 99);
+        assert_eq!(block.voxels().get_voxel(2, 1, 1, channel), 10);
+        assert!(block.is_modified());
+        assert!(block.is_edited());
+    }
+
+    #[test]
+    fn shared_edit_voxel_does_not_materialize_unavailable_blocks() {
+        let channel = ChannelId::Type.index();
+
+        for &(streaming_enabled, full_load_completed) in &[(true, true), (false, false)] {
+            for empty_block in [false, true] {
+                let mut data = VoxelData::new();
+                data.set_bounds(Box3i::new(Vector3i::zero(), Vector3i::splat(16)));
+                data.set_streaming_enabled(streaming_enabled);
+                data.set_full_load_completed(full_load_completed);
+                let generator = Arc::new(RecordingGenerator::default());
+                data.set_generator(Some(generator.clone()));
+                let shared = SharedVoxelData::new(data);
+
+                if empty_block {
+                    assert!(shared.try_set_block(Vector3i::zero(), VoxelDataBlock::empty(0)));
+                }
+
+                assert!(
+                    !shared.try_edit_voxel(99, Vector3i::new(1, 1, 1), channel),
+                    "streaming={streaming_enabled}, full_load_completed={full_load_completed}, empty_block={empty_block}"
+                );
+                assert!(generator.calls.lock().unwrap().is_empty());
+
+                match shared.block_snapshot(Vector3i::zero(), 0) {
+                    Some(block) if empty_block => assert!(!block.has_voxels()),
+                    None if !empty_block => {}
+                    _ => panic!(
+                        "unavailable block was materialized: streaming={streaming_enabled}, full_load_completed={full_load_completed}, empty_block={empty_block}"
+                    ),
+                }
+            }
+        }
+    }
+
+    struct SpatialLockProbeGenerator {
+        data: std::sync::Weak<SharedVoxelData>,
+    }
+
+    impl VoxelGenerator for SpatialLockProbeGenerator {
+        fn generate_block(&self, input: VoxelQueryData<'_>) -> GenResult {
+            let data = self
+                .data
+                .upgrade()
+                .expect("shared data survives generation");
+            let block_box = Box3i::new(input.origin_in_voxels, input.buffer.size());
+            assert!(
+                data.try_write_region(0, block_box).is_none(),
+                "try_edit_voxel must hold the target spatial write region during generation"
+            );
+            input.buffer.fill(42, ChannelId::Type.index());
+            GenResult::default()
+        }
+    }
+
+    #[test]
+    fn shared_edit_voxel_holds_write_region_during_generator_materialization() {
+        let mut data = VoxelData::new();
+        data.set_bounds(Box3i::new(Vector3i::zero(), Vector3i::splat(16)));
+        data.set_streaming_enabled(false);
+        data.set_full_load_completed(true);
+        let shared = Arc::new(SharedVoxelData::new(data));
+        shared.set_generator(Some(Arc::new(SpatialLockProbeGenerator {
+            data: Arc::downgrade(&shared),
+        })));
+        let channel = ChannelId::Type.index();
+
+        assert!(shared.try_edit_voxel(99, Vector3i::new(1, 1, 1), channel));
+        assert_eq!(
+            shared
+                .block_snapshot(Vector3i::zero(), 0)
+                .unwrap()
+                .voxels()
+                .get_voxel(2, 1, 1, channel),
+            42
+        );
+    }
+
+    #[test]
+    fn shared_edit_voxel_signals_spatial_lock_before_waiting_for_map_lock() {
+        let mut data = VoxelData::new();
+        data.set_bounds(Box3i::new(Vector3i::zero(), Vector3i::splat(16)));
+        data.set_streaming_enabled(false);
+        data.set_full_load_completed(true);
+        let shared = Arc::new(SharedVoxelData::new(data));
+        let spatial_phase = Arc::new((Mutex::new(false), Condvar::new()));
+        shared.set_test_edit_phase_hook(Arc::new({
+            let spatial_phase = spatial_phase.clone();
+            move |phase| {
+                if phase == SharedVoxelDataEditPhase::SpatialWriteAcquiredBeforeMapLock {
+                    let (lock, cvar) = &*spatial_phase;
+                    *lock.lock().unwrap() = true;
+                    cvar.notify_one();
+                }
+            }
+        }));
+
+        let held_map = shared
+            .try_lod_map_write(0)
+            .expect("test must hold the LOD map write lock");
+        let edit_data = shared.clone();
+        let channel = ChannelId::Type.index();
+        let edit = std::thread::spawn(move || {
+            edit_data.try_edit_voxel(99, Vector3i::new(1, 1, 1), channel)
+        });
+
+        let (phase_lock, phase_cvar) = &*spatial_phase;
+        let mut signalled = phase_lock.lock().unwrap();
+        let reached_before_map_unlock = loop {
+            if *signalled {
+                break true;
+            }
+            let (next, timeout) = phase_cvar
+                .wait_timeout(signalled, Duration::from_secs(1))
+                .unwrap();
+            signalled = next;
+            if timeout.timed_out() && !*signalled {
+                break false;
+            }
+        };
+        let spatial_lock_held = reached_before_map_unlock
+            && shared
+                .try_write_region(0, Box3i::new(Vector3i::zero(), Vector3i::splat(16)))
+                .is_none();
+        drop(signalled);
+        drop(held_map);
+
+        assert!(edit.join().unwrap());
+        assert!(
+            reached_before_map_unlock,
+            "try_edit_voxel did not signal the spatial phase before the blocked map lock"
+        );
+        assert!(
+            spatial_lock_held,
+            "the target spatial write region was not held while the spatial phase was signalled"
+        );
+    }
+
+    #[test]
+    fn shared_edit_voxel_keeps_map_write_lock_until_dirty_flags_are_set() {
+        let mut data = VoxelData::new();
+        data.set_bounds(Box3i::new(Vector3i::zero(), Vector3i::splat(16)));
+        data.set_streaming_enabled(false);
+        data.set_full_load_completed(true);
+        let shared = Arc::new(SharedVoxelData::new(data));
+        assert!(shared.try_set_block(
+            Vector3i::zero(),
+            VoxelDataBlock::with_voxels(VoxelBuffer::with_size(Vector3i::splat(16)), 0),
+        ));
+        let before_dirty = Arc::new((Mutex::new(false), Condvar::new()));
+        let release_before_dirty = Arc::new((Mutex::new(false), Condvar::new()));
+        let after_dirty = Arc::new((Mutex::new(false), Condvar::new()));
+        let release_after_dirty = Arc::new((Mutex::new(false), Condvar::new()));
+        shared.set_test_edit_phase_hook(Arc::new({
+            let before_dirty = before_dirty.clone();
+            let release_before_dirty = release_before_dirty.clone();
+            let after_dirty = after_dirty.clone();
+            let release_after_dirty = release_after_dirty.clone();
+            move |phase| match phase {
+                SharedVoxelDataEditPhase::VoxelWrittenBeforeDirtyFlags => {
+                    let (entered_lock, entered_cvar) = &*before_dirty;
+                    *entered_lock.lock().unwrap() = true;
+                    entered_cvar.notify_one();
+
+                    let (release_lock, release_cvar) = &*release_before_dirty;
+                    let mut released = release_lock.lock().unwrap();
+                    while !*released {
+                        let (next, timeout) = release_cvar
+                            .wait_timeout(released, Duration::from_secs(1))
+                            .unwrap();
+                        released = next;
+                        assert!(
+                            !timeout.timed_out(),
+                            "edit phase timed out before dirty flags; map write lock may have escaped its closure"
+                        );
+                    }
+                }
+                SharedVoxelDataEditPhase::DirtyFlagsSetBeforeMapWriteUnlock => {
+                    let (entered_lock, entered_cvar) = &*after_dirty;
+                    *entered_lock.lock().unwrap() = true;
+                    entered_cvar.notify_one();
+
+                    let (release_lock, release_cvar) = &*release_after_dirty;
+                    let mut released = release_lock.lock().unwrap();
+                    while !*released {
+                        let (next, timeout) = release_cvar
+                            .wait_timeout(released, Duration::from_secs(1))
+                            .unwrap();
+                        released = next;
+                        assert!(
+                            !timeout.timed_out(),
+                            "edit phase timed out after dirty flags; map write lock may have escaped its closure"
+                        );
+                    }
+                }
+                SharedVoxelDataEditPhase::SpatialWriteAcquiredBeforeMapLock => {}
+            }
+        }));
+
+        let edit_data = shared.clone();
+        let channel = ChannelId::Type.index();
+        let edit = std::thread::spawn(move || {
+            edit_data.try_edit_voxel(99, Vector3i::new(1, 1, 1), channel)
+        });
+
+        let (entered_lock, entered_cvar) = &*before_dirty;
+        let mut entered = entered_lock.lock().unwrap();
+        let reached_before_dirty = loop {
+            if *entered {
+                break true;
+            }
+            let (next, timeout) = entered_cvar
+                .wait_timeout(entered, Duration::from_secs(1))
+                .unwrap();
+            entered = next;
+            if timeout.timed_out() && !*entered {
+                break false;
+            }
+        };
+        let map_still_write_locked = reached_before_dirty && shared.try_lod_map_read(0).is_none();
+        drop(entered);
+        let (release_lock, release_cvar) = &*release_before_dirty;
+        *release_lock.lock().unwrap() = true;
+        release_cvar.notify_one();
+
+        let (after_dirty_lock, after_dirty_cvar) = &*after_dirty;
+        let mut after_dirty_entered = after_dirty_lock.lock().unwrap();
+        let reached_after_dirty = loop {
+            if *after_dirty_entered {
+                break true;
+            }
+            let (next, timeout) = after_dirty_cvar
+                .wait_timeout(after_dirty_entered, Duration::from_secs(1))
+                .unwrap();
+            after_dirty_entered = next;
+            if timeout.timed_out() && !*after_dirty_entered {
+                break false;
+            }
+        };
+        let map_still_write_locked_after_dirty =
+            reached_after_dirty && shared.try_lod_map_read(0).is_none();
+        drop(after_dirty_entered);
+        let (release_lock, release_cvar) = &*release_after_dirty;
+        *release_lock.lock().unwrap() = true;
+        release_cvar.notify_one();
+
+        assert!(edit.join().unwrap());
+        assert!(
+            reached_before_dirty,
+            "try_edit_voxel did not expose the pre-dirty phase"
+        );
+        assert!(
+            map_still_write_locked,
+            "try_edit_voxel released its map write lock between voxel mutation and dirty flags"
+        );
+        assert!(
+            reached_after_dirty,
+            "try_edit_voxel did not expose the fully dirty phase"
+        );
+        assert!(
+            map_still_write_locked_after_dirty,
+            "try_edit_voxel released its map write lock after dirty flags but before leaving the map write closure"
+        );
+    }
+
+    #[test]
+    fn shared_edit_voxel_is_dirty_before_immediate_unview() {
+        let mut data = VoxelData::new();
+        data.set_bounds(Box3i::new(Vector3i::zero(), Vector3i::splat(16)));
+        data.set_streaming_enabled(false);
+        data.set_full_load_completed(true);
+        let shared = SharedVoxelData::new(data);
+        let channel = ChannelId::Type.index();
+
+        assert!(shared.try_edit_voxel(77, Vector3i::new(1, 1, 1), channel));
+        let mut saves = Vec::new();
+        let area = Box3i::new(Vector3i::zero(), Vector3i::splat(1));
+        let voxel_area = Box3i::new(Vector3i::zero(), Vector3i::splat(16));
+        let _region = shared.write_region(0, voxel_area);
+        shared.unview_area(area, 0, None, None, Some(&mut saves));
+
+        assert_eq!(saves.len(), 1);
+        assert_eq!(saves[0].position, Vector3i::zero());
+        assert_eq!(
+            saves[0]
+                .voxels
+                .as_ref()
+                .unwrap()
+                .get_voxel(1, 1, 1, channel),
+            77
+        );
+    }
+
+    struct BlockingGenerator {
+        entered: Arc<(Mutex<bool>, Condvar)>,
+        release: Arc<(Mutex<bool>, Condvar)>,
+        resident_inserted: Arc<(Mutex<bool>, Condvar)>,
+    }
+
+    impl VoxelGenerator for BlockingGenerator {
+        fn generate_block(&self, input: VoxelQueryData<'_>) -> GenResult {
+            let (entered_lock, entered_cvar) = &*self.entered;
+            *entered_lock.lock().unwrap() = true;
+            entered_cvar.notify_one();
+            let (release_lock, release_cvar) = &*self.release;
+            let mut released = release_lock.lock().unwrap();
+            while !*released {
+                let (next, timeout) = release_cvar
+                    .wait_timeout(released, Duration::from_secs(1))
+                    .unwrap();
+                released = next;
+                assert!(
+                    !timeout.timed_out(),
+                    "blocking generator timed out waiting for release"
+                );
+            }
+            drop(released);
+
+            let (resident_lock, resident_cvar) = &*self.resident_inserted;
+            let mut inserted = resident_lock.lock().unwrap();
+            while !*inserted {
+                let (next, timeout) = resident_cvar
+                    .wait_timeout(inserted, Duration::from_secs(1))
+                    .unwrap();
+                inserted = next;
+                assert!(
+                    !timeout.timed_out(),
+                    "blocking generator timed out waiting for resident insertion; map lock may be held during generation"
+                );
+            }
+            input.buffer.fill(10, ChannelId::Type.index());
+            GenResult::default()
+        }
+    }
+
+    #[test]
+    fn shared_edit_voxel_keeps_resident_block_inserted_during_materialization() {
+        let mut data = VoxelData::new();
+        data.set_bounds(Box3i::new(Vector3i::zero(), Vector3i::splat(16)));
+        data.set_streaming_enabled(false);
+        data.set_full_load_completed(true);
+        let entered = Arc::new((Mutex::new(false), Condvar::new()));
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let resident_inserted = Arc::new((Mutex::new(false), Condvar::new()));
+        data.set_generator(Some(Arc::new(BlockingGenerator {
+            entered: entered.clone(),
+            release: release.clone(),
+            resident_inserted: resident_inserted.clone(),
+        })));
+        let shared = Arc::new(SharedVoxelData::new(data));
+        let channel = ChannelId::Type.index();
+        let edit_data = shared.clone();
+        let edit = std::thread::spawn(move || {
+            edit_data.try_edit_voxel(99, Vector3i::new(1, 1, 1), channel)
+        });
+
+        let (entered_lock, entered_cvar) = &*entered;
+        let mut started = entered_lock.lock().unwrap();
+        while !*started {
+            let (next, timeout) = entered_cvar
+                .wait_timeout(started, Duration::from_secs(1))
+                .unwrap();
+            started = next;
+            assert!(
+                !timeout.timed_out(),
+                "try_edit_voxel never entered procedural materialization"
+            );
+        }
+        drop(started);
+        let (release_lock, release_cvar) = &*release;
+        *release_lock.lock().unwrap() = true;
+        release_cvar.notify_one();
+        let mut resident = VoxelBuffer::with_size(Vector3i::splat(16));
+        resident.set_voxel(33, 2, 1, 1, channel);
+        assert!(shared.try_set_block(Vector3i::zero(), VoxelDataBlock::with_voxels(resident, 0)));
+        let (resident_lock, resident_cvar) = &*resident_inserted;
+        *resident_lock.lock().unwrap() = true;
+        resident_cvar.notify_one();
+        assert!(edit.join().unwrap());
+
+        let block = shared.block_snapshot(Vector3i::zero(), 0).unwrap();
+        assert_eq!(block.voxels().get_voxel(1, 1, 1, channel), 99);
+        assert_eq!(block.voxels().get_voxel(2, 1, 1, channel), 33);
+    }
+
+    struct MapUnlockProbeGenerator {
+        data: std::sync::Weak<SharedVoxelData>,
+    }
+
+    impl VoxelGenerator for MapUnlockProbeGenerator {
+        fn generate_block(&self, input: VoxelQueryData<'_>) -> GenResult {
+            let data = self
+                .data
+                .upgrade()
+                .expect("shared data survives generation");
+            drop(
+                data.try_lod_map_write(0)
+                    .expect("generator must run without map write lock"),
+            );
+            input.buffer.fill(42, ChannelId::Type.index());
+            GenResult::default()
+        }
+    }
+
+    #[test]
+    fn shared_edit_voxel_runs_generator_without_map_lock() {
+        let mut data = VoxelData::new();
+        data.set_bounds(Box3i::new(Vector3i::zero(), Vector3i::splat(16)));
+        data.set_streaming_enabled(false);
+        data.set_full_load_completed(true);
+        let shared = Arc::new(SharedVoxelData::new(data));
+        shared.set_generator(Some(Arc::new(MapUnlockProbeGenerator {
+            data: Arc::downgrade(&shared),
+        })));
+        let channel = ChannelId::Type.index();
+
+        assert!(shared.try_edit_voxel(99, Vector3i::new(1, 1, 1), channel));
+        assert_eq!(
+            shared
+                .block_snapshot(Vector3i::zero(), 0)
+                .unwrap()
+                .voxels()
+                .get_voxel(2, 1, 1, channel),
+            42
+        );
     }
 
     #[test]
