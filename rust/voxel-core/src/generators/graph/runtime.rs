@@ -662,7 +662,7 @@ impl Graph {
                     let s = *smoothness;
                     let r = binop(scratch, a, b, slice_size, move |a, b| {
                         if s > 1e-4 {
-                            crate::math::sdf::sdf_smooth_subtract(b, a, s)
+                            crate::math::sdf::sdf_smooth_subtract(a, b, s)
                         } else {
                             crate::math::sdf::sdf_subtract(a, b)
                         }
@@ -1247,11 +1247,11 @@ impl CompiledGraph {
                         let av = self.val(scratch, a, i);
                         let bv = self.val(scratch, b, i);
                         let s = *smoothness;
-                        if s.abs() < 1e-6 {
-                            return av.max(-bv);
+                        if s > 1e-4 {
+                            crate::math::sdf::sdf_smooth_subtract(av, bv, s)
+                        } else {
+                            crate::math::sdf::sdf_subtract(av, bv)
                         }
-                        let h = (s - (av + bv).abs() * 0.5).clamp(0.0, s);
-                        -bv + h + h * h / s
                     })
                     .collect(),
             ),
@@ -1834,6 +1834,47 @@ mod tests {
         );
         assert!(r.is_single_value());
         assert_eq!(r.min, 7.0);
+    }
+
+    fn smooth_subtract_graph(a: f32, b: f32, smoothness: f32) -> (f32, f32) {
+        let mut graph = Graph::new();
+        let a = graph.push(NodeKind::Constant(a));
+        let b = graph.push(NodeKind::Constant(b));
+        let subtract = graph.push(NodeKind::SdfSmoothSubtract {
+            a: Some(GraphPort::new(a)),
+            b: Some(GraphPort::new(b)),
+            smoothness,
+        });
+        graph.push(NodeKind::OutputSdf {
+            a: Some(GraphPort::new(subtract)),
+        });
+
+        let coordinates = vec![0.0];
+        let inputs = GraphInputs {
+            x: &coordinates,
+            y: 0.0,
+            z: &coordinates,
+        };
+        let (lazy, compiled) = lazy_and_compiled_sdf(&graph, &inputs, 1);
+        (
+            lazy.expect("lazy SDF output")[0],
+            compiled.expect("compiled SDF output")[0],
+        )
+    }
+
+    #[test]
+    fn smooth_subtract_node_matches_cpp_operand_order() {
+        let (lazy, compiled) = smooth_subtract_graph(-0.2, 0.4, 1.0);
+        assert!((lazy - -0.04).abs() < 1e-5);
+        assert!((compiled - -0.04).abs() < 1e-5);
+    }
+
+    #[test]
+    fn smooth_subtract_node_uses_hard_subtract_at_zero_smoothness() {
+        let expected = crate::math::sdf::sdf_subtract(-0.2, 0.4);
+        let (lazy, compiled) = smooth_subtract_graph(-0.2, 0.4, 0.0);
+        assert!((lazy - expected).abs() < 1e-5);
+        assert!((compiled - expected).abs() < 1e-5);
     }
 
     #[test]
