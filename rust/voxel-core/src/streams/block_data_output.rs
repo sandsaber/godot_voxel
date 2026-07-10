@@ -21,6 +21,7 @@ pub struct BlockDataOutput {
     pub max_lod_hint: bool,
     pub initial_load: bool,
     pub had_voxels: bool,
+    pub save_generation: u64,
 }
 
 impl BlockDataOutput {
@@ -39,6 +40,7 @@ impl BlockDataOutput {
             max_lod_hint,
             initial_load: false,
             had_voxels: true,
+            save_generation: 0,
         }
     }
 
@@ -56,6 +58,7 @@ impl BlockDataOutput {
             max_lod_hint: false,
             initial_load: false,
             had_voxels: false,
+            save_generation: 0,
         }
     }
 
@@ -69,6 +72,7 @@ impl BlockDataOutput {
             max_lod_hint: false,
             initial_load: false,
             had_voxels: false,
+            save_generation: 0,
         }
     }
 
@@ -86,6 +90,7 @@ impl BlockDataOutput {
             max_lod_hint: false,
             initial_load: false,
             had_voxels: false,
+            save_generation: 0,
         }
     }
 
@@ -93,20 +98,32 @@ impl BlockDataOutput {
     /// voxels were never set or it was cancelled). Matches the C++ path where
     /// `apply_result` emits `TYPE_SAVED` with `dropped = !_has_run`, so the
     /// caller is informed that the block was not persisted.
-    pub fn saved_dropped(position_in_blocks: Vector3i, lod_index: u8, had_voxels: bool) -> Self {
+    pub fn saved_dropped(
+        position_in_blocks: Vector3i,
+        lod_index: u8,
+        voxels: Option<VoxelBuffer>,
+        had_voxels: bool,
+        save_generation: u64,
+    ) -> Self {
         Self {
             kind: BlockDataOutputKind::Saved,
-            voxels: None,
+            voxels,
             position_in_blocks,
             lod_index,
             dropped: true,
             max_lod_hint: false,
             initial_load: false,
             had_voxels,
+            save_generation,
         }
     }
 
-    pub fn saved(position_in_blocks: Vector3i, lod_index: u8, had_voxels: bool) -> Self {
+    pub fn saved(
+        position_in_blocks: Vector3i,
+        lod_index: u8,
+        had_voxels: bool,
+        save_generation: u64,
+    ) -> Self {
         Self {
             kind: BlockDataOutputKind::Saved,
             voxels: None,
@@ -116,6 +133,7 @@ impl BlockDataOutput {
             max_lod_hint: false,
             initial_load: false,
             had_voxels,
+            save_generation,
         }
     }
 }
@@ -156,7 +174,7 @@ mod tests {
         let position = Vector3i::new(3, 2, 1);
 
         let not_found = BlockDataOutput::not_found(position, 1);
-        let saved = BlockDataOutput::saved(position, 1, false);
+        let saved = BlockDataOutput::saved(position, 1, false, 0);
 
         assert_eq!(not_found.kind, BlockDataOutputKind::NotFound);
         assert!(not_found.voxels.is_none());

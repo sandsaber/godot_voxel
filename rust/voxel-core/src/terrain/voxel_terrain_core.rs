@@ -27,6 +27,7 @@ use crate::meshers::{
 use crate::storage::{BlockToSave, SharedVoxelData, VoxelBuffer, VoxelData, VoxelDataBlock};
 use crate::streams::{
     BlockDataOutput, BlockDataOutputKind, MemoryStream, SaveBlockDataTask, VoxelStream,
+    VoxelStreamError,
 };
 use crate::tasks::{ThreadedTask, ThreadedTaskRunner};
 use std::collections::HashMap;
@@ -101,6 +102,49 @@ pub enum VoxelTerrainEvent {
     MeshBlockExited(Vector3i),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SaveFlushError {
+    Stream(VoxelStreamError),
+    UnsavedBlocks { count: usize },
+}
+
+impl std::fmt::Display for SaveFlushError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Stream(e) => write!(f, "terrain stream flush failed: {e}"),
+            Self::UnsavedBlocks { count } => {
+                write!(f, "{count} terrain block saves remain unsaved")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SaveFlushError {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct SaveKey {
+    position: Vector3i,
+    lod_index: u8,
+}
+
+impl SaveKey {
+    fn new(position: Vector3i, lod_index: u8) -> Self {
+        Self {
+            position,
+            lod_index,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct SaveJournalEntry {
+    generation: u64,
+    queued: bool,
+    in_flight_generation: Option<u64>,
+    voxels: Option<VoxelBuffer>,
+    retry_count: u32,
+}
+
 /// One paired viewer specification, used to add or update viewers.
 #[derive(Debug, Clone, Copy)]
 pub struct ViewerUpdate {
@@ -125,6 +169,8 @@ pub struct VoxelTerrainCore {
     blocks_pending_update: Vec<Vec<Vector3i>>,
     /// Per-LOD loading-block refcounts.
     loading_blocks: Vec<HashMap<Vector3i, u32>>,
+    save_journal: HashMap<SaveKey, SaveJournalEntry>,
+    next_save_generation: u64,
     meshing_dependency: Arc<MeshingDependency>,
     stream: Arc<dyn VoxelStream>,
     task_runner: ThreadedTaskRunner,
@@ -169,6 +215,8 @@ impl VoxelTerrainCore {
             blocks_pending_load: (0..n).map(|_| Vec::new()).collect(),
             blocks_pending_update: (0..n).map(|_| Vec::new()).collect(),
             loading_blocks: (0..n).map(|_| HashMap::new()).collect(),
+            save_journal: HashMap::new(),
+            next_save_generation: 1,
             meshing_dependency,
             stream,
             task_runner,
@@ -239,6 +287,36 @@ impl VoxelTerrainCore {
         self.drain_completed_tasks();
 
         std::mem::take(&mut self.events)
+    }
+
+    pub fn shutdown_and_flush(&mut self) -> Result<(), SaveFlushError> {
+        const MAX_SHUTDOWN_SAVE_ATTEMPTS: usize = 8;
+
+        for _ in 0..MAX_SHUTDOWN_SAVE_ATTEMPTS {
+            let keys: Vec<SaveKey> = self.save_journal.keys().copied().collect();
+            for key in keys {
+                self.dispatch_queued_save(key);
+            }
+
+            self.task_runner.wait_for_all_tasks();
+            self.drain_completed_tasks();
+
+            if self.save_journal.is_empty() {
+                let flush_result = self.stream.flush().map_err(SaveFlushError::Stream);
+                self.task_runner.shutdown();
+                return flush_result;
+            }
+        }
+
+        self.task_runner.wait_for_all_tasks();
+        self.drain_completed_tasks();
+        let count = self.save_journal.len();
+        self.task_runner.shutdown();
+        if count == 0 {
+            self.stream.flush().map_err(SaveFlushError::Stream)
+        } else {
+            Err(SaveFlushError::UnsavedBlocks { count })
+        }
     }
 
     fn process_viewers(&mut self, viewers: &[ViewerUpdate]) {
@@ -488,15 +566,48 @@ impl VoxelTerrainCore {
     }
 
     fn enqueue_data_save(&mut self, save: BlockToSave) {
-        let task = SaveBlockDataTask::new_voxels(
-            save.position,
-            save.lod_index,
-            save.voxels,
+        let key = SaveKey::new(save.position, save.lod_index);
+        let generation = self.next_save_generation;
+        self.next_save_generation = self.next_save_generation.wrapping_add(1).max(1);
+        let entry = self
+            .save_journal
+            .entry(key)
+            .or_insert_with(|| SaveJournalEntry {
+                generation,
+                queued: false,
+                in_flight_generation: None,
+                voxels: None,
+                retry_count: 0,
+            });
+        entry.generation = generation;
+        entry.voxels = save.voxels;
+        entry.queued = true;
+        entry.retry_count = 0;
+        self.dispatch_queued_save(key);
+    }
+
+    fn dispatch_queued_save(&mut self, key: SaveKey) {
+        let Some(entry) = self.save_journal.get_mut(&key) else {
+            return;
+        };
+        if !entry.queued || entry.in_flight_generation.is_some() {
+            return;
+        }
+        let Some(voxels) = entry.voxels.take() else {
+            return;
+        };
+        entry.queued = false;
+        entry.in_flight_generation = Some(entry.generation);
+        let task = SaveBlockDataTask::new_voxels_with_generation(
+            key.position,
+            key.lod_index,
+            Some(voxels),
             StreamingDependency::new(self.stream.clone()),
             None,
             false,
+            entry.generation,
         );
-        self.task_runner.enqueue(Box::new(task), false);
+        self.task_runner.enqueue(Box::new(task), true);
     }
 
     fn view_mesh_block(&mut self, bpos: Vector3i, lod: usize) {
@@ -602,7 +713,7 @@ impl VoxelTerrainCore {
             if let Some(output) = try_take_load_output(task.as_mut()) {
                 self.apply_data_block_response(output);
             } else if let Some(output) = try_take_save_output(task.as_mut()) {
-                self.apply_data_block_response(output);
+                self.apply_save_response(output);
             } else if let Some(output) = try_take_mesh_output(task) {
                 self.apply_mesh_update(output);
             }
@@ -684,6 +795,40 @@ impl VoxelTerrainCore {
                 self.loading_blocks[lod].remove(&bpos);
             }
             BlockDataOutputKind::Saved => {}
+        }
+    }
+
+    fn apply_save_response(&mut self, output: BlockDataOutput) {
+        let key = SaveKey::new(output.position_in_blocks, output.lod_index);
+        let mut should_dispatch = false;
+        let mut should_remove = false;
+
+        if let Some(entry) = self.save_journal.get_mut(&key) {
+            if entry.in_flight_generation != Some(output.save_generation) {
+                return;
+            }
+            entry.in_flight_generation = None;
+
+            if output.save_generation != entry.generation {
+                should_dispatch = entry.queued;
+            } else if output.dropped {
+                if entry.voxels.is_none() {
+                    entry.voxels = output.voxels;
+                }
+                entry.queued = entry.voxels.is_some();
+                entry.retry_count = entry.retry_count.saturating_add(1);
+                should_dispatch = entry.queued;
+            } else if entry.queued {
+                should_dispatch = true;
+            } else {
+                should_remove = true;
+            }
+        }
+
+        if should_remove {
+            self.save_journal.remove(&key);
+        } else if should_dispatch {
+            self.dispatch_queued_save(key);
         }
     }
 
@@ -1009,6 +1154,7 @@ mod tests {
     use crate::storage::{ChannelId, VoxelData};
     use crate::streams::LoadResult;
     use crate::tasks::{TaskPriority, TaskRunOutcome, ThreadedTask, ThreadedTaskContext};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -1091,6 +1237,58 @@ mod tests {
         ) -> crate::streams::StreamResult<LoadResult> {
             thread::sleep(self.delay);
             Ok(LoadResult::NotFound)
+        }
+    }
+
+    struct FailThenMemoryStream {
+        fails_remaining: AtomicUsize,
+        inner: MemoryStream,
+    }
+
+    impl FailThenMemoryStream {
+        fn new(fails: usize) -> Self {
+            Self {
+                fails_remaining: AtomicUsize::new(fails),
+                inner: MemoryStream::new(),
+            }
+        }
+
+        fn load_block(&self, position: Vector3i, lod: u8, out: &mut VoxelBuffer) -> LoadResult {
+            self.inner.load_block(position, lod, out)
+        }
+    }
+
+    impl VoxelStream for FailThenMemoryStream {
+        fn save_voxel_block(
+            &self,
+            query: crate::streams::VoxelSaveQuery<'_>,
+        ) -> crate::streams::StreamResult<()> {
+            if self
+                .fails_remaining
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| v.checked_sub(1))
+                .is_ok()
+            {
+                return Err(crate::streams::VoxelStreamError::Io(
+                    "injected save failure".into(),
+                ));
+            }
+            self.inner
+                .save_voxel_block(crate::streams::VoxelSaveQuery::new(
+                    query.voxel_buffer,
+                    query.position_in_blocks,
+                    query.lod_index,
+                ))
+        }
+
+        fn load_voxel_block(
+            &self,
+            query: crate::streams::VoxelLoadQuery<'_>,
+        ) -> crate::streams::StreamResult<LoadResult> {
+            self.inner.load_voxel_block(query)
+        }
+
+        fn flush(&self) -> crate::streams::StreamResult<()> {
+            self.inner.flush()
         }
     }
 
@@ -1324,6 +1522,143 @@ mod tests {
             LoadResult::Found
         );
         assert_eq!(loaded.get_voxel(1, 1, 1, channel), 77);
+    }
+
+    #[test]
+    fn failed_unload_save_keeps_payload_and_retries() {
+        let stream = Arc::new(FailThenMemoryStream::new(1));
+        let mut core = build_core_with_stream(stream.clone());
+        let bs = core.data_block_size();
+        let channel = ChannelId::Type.index();
+        let edited_voxel = Vector3i::new(1, 1, 1);
+
+        let viewer = vec![ViewerUpdate {
+            id: 1,
+            world_position_voxels: Vector3i::zero(),
+            horizontal_view_distance_voxels: bs,
+            vertical_view_distance_voxels: bs,
+            requires_meshes: true,
+        }];
+        process_until(&mut core, &viewer, |core, _events| {
+            core.data().block_snapshot(Vector3i::zero(), 0).is_some()
+        });
+
+        assert!(core.data().try_set_voxel(88, edited_voxel, channel));
+        core.data()
+            .mark_area_modified(Box3i::new(edited_voxel, Vector3i::splat(1)), false);
+
+        let empty_viewers = Vec::new();
+        process_until(&mut core, &empty_viewers, |_core, _events| {
+            let mut loaded = VoxelBuffer::new(crate::storage::Allocator::Default);
+            stream.load_block(Vector3i::zero(), 0, &mut loaded) == LoadResult::Found
+                && loaded.get_voxel(1, 1, 1, channel) == 88
+        });
+    }
+
+    #[test]
+    fn stale_save_completion_not_matching_in_flight_generation_is_ignored() {
+        let mut core = build_core();
+        let key = SaveKey::new(Vector3i::zero(), 0);
+        core.save_journal.insert(
+            key,
+            SaveJournalEntry {
+                generation: 2,
+                queued: false,
+                in_flight_generation: Some(2),
+                voxels: None,
+                retry_count: 0,
+            },
+        );
+
+        core.apply_save_response(BlockDataOutput::saved(Vector3i::zero(), 0, true, 1));
+
+        let entry = core.save_journal.get(&key).expect("newer save must remain");
+        assert_eq!(entry.generation, 2);
+        assert_eq!(entry.in_flight_generation, Some(2));
+        assert!(!entry.queued);
+    }
+
+    #[test]
+    fn older_in_flight_completion_dispatches_queued_newer_save() {
+        let mut core = build_core();
+        let key = SaveKey::new(Vector3i::zero(), 0);
+        core.save_journal.insert(
+            key,
+            SaveJournalEntry {
+                generation: 2,
+                queued: true,
+                in_flight_generation: Some(1),
+                voxels: Some(VoxelBuffer::with_size(Vector3i::splat(2))),
+                retry_count: 0,
+            },
+        );
+
+        core.apply_save_response(BlockDataOutput::saved(Vector3i::zero(), 0, true, 1));
+
+        let entry = core
+            .save_journal
+            .get(&key)
+            .expect("newer save should now be in flight");
+        assert_eq!(entry.generation, 2);
+        assert!(!entry.queued);
+        assert_eq!(entry.in_flight_generation, Some(2));
+        assert!(entry.voxels.is_none());
+    }
+
+    #[test]
+    fn shutdown_and_flush_waits_for_pending_save() {
+        let stream = Arc::new(MemoryStream::new());
+        let mut core = build_core_with_stream(stream.clone());
+        let bs = core.data_block_size();
+        let channel = ChannelId::Type.index();
+        let edited_voxel = Vector3i::new(1, 1, 1);
+
+        let viewer = vec![ViewerUpdate {
+            id: 1,
+            world_position_voxels: Vector3i::zero(),
+            horizontal_view_distance_voxels: bs,
+            vertical_view_distance_voxels: bs,
+            requires_meshes: true,
+        }];
+        process_until(&mut core, &viewer, |core, _events| {
+            core.data().block_snapshot(Vector3i::zero(), 0).is_some()
+        });
+        assert!(core.data().try_set_voxel(99, edited_voxel, channel));
+        core.data()
+            .mark_area_modified(Box3i::new(edited_voxel, Vector3i::splat(1)), false);
+        core.process(&[]);
+
+        core.shutdown_and_flush().unwrap();
+
+        let mut loaded = VoxelBuffer::new(crate::storage::Allocator::Default);
+        assert_eq!(
+            stream.load_block(Vector3i::zero(), 0, &mut loaded),
+            LoadResult::Found
+        );
+        assert_eq!(loaded.get_voxel(1, 1, 1, channel), 99);
+    }
+
+    #[test]
+    fn shutdown_and_flush_reports_unsaved_blocks_after_repeated_failures() {
+        let stream = Arc::new(FailThenMemoryStream::new(usize::MAX));
+        let mut core = build_core_with_stream(stream);
+        let key = SaveKey::new(Vector3i::zero(), 0);
+        core.save_journal.insert(
+            key,
+            SaveJournalEntry {
+                generation: 1,
+                queued: true,
+                in_flight_generation: None,
+                voxels: Some(VoxelBuffer::with_size(Vector3i::splat(2))),
+                retry_count: 0,
+            },
+        );
+        core.dispatch_queued_save(key);
+
+        assert!(matches!(
+            core.shutdown_and_flush(),
+            Err(SaveFlushError::UnsavedBlocks { count: 1 })
+        ));
     }
 
     #[test]
