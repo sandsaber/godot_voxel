@@ -417,6 +417,67 @@ impl SharedVoxelData {
         }
     }
 
+    pub fn try_edit_voxel(&self, value: u64, pos: Vector3i, channel_index: usize) -> bool {
+        let settings = self.settings_snapshot();
+        if !settings.bounds_in_voxels.contains_point(pos) {
+            return false;
+        }
+
+        let block_size = self.block_size() as i32;
+        let block_pos = VoxelDataMap::voxel_to_block_b(pos, self.block_size_po2());
+        let block_box = Box3i::new(block_pos * block_size, Vector3i::splat(block_size));
+        let _write_region = self.write_region(0, block_box);
+        #[cfg(test)]
+        self.notify_test_edit_phase(SharedVoxelDataEditPhase::SpatialWriteAcquiredBeforeMapLock);
+
+        let needs_materialization = self.with_lod_map(0, |map| {
+            map.get_block(block_pos)
+                .is_none_or(|block| !block.has_voxels())
+        });
+        if needs_materialization && (settings.streaming_enabled || !settings.full_load_completed) {
+            return false;
+        }
+
+        let mut prepared = needs_materialization.then(|| {
+            let mut voxels = create_block_buffer(block_size, settings.format);
+            if let Some(generator) = settings.generator {
+                generator.generate_block(VoxelQueryData {
+                    buffer: &mut voxels,
+                    origin_in_voxels: block_pos * block_size,
+                    lod: 0,
+                });
+            }
+            voxels
+        });
+
+        self.with_lod_map_mut(0, |map| {
+            let has_resident_voxels = map
+                .get_block(block_pos)
+                .is_some_and(|block| block.has_voxels());
+            if !has_resident_voxels {
+                map.set_block_buffer(
+                    block_pos,
+                    prepared.take().expect("materialization was prepared"),
+                    true,
+                );
+            }
+
+            map.set_voxel(value, pos, channel_index);
+            #[cfg(test)]
+            self.notify_test_edit_phase(SharedVoxelDataEditPhase::VoxelWrittenBeforeDirtyFlags);
+            let block = map
+                .get_block_mut(block_pos)
+                .expect("edited block exists after materialization");
+            block.set_modified(true);
+            block.set_edited(true);
+            #[cfg(test)]
+            self.notify_test_edit_phase(
+                SharedVoxelDataEditPhase::DirtyFlagsSetBeforeMapWriteUnlock,
+            );
+        });
+        true
+    }
+
     pub fn try_set_voxel(&self, value: u64, pos: Vector3i, channel_index: usize) -> bool {
         let settings = self.settings_snapshot();
         if !settings.bounds_in_voxels.contains_point(pos) {
