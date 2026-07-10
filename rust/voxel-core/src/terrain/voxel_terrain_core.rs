@@ -240,6 +240,12 @@ impl VoxelTerrainCore {
         self.data.clone()
     }
 
+    /// Atomically edit one terrain voxel, materializing and marking its data
+    /// block for persistence when the underlying data permits it.
+    pub fn try_edit_voxel(&self, value: u64, pos: Vector3i, channel_index: usize) -> bool {
+        self.data.try_edit_voxel(value, pos, channel_index)
+    }
+
     /// Returns the data block size (in voxels) used by the underlying
     /// `VoxelData`. The current port assumes mesh block size == data block
     /// size (factor 1).
@@ -1151,7 +1157,7 @@ mod tests {
     use crate::generators::base::{GenResult, VoxelGenerator, VoxelQueryData};
     use crate::generators::simple::Flat;
     use crate::meshers::{MesherOutput, Surface, SurfaceArrays, VoxelMesher};
-    use crate::storage::{ChannelId, VoxelData};
+    use crate::storage::{ChannelId, VoxelData, VoxelDataBlock};
     use crate::streams::LoadResult;
     use crate::tasks::{TaskPriority, TaskRunOutcome, ThreadedTask, ThreadedTaskContext};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1299,6 +1305,22 @@ mod tests {
     fn build_core_with_stream(stream: Arc<dyn VoxelStream>) -> VoxelTerrainCore {
         let mut data = VoxelData::new();
         data.set_bounds(Box3i::new(Vector3i::splat(-1024), Vector3i::splat(2048)));
+        let flat = Flat {
+            channel: ChannelId::Sdf,
+            ..Flat::default()
+        };
+        let generator: Arc<dyn crate::generators::base::VoxelGenerator> = Arc::new(flat);
+        data.set_generator(Some(generator));
+        let mesher: Arc<dyn VoxelMesher> = Arc::new(AlwaysOneTriangleMesher);
+        let meshing_dependency = MeshingDependency::new(mesher, None);
+        VoxelTerrainCore::new(data, stream, meshing_dependency)
+    }
+
+    fn build_core_with_materializable_data(stream: Arc<dyn VoxelStream>) -> VoxelTerrainCore {
+        let mut data = VoxelData::new();
+        data.set_bounds(Box3i::new(Vector3i::splat(-1024), Vector3i::splat(2048)));
+        data.set_streaming_enabled(false);
+        data.set_full_load_completed(true);
         let flat = Flat {
             channel: ChannelId::Sdf,
             ..Flat::default()
@@ -1485,12 +1507,16 @@ mod tests {
     }
 
     #[test]
-    fn unloading_modified_data_block_saves_it_to_stream() {
+    fn terrain_try_edit_voxel_materializes_marks_and_persists_on_unload() {
         let stream = Arc::new(MemoryStream::new());
-        let mut core = build_core_with_stream(stream.clone());
+        let mut core = build_core_with_materializable_data(stream.clone());
         let bs = core.data_block_size();
         let channel = ChannelId::Type.index();
         let edited_voxel = Vector3i::new(1, 1, 1);
+
+        assert!(core
+            .data()
+            .try_set_block(Vector3i::zero(), VoxelDataBlock::empty(0)));
 
         let viewer = vec![ViewerUpdate {
             id: 1,
@@ -1499,15 +1525,16 @@ mod tests {
             vertical_view_distance_voxels: bs,
             requires_meshes: true,
         }];
-        process_until(&mut core, &viewer, |core, _events| {
-            core.data().block_snapshot(Vector3i::zero(), 0).is_some()
-        });
+        core.process(&viewer);
 
-        {
-            let data = core.data();
-            assert!(data.try_set_voxel(77, edited_voxel, channel));
-            data.mark_area_modified(Box3i::new(edited_voxel, Vector3i::splat(1)), false);
-        }
+        assert!(core.try_edit_voxel(77, edited_voxel, channel));
+        let block = core
+            .data()
+            .block_snapshot(Vector3i::zero(), 0)
+            .expect("terrain edit should materialize the viewed block");
+        assert!(block.has_voxels());
+        assert!(block.is_modified());
+        assert!(block.is_edited());
 
         let empty_viewers = Vec::new();
         process_until(&mut core, &empty_viewers, |_core, _events| {
@@ -1543,9 +1570,7 @@ mod tests {
             core.data().block_snapshot(Vector3i::zero(), 0).is_some()
         });
 
-        assert!(core.data().try_set_voxel(88, edited_voxel, channel));
-        core.data()
-            .mark_area_modified(Box3i::new(edited_voxel, Vector3i::splat(1)), false);
+        assert!(core.try_edit_voxel(88, edited_voxel, channel));
 
         let empty_viewers = Vec::new();
         process_until(&mut core, &empty_viewers, |_core, _events| {
@@ -1623,9 +1648,7 @@ mod tests {
         process_until(&mut core, &viewer, |core, _events| {
             core.data().block_snapshot(Vector3i::zero(), 0).is_some()
         });
-        assert!(core.data().try_set_voxel(99, edited_voxel, channel));
-        core.data()
-            .mark_area_modified(Box3i::new(edited_voxel, Vector3i::splat(1)), false);
+        assert!(core.try_edit_voxel(99, edited_voxel, channel));
         core.process(&[]);
 
         core.shutdown_and_flush().unwrap();
