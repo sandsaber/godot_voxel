@@ -109,6 +109,7 @@ fn threaded_edit_load_mesh_stress_keeps_data_and_region_locks_consistent() {
                 meshing_dependency: meshing_dependency.clone(),
                 collision_hint: false,
                 lod_hint: false,
+                mesh_arrays_pool: None,
             })) as Box<dyn ThreadedTask>
         });
         runner.enqueue_many(tasks, false);

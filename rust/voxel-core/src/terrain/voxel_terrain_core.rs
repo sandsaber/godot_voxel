@@ -21,7 +21,9 @@
 
 use crate::engine::{MeshingDependency, StreamingDependency};
 use crate::math::{Box3i, Vector3i};
-use crate::meshers::{BlockMeshOutput, MeshBlockTask, MeshBlockTaskParams, MesherOutput};
+use crate::meshers::{
+    BlockMeshOutput, MeshArraysPool, MeshBlockTask, MeshBlockTaskParams, MesherOutput,
+};
 use crate::storage::{BlockToSave, SharedVoxelData, VoxelBuffer, VoxelData, VoxelDataBlock};
 use crate::streams::{
     BlockDataOutput, BlockDataOutputKind, MemoryStream, SaveBlockDataTask, VoxelStream,
@@ -116,6 +118,10 @@ pub struct VoxelTerrainCore {
     meshing_dependency: Arc<MeshingDependency>,
     stream: Arc<dyn VoxelStream>,
     task_runner: ThreadedTaskRunner,
+    /// Free-list pool of reusable `MeshArrays` buffers (audit §9.6-B3). Mesh
+    /// tasks acquire a cleared buffer from here instead of allocating fresh;
+    /// re-meshed/unloaded blocks return their previous arrays here.
+    mesh_arrays_pool: Arc<MeshArraysPool>,
     /// Maximum horizontal/vertical view distance the terrain will honour.
     /// Anything larger requested by a viewer is clamped.
     pub max_view_distance_voxels: i32,
@@ -149,6 +155,7 @@ impl VoxelTerrainCore {
             meshing_dependency,
             stream,
             task_runner,
+            mesh_arrays_pool: Arc::new(MeshArraysPool::new()),
             max_view_distance_voxels: 192,
             automatic_loading_enabled: true,
             stats: VoxelTerrainStats::default(),
@@ -405,7 +412,13 @@ impl VoxelTerrainCore {
         }
         if entry.mesh_viewers == 0 {
             let was_loaded = entry.is_loaded;
-            self.mesh_map.remove(&bpos);
+            let pool = self.mesh_arrays_pool.clone();
+            // Return this block's arrays to the pool before dropping the entry.
+            if let Some(removed) = self.mesh_map.remove(&bpos) {
+                if let Some(prev) = removed.output {
+                    release_mesh_arrays_owned(&pool, prev);
+                }
+            }
             self.blocks_pending_update.retain(|p| *p != bpos);
             if was_loaded {
                 self.events.push(VoxelTerrainEvent::MeshBlockExited(bpos));
@@ -502,6 +515,7 @@ impl VoxelTerrainCore {
         let positions = std::mem::take(&mut self.blocks_pending_update);
         let data = self.data.clone();
         let meshing_dependency = self.meshing_dependency.clone();
+        let mesh_arrays_pool = self.mesh_arrays_pool.clone();
         let mut tasks: Vec<Box<dyn ThreadedTask>> = Vec::with_capacity(positions.len());
         for bpos in positions {
             // Reset the in-list flag now that the task is being dispatched
@@ -516,6 +530,7 @@ impl VoxelTerrainCore {
                 meshing_dependency: meshing_dependency.clone(),
                 collision_hint: false,
                 lod_hint: false,
+                mesh_arrays_pool: Some(mesh_arrays_pool.clone()),
             });
             tasks.push(Box::new(task));
         }
@@ -571,16 +586,27 @@ impl VoxelTerrainCore {
     /// Apply a mesh result (the C++ `apply_mesh_update`).
     pub fn apply_mesh_update(&mut self, output: BlockMeshOutput) {
         let bpos = output.position_in_blocks;
+        // Take the pool handle up front so we can release into it while a mesh
+        // map entry is mutably borrowed (the entry borrows `self.mesh_map`).
+        let pool = self.mesh_arrays_pool.clone();
         if output.dropped {
             self.stats.meshes_dropped += 1;
             return;
         }
         let Some(entry) = self.mesh_map.get_mut(&bpos) else {
-            // Block was unloaded between dispatch and completion.
+            // Block was unloaded between dispatch and completion. The new
+            // output's buffers are no longer needed — return them to the pool.
+            release_mesh_arrays_owned(&pool, output.surfaces);
             self.stats.meshes_dropped += 1;
             return;
         };
         let became_loaded = !entry.is_loaded && !output.surfaces.is_empty();
+        // Return the previous block's arrays to the pool before overwriting.
+        if let Some(prev) = entry.output.as_mut() {
+            if let Some(arrays) = prev.take_first_transvoxel_arrays() {
+                pool.release(arrays);
+            }
+        }
         entry.output = Some(output.surfaces);
         entry.is_loaded = true;
         self.stats.meshes_built += 1;
@@ -590,8 +616,16 @@ impl VoxelTerrainCore {
     }
 }
 
-/// Box-diff helper: returns the sub-boxes of `self` not covered by `other`.
-/// Used to compute "what went out of range" between two frames.
+/// Free helper: return any transvoxel `MeshArrays` from an owned `MesherOutput`
+/// to the pool. Used at unload/dropped paths where the output is consumed
+/// wholesale (audit §9.6-B3). Lives outside the `impl` so it can be called with
+/// a cloned pool `Arc` while a mesh-map entry is mutably borrowed.
+fn release_mesh_arrays_owned(pool: &MeshArraysPool, mut output: MesherOutput) {
+    if let Some(arrays) = output.take_first_transvoxel_arrays() {
+        pool.release(arrays);
+    }
+}
+
 trait BoxDiff {
     fn difference(self, other: Box3i) -> Vec<Box3i>;
 }

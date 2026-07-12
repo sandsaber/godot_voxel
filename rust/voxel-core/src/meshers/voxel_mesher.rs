@@ -38,6 +38,12 @@ pub struct MesherInput<'a> {
     /// If `true`, the mesh will be used in a variable-LOD context (e.g.
     /// transition meshes may or may not be generated).
     pub lod_hint: bool,
+    /// Optional free-list pool of [`MeshArrays`] buffers (audit §9.6-B3). A
+    /// mesher that supports reuse (e.g. [`TransvoxelMesher`](crate::meshers::TransvoxelMesher))
+    /// acquires a cleared buffer from here instead of allocating fresh, and
+    /// the terrain core returns the previous block's arrays when re-meshing
+    /// or unloading. `None` falls back to per-build allocation.
+    pub mesh_arrays_pool: Option<&'a MeshArraysPool>,
 }
 
 impl<'a> std::fmt::Debug for MesherInput<'a> {
@@ -52,6 +58,10 @@ impl<'a> std::fmt::Debug for MesherInput<'a> {
             .field("lod_index", &self.lod_index)
             .field("collision_hint", &self.collision_hint)
             .field("lod_hint", &self.lod_hint)
+            .field(
+                "mesh_arrays_pool",
+                &self.mesh_arrays_pool.map(|_| "<MeshArraysPool>"),
+            )
             .finish()
     }
 }
@@ -66,6 +76,7 @@ impl<'a> MesherInput<'a> {
             lod_index,
             collision_hint: false,
             lod_hint: false,
+            mesh_arrays_pool: None,
         }
     }
 }
@@ -205,6 +216,79 @@ impl MesherOutput {
         self.collision_surface.indices.clear();
         self.collision_surface.submesh_vertex_end = -1;
         self.collision_surface.submesh_index_end = -1;
+    }
+
+    /// Extract the first transvoxel [`MeshArrays`] from the surfaces, replacing
+    /// it with an empty default. Used by the terrain core to return a mesher's
+    /// output buffers to the [`MeshArraysPool`] once the block is re-meshed or
+    /// unloaded. Non-transvoxel surfaces and extra surfaces are left untouched
+    /// (only the first transvoxel slot is pooled, matching the single-surface
+    /// contract every builtin mesher emits today).
+    pub fn take_first_transvoxel_arrays(&mut self) -> Option<MeshArrays> {
+        let surface = self
+            .surfaces
+            .iter_mut()
+            .find(|s| matches!(s.arrays, SurfaceArrays::Transvoxel(_)))?;
+        let arrays = if let SurfaceArrays::Transvoxel(a) =
+            std::mem::replace(&mut surface.arrays, SurfaceArrays::Empty)
+        {
+            a
+        } else {
+            return None;
+        };
+        Some(arrays)
+    }
+}
+
+/// Free-list pool of reusable [`MeshArrays`] buffers (audit §9.6-B3).
+///
+/// Mesher outputs move out of the task into the terrain core's mesh map, so a
+/// mesher-level `thread_local` cannot keep the buffers. Instead the pool lives
+/// at the terrain level: [`TransvoxelMesher::build`](crate::meshers::TransvoxelMesher)
+/// acquires a `MeshArrays` from the pool (clearing it before refilling), and
+/// the terrain core returns the previous block's arrays when it re-meshes or
+/// unloads a block. Capacity stabilises after the first few dozen blocks.
+///
+/// Thread-safe via a `Mutex<Vec<_>>`; contention is bounded because each task
+/// only holds the lock for the `pop`/`push` of a single buffer.
+#[derive(Debug, Default)]
+pub struct MeshArraysPool {
+    free: std::sync::Mutex<Vec<MeshArrays>>,
+}
+
+impl MeshArraysPool {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Take a reusable `MeshArrays` from the free-list, or allocate a fresh one
+    /// if the pool is empty. The returned buffer is **cleared** (length zero,
+    /// capacity preserved) so the caller can `build_regular_mesh` straight into
+    /// it without double-filling.
+    pub fn acquire(&self) -> MeshArrays {
+        let mut arrays = self
+            .free
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pop()
+            .unwrap_or_default();
+        arrays.clear();
+        arrays
+    }
+
+    /// Return a `MeshArrays` to the free-list for reuse. The buffer is cleared
+    /// first so it does not hold stale geometry while idle.
+    pub fn release(&self, mut arrays: MeshArrays) {
+        arrays.clear();
+        self.free
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(arrays);
+    }
+
+    /// Number of idle buffers currently held. Diagnostic only.
+    pub fn idle_count(&self) -> usize {
+        self.free.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 }
 

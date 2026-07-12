@@ -148,6 +148,7 @@ fn sphere_pipeline(radius: f32, mesh_block_pos: Vector3i) -> BlockMeshOutput {
         meshing_dependency,
         collision_hint: false,
         lod_hint: false,
+        mesh_arrays_pool: None,
     });
     task.run_meshing();
     task.take_output().expect("task should produce output")
@@ -203,6 +204,7 @@ fn pipeline_dropped_output_when_dependency_invalidated() {
         meshing_dependency: meshing_dependency.clone(),
         collision_hint: false,
         lod_hint: false,
+        mesh_arrays_pool: None,
     });
     meshing_dependency.invalidate();
     task.run_meshing();

@@ -184,7 +184,14 @@ impl VoxelMesher for TransvoxelMesher {
             lod_index: u32::from(input.lod_index),
             edge_clamp_margin: 0.0,
         };
-        let mut arrays = MeshArrays::default();
+        // B3 (audit §9.6-B3): reuse a pooled `MeshArrays` when the terrain core
+        // supplies a free-list. The pool returns a cleared buffer, and
+        // `build_regular_mesh` appends into it, so reuse is safe. When no pool
+        // is attached, fall back to a fresh allocation.
+        let mut arrays = match input.mesh_arrays_pool {
+            Some(pool) => pool.acquire(),
+            None => MeshArrays::default(),
+        };
         TRANSVOXEL_CACHE.with(|cache| {
             build_regular_mesh(
                 &transvoxel_input,

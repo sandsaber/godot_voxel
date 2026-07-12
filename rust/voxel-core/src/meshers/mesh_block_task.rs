@@ -19,7 +19,7 @@
 use crate::engine::MeshingDependency;
 use crate::generators::base::{VoxelGenerator, VoxelQueryData};
 use crate::math::{Box3i, Vector3i};
-use crate::meshers::{MesherInput, MesherOutput, VoxelMesher};
+use crate::meshers::{MeshArraysPool, MesherInput, MesherOutput, VoxelMesher};
 use crate::storage::{SharedVoxelData, VoxelBuffer, VoxelData};
 use crate::tasks::{TaskPriority, TaskRunOutcome, ThreadedTask, ThreadedTaskContext};
 use std::sync::Arc;
@@ -52,6 +52,10 @@ pub struct MeshBlockTaskParams {
     pub collision_hint: bool,
     /// Hint that the mesh will be used in a variable-LOD context.
     pub lod_hint: bool,
+    /// Optional free-list pool for reusable `MeshArrays` buffers (audit §9.6-B3).
+    /// When set, meshers acquire a cleared buffer instead of allocating fresh;
+    /// the terrain core returns the previous block's arrays on re-mesh/unload.
+    pub mesh_arrays_pool: Option<Arc<MeshArraysPool>>,
 }
 
 /// Threaded task: gathers voxels and runs a [`VoxelMesher`] against them.
@@ -66,6 +70,7 @@ pub struct MeshBlockTask {
     meshing_dependency: Arc<MeshingDependency>,
     collision_hint: bool,
     lod_hint: bool,
+    mesh_arrays_pool: Option<Arc<MeshArraysPool>>,
     has_run: bool,
     output: Option<BlockMeshOutput>,
 }
@@ -79,6 +84,7 @@ impl MeshBlockTask {
             meshing_dependency: params.meshing_dependency,
             collision_hint: params.collision_hint,
             lod_hint: params.lod_hint,
+            mesh_arrays_pool: params.mesh_arrays_pool,
             has_run: false,
             output: None,
         }
@@ -166,6 +172,7 @@ impl MeshBlockTask {
             lod_index: self.lod_index,
             collision_hint: self.collision_hint,
             lod_hint: self.lod_hint,
+            mesh_arrays_pool: self.mesh_arrays_pool.as_deref(),
         };
         mesher.build(&mut surfaces, &input);
 
@@ -684,6 +691,7 @@ mod tests {
             meshing_dependency: meshing_dep,
             collision_hint: false,
             lod_hint: false,
+            mesh_arrays_pool: None,
         });
 
         task.run_meshing();
@@ -715,6 +723,7 @@ mod tests {
             meshing_dependency: meshing_dep,
             collision_hint: false,
             lod_hint: false,
+            mesh_arrays_pool: None,
         });
 
         task.run_meshing();
@@ -742,6 +751,7 @@ mod tests {
             meshing_dependency: meshing_dep,
             collision_hint: false,
             lod_hint: false,
+            mesh_arrays_pool: None,
         });
 
         task.run_meshing();
@@ -772,6 +782,7 @@ mod tests {
                 meshing_dependency: meshing_dep.clone(),
                 collision_hint: false,
                 lod_hint: false,
+                mesh_arrays_pool: None,
             })
         };
         let mut first = make_task(Vector3i::zero());
@@ -810,6 +821,7 @@ mod tests {
             meshing_dependency: meshing_dep.clone(),
             collision_hint: false,
             lod_hint: false,
+            mesh_arrays_pool: None,
         });
 
         // Invalidate the dependency before running; the task must not call
@@ -838,6 +850,7 @@ mod tests {
             meshing_dependency: meshing_dep,
             collision_hint: true,
             lod_hint: true,
+            mesh_arrays_pool: None,
         });
 
         use crate::tasks::{ThreadedTask, ThreadedTaskContext};
@@ -875,6 +888,7 @@ mod tests {
             ),
             collision_hint: true,
             lod_hint: true,
+            mesh_arrays_pool: None,
         });
         fresh.run_meshing();
         let output = fresh.take_output().unwrap();
