@@ -17,7 +17,11 @@ use crate::meshers::transvoxel::{
     MIN_PADDING,
 };
 use crate::meshers::{MesherInput, MesherOutput, Surface, SurfaceArrays, VoxelMesher};
-use crate::storage::{ChannelId, VoxelBuffer};
+use crate::storage::funcs;
+use crate::storage::voxel_buffer::{
+    QUANTIZED_SDF_16_BITS_SCALE_INV, QUANTIZED_SDF_8_BITS_SCALE_INV,
+};
+use crate::storage::{ChannelData, ChannelDepth, ChannelId, VoxelBuffer};
 #[cfg(test)]
 use std::cell::Cell;
 use std::cell::RefCell;
@@ -31,23 +35,86 @@ thread_local! {
     static TRANSVOXEL_SAMPLE_COUNT: Cell<usize> = const { Cell::new(0) };
 }
 
-/// `RegularMesherInput` adapter over a [`VoxelBuffer`]'s SDF channel.
+/// Resolved, depth-dispatched SDF sampler over a materialised [`ChannelData`].
 ///
-/// C++ `build_regular_mesh` reads raw engine SDF values for its fast early-out,
-/// then uses `sdf_as_float` for case selection, interpolation and normals. This
-/// adapter exposes the converted `sdf_as_float` value; the Rust mesher mirrors
-/// the raw early-out by inverting that converted sign internally.
+/// The variant + depth-specific decode are resolved **once** in
+/// [`TransvoxelMesher::build`] before the core loop, so
+/// [`RegularMesherInput::sample_f32`] collapses to a single typed slice index
+/// (`slice[data_index]`) plus one decode — no per-voxel `match` on depth, no
+/// `(x,y,z)` div/mod reconstruction, and no second pass through
+/// `raw_voxel_to_real`. This is the B1 fix (audit §9.6-B1): the C++ mesher
+/// settles data types up-front to rid the hot loop of abstraction layers.
+///
+/// The channel must be `Compression::None` (callers guard with `is_uniform`),
+/// so the typed slice is guaranteed non-empty.
+enum TypedSdfSampler<'a> {
+    Bit8(&'a [u8]),
+    Bit16(&'a [u16]),
+    Bit32(&'a [u32]),
+    Bit64(&'a [u64]),
+}
+
+impl<'a> TypedSdfSampler<'a> {
+    /// Resolve the SDF channel of `buffer` into a typed sampler. The channel
+    /// must already be decompressed (`Compression::None`); a uniform channel
+    /// yields an empty slice and is the caller's responsibility to short-circuit.
+    fn new(buffer: &'a VoxelBuffer, sdf_channel: usize, depth: ChannelDepth) -> Self {
+        // `channel_data` returns the live typed storage; for Compression::None
+        // it is the fully-materialised ZXY array the core indexes directly.
+        let data = buffer.channel_data(sdf_channel);
+        match (depth, data) {
+            (ChannelDepth::Bit8, ChannelData::U8(v)) => Self::Bit8(v.as_slice()),
+            (ChannelDepth::Bit16, ChannelData::U16(v)) => Self::Bit16(v.as_slice()),
+            (ChannelDepth::Bit32, ChannelData::U32(v)) => Self::Bit32(v.as_slice()),
+            (ChannelDepth::Bit64, ChannelData::U64(v)) => Self::Bit64(v.as_slice()),
+            // Variant/depth mismatch should never happen for a materialised
+            // channel — fall back to an empty slice so the core sees no samples.
+            _ => Self::Bit8(&[]),
+        }
+    }
+
+    /// Decode one SDF sample to `sdf_as_float` semantics (negated, matching
+    /// C++ `sdf_as_float(float)`): 8/16-bit expand from snorm × SDF scale,
+    /// 32-bit store float bits directly, 64-bit f64→f32.
+    #[inline]
+    fn sample(&self, data_index: usize) -> f32 {
+        match self {
+            // snorm decode matches `raw_voxel_to_real` for Bit8/Bit16.
+            Self::Bit8(v) => {
+                -(funcs::s8_to_snorm(v[data_index] as i8) * QUANTIZED_SDF_8_BITS_SCALE_INV)
+            }
+            Self::Bit16(v) => {
+                -(funcs::s16_to_snorm(v[data_index] as i16) * QUANTIZED_SDF_16_BITS_SCALE_INV)
+            }
+            Self::Bit32(v) => -f32::from_bits(v[data_index]),
+            Self::Bit64(v) => -(f64::from_bits(v[data_index]) as f32),
+        }
+    }
+
+    #[inline]
+    fn len(&self) -> usize {
+        match self {
+            Self::Bit8(v) => v.len(),
+            Self::Bit16(v) => v.len(),
+            Self::Bit32(v) => v.len(),
+            Self::Bit64(v) => v.len(),
+        }
+    }
+}
+
+/// `RegularMesherInput` adapter carrying a resolved [`TypedSdfSampler`] plus the
+/// padded block size. `sample_f32` indexes the typed slice directly by the flat
+/// ZXY `data_index` the core already computed.
 struct VoxelBufferTransvoxelInput<'a> {
-    buffer: &'a VoxelBuffer,
-    sdf_channel: usize,
+    sampler: TypedSdfSampler<'a>,
     size: Vector3i,
 }
 
 impl<'a> VoxelBufferTransvoxelInput<'a> {
     fn new(buffer: &'a VoxelBuffer, sdf_channel: usize) -> Self {
+        let depth = buffer.channel_depth(sdf_channel);
         Self {
-            buffer,
-            sdf_channel,
+            sampler: TypedSdfSampler::new(buffer, sdf_channel, depth),
             size: buffer.size(),
         }
     }
@@ -55,7 +122,7 @@ impl<'a> VoxelBufferTransvoxelInput<'a> {
 
 impl<'a> RegularMesherInput for VoxelBufferTransvoxelInput<'a> {
     fn len(&self) -> usize {
-        (self.size.x as usize) * (self.size.y as usize) * (self.size.z as usize)
+        self.sampler.len()
     }
 
     fn block_size(&self) -> Vector3i {
@@ -66,18 +133,9 @@ impl<'a> RegularMesherInput for VoxelBufferTransvoxelInput<'a> {
         #[cfg(test)]
         TRANSVOXEL_SAMPLE_COUNT.with(|samples| samples.set(samples.get() + 1));
 
-        // ZXY layout: index = y + sy*(x + sx*z). Y innermost. Matches the
-        // C++ VoxelBuffer memory layout documented in transvoxel/regular.rs.
-        let sx = self.size.x as usize;
-        let sy = self.size.y as usize;
-        let z = data_index / (sx * sy);
-        let rem = data_index % (sx * sy);
-        let x = rem / sy;
-        let y = rem % sy;
-        // Match C++ `sdf_as_float(float)`.
-        -self
-            .buffer
-            .get_voxel_f(x as i32, y as i32, z as i32, self.sdf_channel)
+        // No div/mod back to (x,y,z): the core passes the flat ZXY index the
+        // slice already uses. Depth dispatch happened once in `TypedSdfSampler::new`.
+        self.sampler.sample(data_index)
     }
 }
 

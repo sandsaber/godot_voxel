@@ -779,6 +779,18 @@ impl VoxelBuffer {
         self.channels[channel_index].data.as_bytes()
     }
 
+    /// Typed voxel data of a channel (read-only). For a `Compression::Uniform`
+    /// channel the returned [`ChannelData`] is empty — callers should use
+    /// [`channel_default`](Self::channel_default) in that case. For a
+    /// guaranteed-materialized view, call [`decompress_channel`](Self::decompress_channel) first.
+    ///
+    /// This is the depth-dispatch entry point for hot loops that want to index
+    /// a typed slice directly (one `match` on the variant, then `slice[i]`)
+    /// instead of paying per-voxel depth dispatch through `get_voxel`.
+    pub fn channel_data(&self, channel_index: usize) -> &ChannelData {
+        &self.channels[channel_index].data
+    }
+
     /// The uniform default value of a channel.
     pub fn channel_default(&self, channel_index: usize) -> u64 {
         self.channels[channel_index].defval
