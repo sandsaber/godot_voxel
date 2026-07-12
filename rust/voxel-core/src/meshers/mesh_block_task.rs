@@ -455,10 +455,20 @@ fn generate_missing_voxel_regions(
     gather_plan: &GatherVoxelPlan,
     lod_index: u8,
 ) {
+    if gather_plan.missing_regions.is_empty() {
+        return;
+    }
+    // B3 (audit §9.6-B4): allocate one reusable block-sized scratch buffer
+    // outside the 3×3×3 loop instead of up to 27 fresh `VoxelBuffer`s per gather.
+    // `create` resets every channel to its uniform default; the generator then
+    // writes into it and we copy the requested channels into the padded `dst`.
+    let block_size_vec = Vector3i::splat(gather_plan.data_block_size);
+    let mut scratch = VoxelBuffer::with_size(block_size_vec);
+    gather_plan.format.configure_buffer(&mut scratch);
     for region in &gather_plan.missing_regions {
-        // The generator expects a standalone block-sized buffer. Copy the
-        // requested channels back into the padded mesh buffer afterwards.
-        let mut scratch = VoxelBuffer::with_size(Vector3i::splat(gather_plan.data_block_size));
+        // Reset to a clean buffer so leftover data from the previous neighbour
+        // does not leak into channels the generator leaves at their default.
+        scratch.create(block_size_vec);
         gather_plan.format.configure_buffer(&mut scratch);
         generator.generate_block(VoxelQueryData {
             buffer: &mut scratch,
