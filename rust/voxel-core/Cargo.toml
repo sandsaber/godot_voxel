@@ -15,6 +15,13 @@ path = "src/lib.rs"
 # Used by `streams::compressed_data` for the LZ4/LZ4_BE block formats.
 lz4_flex = "0.11"
 
+# Zero-unsafe byte casts for typed channel storage (`ChannelData`). Pure Rust,
+# Android/WASM-safe — used by `ChannelData::as_bytes` for wire-format parity
+# (the block serializer treats channel payloads as opaque LE bytes, and
+# `bytemuck::cast_slice` over a `Vec<u{16,32,64}>` reproduces the exact LE byte
+# layout the previous `Vec<u8>` storage held).
+bytemuck = "1"
+
 # Pure-Rust port of FastNoiseLite (no C, no FFI) — used by
 # `generators::simple::Noise` for 3D SDF terrain. Same rationale as lz4_flex:
 # keeps Android/WASM cross-compilation clean, bit-compatible with Godot's

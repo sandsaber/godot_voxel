@@ -29,14 +29,19 @@ and Android aarch64 GDExtension smoke when triggered by hand.
 
 | Milestone | Суть | Статус |
 |---|---|---|
-| **M1** | Долг по ревью кода (§9 + §7): TSan, D7, волна 3 (B1/B3/B4/B5/C1/C3), H2-MT бенч, cargo-fuzz, CI, риски §7 | 🟡 в работе: **M1.A (TSan) ✅ закрыт 2026-07-12**; далее M1.B (D7) |
+| **M1** | Долг по ревью кода (§9 + §7): TSan, D7, волна 3 (B1/B3/B4/B5/C1/C3), H2-MT бенч, cargo-fuzz, CI, риски §7 | 🟡 в работе: **M1.A (TSan) ✅** + **M1.B (D7) ✅ закрыт 2026-07-12**; далее M1.C (волна 3: B1/B3/B4/B5) |
 | **M2** | Фаза 4 до GO: multi-LOD paging (`VoxelLodTerrain`), остаток `VoxelEngine`, `VoxelDataGrid`, сквозной TSan | ⏳ |
 | **M3** | Фаза 5: Godot binding 75+ классов + editor/edition/modifiers/instancing/terrain-root | ⏳ |
 | **M4** | Паритет и удаление C++ из `master`; форк — чистый Rust-проект | ⏳ |
 
-**Текущий фокус:** M1.A (TSan) закрыт — формальный GO-критерий Фазы 4 по конкурентности выполнен
-(см. §9.7). Следующий шаг — M1.B: структурное решение D7 (типизированное хранилище каналов),
-которое разблокирует волну 3 (B1/B5).
+**Текущий фокус:** M1.A (TSan) и M1.B (D7 типизированное хранилище каналов) закрыты (см. §9.7).
+Следующий шаг — M1.C: волна 3 перф-фиксов горячего пути (B1 типизированный SDF-вход, B3 reuse
+MeshArrays, B4 gather-scratch из цикла, B5 Cubes/Blocky zero-copy). D7 уже разблокировал B1/B5.
+
+**D7 (M1.B):** `Channel.data` теперь `enum ChannelData { U8/U16/U32/U64(Vec<_>) }` — hot loops
+depth-dispatch один раз на канал и индексируют типизированный slice напрямую. Wire-format
+`block_serializer` неизменен (`bytemuck` safe byte-cast). Pool recycling для typed storage отложен
+(test-only). Новая runtime-dep: `bytemuck = "1"`.
 
 **TSan-прогон** (M1.A): `cargo +nightly test -p tsan -Zbuild-std --target x86_64-unknown-linux-gnu`
 с `RUSTFLAGS="-Zsanitizer=thread -Cunsafe-allow-abi-mismatch=sanitizer"` — 5 тестов, стабильно 0
