@@ -1,0 +1,18 @@
+[package]
+name = "tsan"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "ThreadSanitizer target crate for voxel-core concurrency invariants"
+publish = false
+
+# This crate exists to isolate ThreadSanitizer runs from voxel-core's dev-deps.
+# `voxel-core` pulls in `criterion` (for benches), which transitively depends on
+# `zerocopy` + `zerocopy-derive` (proc-macro). Proc-macro crates cannot be
+# instrumented by `-Zsanitizer=thread` and produce `can't find crate` /
+# `undefined symbol: __tsan_func_entry` errors when the test binary is linked
+# against the TSan runtime. By keeping this crate's dependency graph to just
+# `voxel-core`, `cargo +nightly test -p tsan` stays sanitizer-clean.
+[dependencies]
+voxel-core = { path = "../voxel-core" }

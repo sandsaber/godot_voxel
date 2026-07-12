@@ -596,12 +596,15 @@ clippy/fmt чистые; каждый шаг сверяется с соотве�
 | 2026-07-07 | Wave 2 stress: threaded edit/load/mesh validation | ✅ закрыто для macOS cargo stress. Added `threaded_edit_load_mesh_stress`: six runner workers mesh shared `SharedVoxelData` while two scoped mutator threads perform region-locked edits and load-style block inserts; asserts all mesh outputs complete, edit/load counters match, and region locks are released. | `cargo test -p voxel-core --test threaded_edit_load_mesh_stress` → 1 passed |
 | 2026-07-07 | Infra: Rust workspace workflow | 🟡 заготовлено, но auto-run выключен. Added `.github/workflows/rust.yml` with pinned-toolchain install, Cargo cache, fmt, workspace tests, clippy, and workspace build; after a failed GitHub runner probe, push/PR triggers were removed and only `workflow_dispatch` remains. | локально: `cargo fmt --all -- --check`; `cargo test --workspace`; `cargo clippy --workspace --all-targets`; `cargo build --workspace` |
 | 2026-07-07 | Infra: Android aarch64 workflow smoke | 🟡 заготовлено в ручном workflow. `rust.yml` installs NDK 29.0.14206865, exports `ANDROID_NDK_HOME`, and runs `./scripts/android-build.sh` after the main Rust job. `android-build.sh` now also discovers NDKs from `ANDROID_HOME`, `ANDROID_SDK_ROOT`, and macOS `~/Library/Android/sdk/ndk`. | локально: `./scripts/android-build.sh` → aarch64 `.so` + `gdext_rust_init` |
+| 2026-07-12 | **M1.A: TSan-прогон на Linux/nightly (формальный GO-критерий Фазы 4 по конкурентности)** | ✅ закрыто. Создан отдельный workspace-член `tsan` (зависит только от `voxel-core`, без `criterion`/`serde`/`zerocopy` — proc-macro `zerocopy_derive` конфликтует с TSan-runtime через `__tsan_func_entry`). Тесты: `concurrent_edit_load_mesh` (зеркало `threaded_edit_load_mesh_stress`), `spatial_lock_concurrency` (2 теста: 8 потоков × overlapping/disjoint read/write regions + blocking-write wakeup), `task_runner_concurrency` (2 теста: 4 producer × конкурентный enqueue + postponed-requeue path). Прогон под `cargo +nightly test -p tsan -Zbuild-std --target x86_64-unknown-linux-gnu` с `RUSTFLAGS="-Zsanitizer=thread -Cunsafe-allow-abi-mismatch=sanitizer"`, 3× стабильно — ни одного `WARNING: ThreadSanitizer`. Важный нюанс: **`-Zbuild-std` обязателен** — без него std не инструментирован и TSan не видит happens-before через `std::sync::Mutex`/`Condvar`, выдавая массовые false positives (первоначально детектилась «гонка» в `SpatialLock3D::lock_write`, исчезнувшая после пересборки std). Data race не найдена; конкурентная модель §9.1 валидирована формально. | `cargo +nightly test -p tsan -Zbuild-std --target x86_64-unknown-linux-gnu` → 5 passed, 0 TSan warnings; `cargo test -p voxel-core` → 655 unit + 11 integration + 1 doc-test; `cargo clippy --workspace --all-targets` clean; `cargo fmt --all -- --check` clean |
 
 Пункт #1 по снятию generator/mesher/data сериализации закрыт для текущего worker bridge.
 ABBA-риск с внешним generator/mesher lock снят; правило “не держать data lock через
 generator/mesher/stream” закреплено A4 для текущих load/gather путей. Переиспользование
-`MeshArrays`/`MesherOutput` остаётся отдельной perf-частью B3. До формального GO Фазы 4
-ещё нужен TSan-прогон на Linux/nightly.
+`MeshArrays`/`MesherOutput` остаётся отдельной perf-частью B3. **TSan-прогон на
+Linux/nightly закрыт 2026-07-12 (M1.A):** формальный GO-критерий Фазы 4 по
+конкурентности выполнен — data race не найдена на edit/load/mesh stress, `SpatialLock3D`
+под нагрузкой и `ThreadedTaskRunner` enqueue/postpone путях.
 
 ## 10. Вывод
 
@@ -662,9 +665,13 @@ Multi-LOD paging начинать после волны 2 — уже на исп
 #### M1 — Долг по ревью кода (§9 + §7)
 
 M1.A — Закрыть хвост волны 2 (конкурентность, §9.1):
-1. **TSan-прогон** на Linux/nightly (`-Zsanitizer=thread`) для `threaded_edit_load_mesh_stress`
-   и `SpatialLock3D`; опционально `loom`-модель для `SpatialLock3D`. Зелёный TSan = формальный
-   GO-критерий Фазы 4 по конкурентности. Фиксация: запись в §9.7 + статус Фазы 2/4 в `STATUS.md`.
+1. ✅ **TSan-прогон на Linux/nightly — ЗАКРЫТ 2026-07-12.** Создан workspace-член `tsan`
+   (5 тестов: edit/load/mesh stress + `SpatialLock3D` concurrency + `ThreadedTaskRunner`
+   enqueue/postpone). Прогон `cargo +nightly test -p tsan -Zbuild-std --target x86_64-unknown-linux-gnu`
+   с `-Zsanitizer=thread` — стабильно 0 data race. Ключевой нюанс: обязателен `-Zbuild-std`,
+   иначе std не инструментирован и TSan выдаёт false positives на `std::sync`. См. §9.7.
+   `loom`-модель для `SpatialLock3D` оставлена опциональной — TSan + macOS stress достаточно
+   для формального GO-критерия Фазы 4 по конкурентности.
 
 M1.B — Структурное решение D7 (блокирует волну 3):
 2. **D7: типизированное хранилище каналов** `enum ChannelData { U8/U16/U32/U64(Vec<_>) }`
