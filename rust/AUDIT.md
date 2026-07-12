@@ -625,3 +625,116 @@ byte-parity тесты), но **два системных долга** треб�
 с перемером H2 end-to-end. Параллельно: настроить upstream-tracking (`cpp-reference`) и
 вернуться к автоматическому Rust CI/bench smoke/x86_64-android smoke, когда GitHub flow будет готов.
 Multi-LOD paging начинать после волны 2 — уже на исправленной threading-модели.
+
+---
+
+## 11. Цель: полностью закрыть аудит (постановка 2026-07-12)
+
+> Постановка от заказчика: «сначала закрыть §9 (долг по ревью кода), затем пройти весь путь
+> до конца миграции (вариант охвата 4); коммитить и пушить по шагам, обновлять статус».
+> Эта секция фиксирует, **что значит «аудит закрыт»**, в виде измеримой цели и дорожной карты.
+> Сам аудит при этом НЕ переписывается ретроактивно — исходные находки §9 остаются как есть,
+> закрытые пункты отмечаются в журнале §9.7, а прогресс по дорожной карте — здесь и в `STATUS.md`.
+
+### 11.1 Definition of Done — «Аудит полностью закрыт»
+
+Все четыре milestone'а ниже выполнены, каждый подтверждён прогонами (тесты/clippy/fmt/бенчи)
+и зафиксирован коммитом + записью в §9.7 или соответствующей фазовой секции `STATUS.md`.
+
+| M | Название | Критерий закрытия |
+|---|---|---|
+| **M1** | Долг по ревью кода (§9 + §7) | Все открытые пункты §9.5/§9.6 закрыты: TSan-прогон зелёный; волна 3 (B1/B3/B4/B5/C1/C3) выполнена; решение D7 принято и внедрено; H2-MT бенч существует и показывает ≥0% vs C++ −15%; cargo-fuzz таргеты есть; риски §7 сняты (upstream-tracking `cpp-reference` настроен, `REPORT.md` актуализирован, on-device валидация либо закрыта, либо явно задепрекейджена с обоснованием) |
+| **M2** | Фаза 4 до GO | Multi-LOD paging (`VoxelLodTerrain` + update task + clipbox/octree) портирован и проходит parity/стресс; `VoxelEngine` остаток (time-spread/progressive очереди, stats) готов; формальный GO-критерий Фазы 4 выполнен (включая TSan) |
+| **M3** | Фаза 5 — Godot binding + editor | `voxel-gdext` покрывает binding 75+ классов; `editor/`, `edition/`, `modifiers/`, `terrain/instancing`, `terrain/ root` портированы; плагин загружается в Godot 4.7 и проходит smoke-сцену |
+| **M4** | Паритет и удаление C++ | Полный parity против `cpp-reference`; C++ модуль удалён из `master`; форк становится чистым Rust-проектом (правило §1 MIGRATION_PLAN) |
+
+«Закрыть аудит» = **M1 + M2 + M3 + M4**. M1 — приоритет, начинается немедленно; M2–M4 идут
+последовательно после M1. Опционально-отложенные подсистемы (GPU/`detail_rendering`/`shaders`,
+`sqlite`, `multipass`, `FastNoise2`, physics/Rapier) выносятся за скобки DoD и трекаются отдельно.
+
+### 11.2 Дорожная карта (порядок исполнения)
+
+Работа ведётся в ветке `rust/pilot` (как сейчас), каждый пункт — отдельный коммит + push.
+После каждого milestone — обновление `rust/STATUS.md` и журнала `§9.7`. Инвариант на всём
+пути: 655+ unit + 11 integration + golden-parity зелёные; clippy/fmt чистые; каждый шаг
+сверяется с C++-файлом (ссылки в §9.1–9.3).
+
+#### M1 — Долг по ревью кода (§9 + §7)
+
+M1.A — Закрыть хвост волны 2 (конкурентность, §9.1):
+1. **TSan-прогон** на Linux/nightly (`-Zsanitizer=thread`) для `threaded_edit_load_mesh_stress`
+   и `SpatialLock3D`; опционально `loom`-модель для `SpatialLock3D`. Зелёный TSan = формальный
+   GO-критерий Фазы 4 по конкурентности. Фиксация: запись в §9.7 + статус Фазы 2/4 в `STATUS.md`.
+
+M1.B — Структурное решение D7 (блокирует волну 3):
+2. **D7: типизированное хранилище каналов** `enum ChannelData { U8/U16/U32/U64(Vec<_>) }`
+   в `voxel_buffer.rs` + адаптация сериализатора. Снимает alignment-вопрос B1/B5, делает
+   depth-dispatch естественным. Решение зафиксировать комментарием-ссылкой между §9.6-D7 и кодом.
+
+M1.C — Волна 3, перф-фиксы горячего пути (§9.2/§9.6-B, по порядку зависимостей):
+3. **B1: типизированный SDF-вход** (`enum SdfInput`, generic `build_regular_mesh<S: SdfSampler>`,
+   depth-dispatch один раз до цикла). После D7 — тривиально; golden-тесты ловят регресс парити.
+4. **B3: переиспользование мешевых массивов** (thread-local/per-worker scratch `MeshArrays` +
+   free-list пул для уходящих по move `Surface`). Делается вместе с scratch-инфраструктурой.
+5. **B4: gather-scratch из цикла** `gather_voxels_cpu` (вынести `VoxelBuffer` из цикла 3×3×3,
+   `Allocator::Pool` — наконец задействовать `VoxelMemoryPool`).
+6. **B5: Cubes/Blocky zero-copy** через тот же `channel_slice`/typed-канал из D7/B1.
+
+M1.D — Волна 3, graph runtime (§9.3/§9.6-C):
+7. **C1: compile-шаг** `CompiledGraph` (топо-кэш + dense-индексы вместо HashMap, XZ-outer-group
+   кэш, hoist сэмплеров, constant folding). До ~16× на террейн-графах; без смены публичного API.
+8. **C3: range analysis** поверх C1 (`analyze_range` на портированном `math::interval`); SDF-блок
+   вне нуля заполняется uniform без per-voxel исполнения.
+
+M1.E — Инфра-долг (§9.6 «Инфраструктура», §7):
+9. **H2-MT benchmark harness**: throughput на уровне `MeshBlockTask::run` + многопоточный
+   paging (движущийся viewer); сравнение с расширенным `cpp-baseline`. DoD: ≥ C++ −15%, target ≥0%.
+10. **cargo-fuzz** таргеты на `.vox`, `block_serializer`, `region` (D2-класс багов).
+11. **CI**: вернуть авто-триггеры `rust.yml` (push/PR) + bench-smoke + x86_64-android emulator
+    smoke, когда GitHub flow готов.
+12. **§7 риски**: настроить upstream-tracking (`cpp-reference` remote/branch + регулярный
+    merge); актуализировать `REPORT.md` под текущие числа (или явно пометить как «снапшот Фазы 0»);
+    по on-device Фазы 2 — закрыть (эмулятор/устройство) либо задепрекейджить с обоснованием.
+
+**DoD M1:** все 12 пунктов закрыты, TSan зелёный, H2-MT показывает ≥0% vs C++ −15%, clippy/fmt/тесты чистые.
+
+#### M2 — Фаза 4 до GO
+
+13. **Multi-LOD paging**: `VoxelLodTerrain` + `VoxelLodTerrainUpdateData` + threaded update task
+    + clipbox/octree strategy (~9.9k LOC C++, главный блокер Фазы 4). Сверка с
+    `terrain/variable_lod/*`. Transition cells для transvoxel (LOD-переходы) — часть этого шага.
+14. **`VoxelEngine` остаток**: time-spread/progressive очереди, GPU queue (опц.), file locker,
+    stats/profiling, volume callbacks.
+15. **`VoxelDataGrid`**, сквозной TSan на multi-LOD сцене.
+**DoD M2:** GO-критерий Фазы 4 формально выполнен; multi-LOD parity/стресс зелёные.
+
+#### M3 — Фаза 5 (Godot binding + editor)
+
+16. **Binding** 75+ классов в `voxel-gdext` (сейчас 82 LOC hello-world); `Node3D`-обёртки для
+    `VoxelTerrainCore`/`VoxelLodTerrain`; `RenderingServer` mesh upload.
+17. **editor/** (12.8k), **edition/** (7.8k), **modifiers/** (1.5k), **terrain/instancing** (9.2k),
+    **terrain/ root** (2.0k) — портирование подсистем.
+**DoD M3:** плагин загружается в Godot 4.7, проходит smoke-сцена (viewer → paging → mesh → render).
+
+#### M4 — Паритет и удаление C++
+
+18. Полный parity против `cpp-reference` (расширенный набор golden/diff-тестов по всем подсистемам).
+19. Удаление C++ модуля из `master`; форк — чистый Rust-проект; `cpp-reference` остаётся только
+    как зеркало upstream для отслеживания будущих bugfix'ов.
+**DoD M4:** `master` собирается и проходит все тесты без C++; `cpp-reference` обновляется из Zylann/master.
+
+### 11.3 Что НЕ входит в DoD (опционально/отложено)
+
+- GPU-путь: `engine/gpu`, `engine/detail_rendering` (normal maps), `shaders/` (~7.1k LOC).
+- `streams/sqlite` (2.2k), `generators/multipass` (2.3k), `util/noise` FastNoise2/SpotNoise (~3.1k).
+- Physics (Rapier, §9 плана — не начат).
+Эти подсистемы трекаются отдельно; их отсутствие не блокирует ни один milestone.
+
+### 11.4 Процесс (по требованию заказчика)
+
+- Ветка: `rust/pilot` (как сейчас); milestone может выделять долгоживущую ветку `rust/m{1,2,3}` по необходимости.
+- Каждый пункт дорожной карты → отдельный коммит + `git push`; сообщение коммита по образцу
+  существующих (`rust(phase4): add ...`, `fix(meshers): ...`).
+- После каждого milestone — обновление `rust/STATUS.md` (фаза/тесты/секция «what remains») и
+  журнала `§9.7` (для M1) или новой фазовой секции (для M2+).
+- Инварианты (тесты/clippy/fmt/golden-parity) проверяются перед каждым push.

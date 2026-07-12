@@ -1,7 +1,8 @@
 # Rust Port — Status Snapshot
 
-> Branch: `rust/pilot` · Last update: 2026-07-07
+> Branch: `rust/pilot` · Last update: 2026-07-12
 > See `MIGRATION_PLAN.md` at the repo root for the full plan + progress log.
+> Roadmap «полностью закрыть аудит» — см. §11 в `rust/AUDIT.md` и блок ниже.
 
 ## At a glance
 
@@ -18,6 +19,26 @@
 **CI:** automatic Rust workflow is intentionally disabled for now. `.github/workflows/rust.yml`
 is manual-only (`workflow_dispatch`) and can run fmt, workspace tests, clippy, workspace build,
 and Android aarch64 GDExtension smoke when triggered by hand.
+
+## Roadmap — «полностью закрыть аудит»
+
+> Постановка 2026-07-12: сначала закрыть долг по ревью кода (§9 `AUDIT.md`), затем пройти
+> весь путь миграции до конца (вариант охвата 4). Каждый пункт — отдельный коммит + push,
+> после milestone обновляется этот файл и журнал `§9.7` (для M1). Полная декомпозиция и DoD —
+> в `rust/AUDIT.md` §11.
+
+| Milestone | Суть | Статус |
+|---|---|---|
+| **M1** | Долг по ревью кода (§9 + §7): TSan, D7, волна 3 (B1/B3/B4/B5/C1/C3), H2-MT бенч, cargo-fuzz, CI, риски §7 | ⏳ следующий |
+| **M2** | Фаза 4 до GO: multi-LOD paging (`VoxelLodTerrain`), остаток `VoxelEngine`, `VoxelDataGrid`, сквозной TSan | ⏳ |
+| **M3** | Фаза 5: Godot binding 75+ классов + editor/edition/modifiers/instancing/terrain-root | ⏳ |
+| **M4** | Паритет и удаление C++ из `master`; форк — чистый Rust-проект | ⏳ |
+
+**Текущий фокус:** переход к M1.A (TSan-прогон на Linux/nightly для `threaded_edit_load_mesh_stress`
+и `SpatialLock3D` — формальный GO-критерий Фазы 4 по конкурентности).
+
+**Не входит в DoD** (опционально/отложено, трекается отдельно): GPU-путь (`gpu`/`detail_rendering`/`shaders`),
+`sqlite`, `multipass`, FastNoise2/SpotNoise, physics (Rapier).
 
 ## Phase 4 — what works headlessly (no Godot)
 
