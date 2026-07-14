@@ -272,21 +272,31 @@ impl CubesMesher {
         self
     }
 
-    /// Extract the typed-channel slice the cubes mesher expects. The C++
-    /// runtime packs voxels as `u32` regardless of the on-disk depth; we do
-    /// the same by reading each voxel via `get_voxel` (returns `u64`).
+    /// Extract the typed-channel slice the cubes mesher expects (`&[u32]`). The
+    /// C++ runtime packs voxels as `u32` regardless of the on-disk depth.
+    ///
+    /// B5 (audit §9.6-B5): dispatch the channel depth **once** and widen the
+    /// typed slice into `Vec<u32>` in a single pass (`Vec::iter().map().collect()`)
+    /// instead of calling `get_voxel` (per-voxel depth dispatch) per voxel.
     fn extract_voxel_slice(buffer: &VoxelBuffer, channel: usize) -> Vec<u32> {
+        use crate::storage::{ChannelData, Compression};
         let size = buffer.size();
-        let mut out = Vec::with_capacity((size.x as usize) * (size.y as usize) * (size.z as usize));
-        // ZXY order matches the cubes free function's `index = y + sy*(x + sx*z)`.
-        for z in 0..size.z {
-            for x in 0..size.x {
-                for y in 0..size.y {
-                    out.push(buffer.get_voxel(x, y, z, channel) as u32);
-                }
-            }
+        let cap = (size.x as usize) * (size.y as usize) * (size.z as usize);
+        // Uniform channel: materialise a full Vec of the default value (the
+        // greedy/simple mesher indexes the slice directly, so it must be sized).
+        if buffer.channel_compression(channel) == Compression::Uniform {
+            return vec![buffer.channel_default(channel) as u32; cap];
         }
-        out
+        match buffer.channel_data(channel) {
+            ChannelData::U8(v) => v.iter().map(|&x| x as u32).collect(),
+            ChannelData::U16(v) => v.iter().map(|&x| x as u32).collect(),
+            ChannelData::U32(v) => {
+                let mut out = Vec::with_capacity(cap.max(v.len()));
+                out.extend_from_slice(v);
+                out
+            }
+            ChannelData::U64(v) => v.iter().map(|&x| x as u32).collect(),
+        }
     }
 }
 
@@ -408,18 +418,17 @@ impl BlockyMesher {
 
 impl VoxelMesher for BlockyMesher {
     fn build(&self, output: &mut MesherOutput, input: &MesherInput<'_>) {
-        use crate::meshers::blocky::mesher::{generate_mesh, generate_mesh_with_collision};
-        let voxels = Self::extract_voxel_slice(input.voxels, self.type_channel);
         let size = input.voxels.size();
         let material_count = self.library.indexed_materials_count.max(1) as usize;
         let mut arrays: Vec<crate::meshers::blocky::mesher::BlockyArrays> =
             (0..material_count).map(|_| Default::default()).collect();
         if input.collision_hint {
             let mut collision_arrays = crate::meshers::blocky::mesher::BlockyArrays::default();
-            generate_mesh_with_collision(
+            build_blocky_into(
                 &mut arrays,
-                &mut collision_arrays,
-                &voxels,
+                Some(&mut collision_arrays),
+                input.voxels,
+                self.type_channel,
                 size,
                 &self.library,
                 self.bake_occlusion,
@@ -428,9 +437,11 @@ impl VoxelMesher for BlockyMesher {
             output.collision_surface.positions = collision_arrays.positions;
             output.collision_surface.indices = collision_arrays.indices;
         } else {
-            generate_mesh(
+            build_blocky_into(
                 &mut arrays,
-                &voxels,
+                None,
+                input.voxels,
+                self.type_channel,
                 size,
                 &self.library,
                 self.bake_occlusion,
@@ -463,6 +474,121 @@ impl VoxelMesher for BlockyMesher {
 
     fn is_generating_collision_surface(&self) -> bool {
         true
+    }
+}
+
+/// B5 (audit §9.6-B5): dispatch the blocky Type channel depth **once** and feed
+/// `generate_mesh` a typed slice directly (`generate_mesh<T: Copy + Into<u16>>`
+/// is generic), avoiding the per-voxel `get_voxel` copy into a fresh `Vec`.
+/// For the common depths `Bit8`/`Bit16` this is zero-copy; for the rarer
+/// `Bit32`/`Bit64` channels the values are narrowed into a temporary `Vec<u16>`
+/// (the blocky mesher only reads the low 16 bits anyway, matching C++).
+#[allow(clippy::too_many_arguments)] // mirrors the mesher + library config surface
+fn build_blocky_into(
+    arrays: &mut [crate::meshers::blocky::mesher::BlockyArrays],
+    collision_arrays: Option<&mut crate::meshers::blocky::mesher::BlockyArrays>,
+    buffer: &VoxelBuffer,
+    type_channel: usize,
+    size: Vector3i,
+    library: &crate::meshers::blocky::baked_library::BakedLibrary,
+    bake_occlusion: bool,
+    baked_occlusion_darkness: f32,
+) {
+    use crate::meshers::blocky::mesher::{generate_mesh, generate_mesh_with_collision};
+    use crate::storage::{ChannelData, Compression};
+    let cap = (size.x as usize) * (size.y as usize) * (size.z as usize);
+    // Uniform channel: `generate_mesh` indexes the slice directly (no bounds
+    // check), so materialise a full Vec of the default value — matches the
+    // Cubes fallback and the pre-B5 per-voxel `get_voxel` semantics.
+    if buffer.channel_compression(type_channel) == Compression::Uniform {
+        let voxels: Vec<u16> = vec![buffer.channel_default(type_channel) as u16; cap];
+        match collision_arrays {
+            Some(col) => generate_mesh_with_collision(
+                arrays,
+                col,
+                &voxels,
+                size,
+                library,
+                bake_occlusion,
+                baked_occlusion_darkness,
+            ),
+            None => generate_mesh(
+                arrays,
+                &voxels,
+                size,
+                library,
+                bake_occlusion,
+                baked_occlusion_darkness,
+            ),
+        }
+        return;
+    }
+    let data = buffer.channel_data(type_channel);
+    match data {
+        // Zero-copy fast paths: the typed storage variant already holds the
+        // widths `generate_mesh` consumes via `T: Into<u16>`.
+        ChannelData::U8(v) => match collision_arrays {
+            Some(col) => generate_mesh_with_collision(
+                arrays,
+                col,
+                v,
+                size,
+                library,
+                bake_occlusion,
+                baked_occlusion_darkness,
+            ),
+            None => generate_mesh(
+                arrays,
+                v,
+                size,
+                library,
+                bake_occlusion,
+                baked_occlusion_darkness,
+            ),
+        },
+        ChannelData::U16(v) => match collision_arrays {
+            Some(col) => generate_mesh_with_collision(
+                arrays,
+                col,
+                v,
+                size,
+                library,
+                bake_occlusion,
+                baked_occlusion_darkness,
+            ),
+            None => generate_mesh(
+                arrays,
+                v,
+                size,
+                library,
+                bake_occlusion,
+                baked_occlusion_darkness,
+            ),
+        },
+        // Rare Bit32/Bit64 channels: narrow to u16 in one pass (still a single
+        // allocation, depth dispatched once — not per voxel).
+        ChannelData::U32(_) | ChannelData::U64(_) => {
+            let voxels = BlockyMesher::extract_voxel_slice(buffer, type_channel);
+            match collision_arrays {
+                Some(col) => generate_mesh_with_collision(
+                    arrays,
+                    col,
+                    &voxels,
+                    size,
+                    library,
+                    bake_occlusion,
+                    baked_occlusion_darkness,
+                ),
+                None => generate_mesh(
+                    arrays,
+                    &voxels,
+                    size,
+                    library,
+                    bake_occlusion,
+                    baked_occlusion_darkness,
+                ),
+            }
+        }
     }
 }
 
@@ -786,6 +912,22 @@ mod tests {
                 }
             }
         }
+        let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+
+        let mut output = MesherOutput::default();
+        mesher.build(&mut output, &input);
+
+        assert_eq!(output.total_triangle_count(), 0);
+    }
+
+    #[test]
+    fn blocky_mesher_handles_uniform_air_block_without_panicking() {
+        // Regression for B5: a never-written-to buffer has a `Compression::Uniform`
+        // Type channel (empty typed Vec). Before the uniform fallback in
+        // `build_blocky_into` this panicked in `generate_mesh` (index out of
+        // bounds on an empty slice). Mirrors `cubes_mesher_emits_empty_surfaces_for_air_block`.
+        let mesher = BlockyMesher::new(empty_blocky_library());
+        let voxels = VoxelBuffer::with_size(Vector3i::splat(4));
         let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
 
         let mut output = MesherOutput::default();
