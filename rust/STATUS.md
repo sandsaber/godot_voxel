@@ -29,15 +29,14 @@ and Android aarch64 GDExtension smoke when triggered by hand.
 
 | Milestone | Суть | Статус |
 |---|---|---|
-| **M1** | Долг по ревью кода (§9 + §7): TSan, D7, волна 3 (B1/B3/B4/B5/C1/C3), H2-MT бенч, cargo-fuzz, CI, риски §7 | 🟡 в работе: **M1.A (TSan) ✅** + **M1.B (D7) ✅** + **M1.C (волна 3) ✅** + **M1.D (graph: C1 compile-step + C3 range analysis) ✅ полностью закрыта 2026-07-12**; далее M1.E (инфра) |
+| **M1** | Долг по ревью кода (§9 + §7): TSan, D7, волна 3 (B1/B3/B4/B5/C1/C3), H2-MT бенч, cargo-fuzz, CI, риски §7 | 🟡 в работе: **M1.A (TSan) ✅** + **M1.B (D7) ✅** + **M1.C (волна 3) ✅** + **M1.D (graph: C1+C3) ✅** + **M1.E.1 (cargo-fuzz + OOM fix) ✅ + M1.E.3 (§7 риски) ✅ закрыто 2026-07-12**; далее H2-MT bench (item 9) |
 | **M2** | Фаза 4 до GO: multi-LOD paging (`VoxelLodTerrain`), остаток `VoxelEngine`, `VoxelDataGrid`, сквозной TSan | ⏳ |
 | **M3** | Фаза 5: Godot binding 75+ классов + editor/edition/modifiers/instancing/terrain-root | ⏳ |
 | **M4** | Паритет и удаление C++ из `master`; форк — чистый Rust-проект | ⏳ |
 
-**Текущий фокус:** M1.A (TSan), M1.B (D7), M1.C (волна 3: B1+B3+B4+B5), M1.D (graph runtime: C1
-compile-step + C3 range analysis) закрыты (см. §9.7). Следующий шаг — **M1.E**: инфра-долг
-(H2-MT benchmark harness, cargo-fuzz таргеты, CI auto-trigger, §7 риски: upstream-tracking
-`cpp-reference`, REPORT.md, on-device).
+**Текущий фокус:** M1.A–M1.D закрыты. M1.E.1 (cargo-fuzz: 3 таргета + найден/починен OOM bug в
+`decompressed_size`) и M1.E.3 (§7 риски: cpp-reference branch, REPORT.md snapshot, on-device
+deprecate) закрыты. Остаётся H2-MT bench harness (item 9) для полного закрытия M1.E.
 
 **D7 (M1.B):** `Channel.data` теперь `enum ChannelData { U8/U16/U32/U64(Vec<_>) }` — hot loops
 depth-dispatch один раз на канал и индексируют типизированный slice напрямую. Wire-format

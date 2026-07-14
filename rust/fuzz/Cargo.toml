@@ -1,0 +1,38 @@
+[package]
+name = "voxel-core-fuzz"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["godot_voxel Rust migration"]
+description = "cargo-fuzz / libFuzzer targets for voxel-core byte-level parsers"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+# cargo-fuzz harness. Run from rust/ with:
+#   cargo +nightly fuzz run vox_parser
+#   cargo +nightly fuzz run block_serializer
+#   cargo +nightly fuzz run region_file
+# Each target feeds the fuzzer-supplied byte slice into a parser entry point
+# and asserts no panic / UB (errors are expected and ignored).
+[dependencies]
+voxel-core = { path = "../voxel-core" }
+libfuzzer-sys = "0.4"
+
+[[bin]]
+name = "vox_parser"
+path = "fuzz_targets/vox_parser.rs"
+
+[[bin]]
+name = "block_serializer"
+path = "fuzz_targets/block_serializer.rs"
+
+[[bin]]
+name = "region_file"
+path = "fuzz_targets/region_file.rs"
+
+# Separate workspace so cargo-fuzz controls the full dependency tree (it sets
+# RUSTFLAGS for sancov/ASan instrumentation that must apply to voxel-core too).
+# Excluding this from the main workspace avoids profile/toolchain conflicts.
+[workspace]

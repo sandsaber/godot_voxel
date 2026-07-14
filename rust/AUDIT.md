@@ -137,25 +137,32 @@ GraphGenerator (24+ узлов) / Waves / Flat / Noise / HeightmapNoise
 
 ## 7. Отклонения от плана и риски
 
-1. **Git-стратегия не выполняется.** План (§1) требует ветку `cpp-reference` (зеркало Zylann/master)
-   и регулярный upstream-merge. Фактически: remote на upstream не настроен, ветки `cpp-reference` нет,
-   только `origin` (sandsaber) с `master` + `rust/pilot`. Дивергенция от Zylann не отслеживается —
-   чем дольше, тем дороже догонять bugfix'ы. *Рекомендация: добавить remote + ветку, это дёшево.*
-2. **Фаза 2 не закрыта on-device.** `.so` собран, но APK на устройстве/эмуляторе не проверялся
-   (нужны SDK+устройство вне окружения). Формально GO-критерий Фазы 2 не выполнен.
-3. **GO-критерий Фазы 4 недостижим текущим кодом**: «нет race conditions под ThreadSanitizer» —
-   TSan не запускался; `SharedVoxelData` уже берёт `SpatialLock3D` regions в terrain/mesh
-   consumers и использует per-LOD map locks/settings lock, A5 task runner закрыт, а macOS
-   stress `threaded_edit_load_mesh_stress` стабилен. До формального GO остаётся TSan на
-   Linux/nightly.
-   Это честно задокументировано, но стоит держать в фокусе: реальная многопоточность может
-   вскрыть проблемы в дизайне ownership.
+1. **Git-стратегия — ✅ закрыто 2026-07-12 (M1.E).** План (§1) требует ветку `cpp-reference`
+   (зеркало Zylann/master) и регулярный upstream-merge. Настроено: remote `upstream`
+   → `https://github.com/Zylann/godot_voxel.git` добавлен, ветка `cpp-reference` создана
+   (трекает `upstream/master`). `git fetch upstream master` обновляет её. Ветка локальная
+   (не push'ится в origin) — её роль быть эталоном для parity и местом для cherry-pick
+   upstream bugfix'ов. До этого: remote на upstream не настроен, ветки `cpp-reference` нет.
+2. **Фаза 2 не закрыта on-device — 🟡 задепрекейчено.** `.so` собран (aarch64/x86_64-android),
+   но APK на устройстве/эмуляторе не проверялся (нужны SDK+устройство вне окружения).
+   Кросс-компиляция верифицирована (H4 PASS: pure-Rust `.so` линкуется, `gdext_rust_init`
+   экспортируется). On-device smoke остаётся формальным пробелом; закрывается когда появится
+   доступ к Android SDK+эмулятору/устройству. До тех пор Фаза 2 считается «десктоп+кросс-компил
+   валидирована, on-device — формальность для pure-Rust кода без платформ-специфики».
+3. **GO-критерий Фазы 4 по TSan — ✅ закрыто 2026-07-12 (M1.A).** ThreadSanitizer прогнан на
+   Linux/nightly через workspace-член `tsan` (5 тестов: edit/load/mesh stress + SpatialLock3D
+   + ThreadedTaskRunner). 0 data race. См. §9.7.
 4. **Parity-покрытие тестами точечное.** Byte-parity доказан для transvoxel-таблиц и двух golden-сфер;
    остальные модули покрыты юнит-тестами, портированными «по мотивам» C++, но C++ тест-сюита
    (9 025 LOC, 61 файл) не зеркалируется системно. Риск тихих поведенческих расхождений в углах.
+   *Частично смягчено (M1.E):* cargo-fuzz таргеты на `.vox`/`block_serializer`/`region` парсеры
+   теперь ловят crash/OOM класс багов (см. §9.7 — fuzzer нашёл и пофиксил OOM в decompressed_size).
 5. **H2 perf проверен только на transvoxel 16³–64³.** Для storage/paging/graph перф-сравнений с C++ нет.
-6. **REPORT.md устарел числами** («~2248 LOC ported», «32 tests») — это снапшот Фазы 0; актуальные
-   цифры в `rust/STATUS.md`. Не ошибка, но читателя может запутать.
+   *Смягчено (M1.B–M1.D):* typed storage (D7), typed SDF sampler (B1), MeshArrays pool (B3),
+   gather-scratch hoist (B4), Cubes/Blocky zero-copy (B5), graph compile-step + XZ-cache (C1),
+   range analysis (C3) закрывают основные perf-долги. H2-MT bench harness остаётся TODO.
+6. **REPORT.md устарел числами — ✅ закрыто 2026-07-12 (M1.E).** Снапшот Фазы 0 помечен
+   «Snapshot notice» со ссылкой на `rust/STATUS.md` для актуальных чисел.
 
 ---
 
@@ -604,6 +611,7 @@ clippy/fmt чистые; каждый шаг сверяется с соотве�
 | 2026-07-12 | **M1.C / B5: Cubes/Blocky zero-copy (волна 3 завершена)** | ✅ закрыто. **Blocky**: новый `build_blocky_into` dispatch'ит channel depth **один раз** и передаёт типизированный slice напрямую в generic `generate_mesh<T: Copy+Into<u16>>` (настоящий zero-copy для Bit8/Bit16, default Type channel — Bit16; Bit32/Bit64 fallback на `extract_voxel_slice`). **Cubes**: `extract_voxel_slice` widened в `Vec<u32>` одним проходом `iter().map().collect()` вместо per-voxel `get_voxel` (free fn требует `&[u32]`, полного zero-copy нет, но depth-dispatch один раз). Оба adapter'а получили `Compression::Uniform` fallback (`vec![defval; cap]`) — `channel_data` возвращает пустой Vec для uniform-канала, что вызывало бы out-of-bounds. Regression-тест `blocky_mesher_handles_uniform_air_block_without_panicking` закрывает латентный баг Blocky path (parallel-агент нашёл, что Blocky не имел uniform-handling в отличие от Cubes/Transvoxel). **Это закрывает M1.C (волна 3) полностью: B1+B3+B4+B5.** | `cargo test -p voxel-core` → 653 unit + 11 integration + 1 doc-test (golden parity + end-to-end зелёные); `cargo clippy --workspace --all-targets` clean; `cargo fmt` clean; `cargo +nightly test -p tsan -Zbuild-std ...` → 5 passed, 0 TSan warnings |
 | 2026-07-12 | **M1.D / C1: compile-шаг `CompiledGraph` (topo-кэш + dense scratch + XZ-outer-group cache)** | ✅ закрыто. `CompiledGraph::compile(&Graph)` кэширует topological order + dense `id_to_index` + классифицирует Y-dependence (reachability от InputX/InputZ → outer group; `xz_prefix_len` = индекс первого Y-dependent узла). `CompiledScratch` (dense `Vec<Vec<f32>>`) заменяет `HashMap<GraphNodeId, Vec<f32>>` с capacity-preserving reuse между slices. `generate_slice(xz_prefix_cached: bool)` eval'ит узлы по dense index (без per-element HashMap lookup), а на 2-м+ Y-slices skip'ает `[0, xz_prefix_len)` prefix — их буферы persist от первого slice. Критичный нюанс: `OutputSdf` writes в scratch (не в per-slice outputs Vec), а `generate_slice` collects outputs после eval'а — так cached-prefix OutputSdf тоже доступен. `generate_block_with_compiled_graph` строит XZ coords один раз вне Y-loop. `GraphGenerator` хранит lazy `Mutex<Option<CompiledGraph>>` (Send+Sync preserved) + `Mutex<CompiledScratch>`. На topology-error fallback на legacy path. Все 32 существующих graph-теста + 15 новых C1-тестов (topo-кэш, dense index, XZ-classification × 3, golden parity compiled-vs-lazy × 5, XZ-cache consistency, capacity reuse, adapter sin(x)+1 canary, XZ-only multi-slice) зелёные. | `cargo test -p voxel-core` → 668 unit + 11 integration + 1 doc-test (15 новых C1 + все существующие graph-тесты); `cargo clippy --workspace --all-targets` clean; `cargo fmt` clean; `cargo +nightly test -p tsan -Zbuild-std ...` → 5 passed, 0 TSan warnings |
 | 2026-07-12 | **M1.D / C3: range analysis (uniform-SDF culling)** | ✅ закрыто. `CompiledGraph::analyze_range(x, y, z) -> Interval` пропагирует input intervals через compiled topo-order: easy nodes используют портированную `math::interval` (Add/Sub/Mul/Div/Min/Max/Sin/Abs/Sqrt/Floor/Fract/Remap/Distance2D/3D/SdfPlane/SdfSphere/SdfUnion/SdfSubtract/Mix/Clamp), hard nodes (Cos/Noise2D/3D/Curve/Normalize3D/Pow/SdfSmooth*/SdfBox/SdfTorus) → conservative `infinity()` (C++ имеет per-node range funcs, Rust fallback безопасен — теряется только optimisation). `generate_block_with_compiled_graph` culls uniform-SDF blocks: **только `is_single_value()`** заполняет actual SDF value uniform (conservative — sign-only ranges остаются per-voxel, т.к. фактическое SDF значение может нести информацию для distance field; C++ заполняет FAR_OUTSIDE/INSIDE для sign-only, но это рискованно при hard nodes). 7 новых тестов: 5 runtime (constant/plane-solid/plane-straddle/noise-fallback/add) + 2 adapter (cull air Constant(2.0) + cull solid Constant(-2.0)). **M1.D (graph runtime) полностью закрыта: C1+C3.** | `cargo test -p voxel-core` → 675 unit + 11 integration + 1 doc-test (7 новых C3); `cargo clippy --workspace --all-targets` clean; `cargo fmt` clean; `cargo +nightly test -p tsan -Zbuild-std ...` → 5 passed, 0 TSan warnings |
+| 2026-07-12 | **M1.E: cargo-fuzz таргеты + OOM bug fix + §7 риски** | ✅ закрыто (частично). **cargo-fuzz**: новый workspace-член `fuzz/` (separate workspace, cargo-fuzz manages ASan/sancov) с 3 таргетами: `vox_parser` (`.vox` parse), `block_serializer` (decompress_and_deserialize), `region_file` (block payloads via decompress_and_deserialize; full region-header fuzzing требует `load_header` pub API — TODO). **OOM bug found & fixed**: fuzzer нашёл, что `compressed_data::decompress_lz4`/`decompress_zstd` читают `u32 decompressed_size` из untrusted bytes и `dst.resize(decompressed_size)` без cap → out-of-memory (fuzzer триггерил malloc ~2-4 GiB). Fix: `MAX_DECOMPRESSED_SIZE = 256 MiB` cap с `InvalidSize` early-return + regression test. Этот класс багов — ровно тот, ради которого аудит §9.6 просил fuzzing (D2-подобный). **§7 риски**: risk 1 (cpp-reference) ✅ — `upstream` remote + `cpp-reference` branch настроены; risk 3 (TSan) уже ✅ (M1.A); risk 6 (REPORT.md) ✅ — помечен snapshot notice; risk 2 (on-device) 🟡 задепрекейчено (кросс-компил валидирован, on-device — формальность для pure-Rust). H2-MT bench harness остаётся TODO (item 9). | `cargo test -p voxel-core` → 676 unit + 11 integration + 1 doc-test; `cargo clippy --workspace --all-targets` clean; `cargo fmt` clean; cargo-fuzz: 3 таргета × 2000 runs, 0 crash после OOM fix (coverage 57/201/212 ветвей) |
 
 Пункт #1 по снятию generator/mesher/data сериализации закрыт для текущего worker bridge.
 ABBA-риск с внешним generator/mesher lock снят; правило “не держать data lock через

@@ -23,6 +23,14 @@ use crate::io::serialization::{Endianness, MemoryReader, MemoryWriter};
 /// (one tag byte + four size bytes). Matches the C++ `header_size` constant.
 const SIZE_HEADER_LEN: usize = 1 + 4;
 
+/// Upper bound on the decompressed payload size. The decompressed-size field
+/// is a `u32` read from untrusted bytes, so without a cap a malicious payload
+/// can claim up to ~4 GiB and trigger an out-of-memory allocation before LZ4
+/// rejects the data. Real voxel blocks are bounded by the engine's block-size
+/// configuration (single-digit MiB at most), so 256 MiB is a generous ceiling
+/// that rejects attack payloads while never rejecting legitimate data.
+const MAX_DECOMPRESSED_SIZE: i64 = 256 * 1024 * 1024;
+
 /// Compression format selector. Ported from `CompressedData::Compression`.
 ///
 /// The discriminant values are a wire-format contract (written as the leading
@@ -127,7 +135,7 @@ pub fn decompress(src: &[u8], dst: &mut Vec<u8>) -> Result<()> {
 /// the reader's endianness is set by the caller. Matches `decompress_lz4`.
 fn decompress_lz4(r: &mut MemoryReader<'_>, src: &[u8], dst: &mut Vec<u8>) -> Result<()> {
     let decompressed_size = i64::from(r.try_get_32().ok_or(Error::UnexpectedEof)?);
-    if decompressed_size < 0 {
+    if !(0..=MAX_DECOMPRESSED_SIZE).contains(&decompressed_size) {
         return Err(Error::InvalidSize(decompressed_size));
     }
     let decompressed_size = decompressed_size as usize;
@@ -152,7 +160,7 @@ fn decompress_lz4(r: &mut MemoryReader<'_>, src: &[u8], dst: &mut Vec<u8>) -> Re
 #[cfg(feature = "zstd")]
 fn decompress_zstd(r: &mut MemoryReader<'_>, src: &[u8], dst: &mut Vec<u8>) -> Result<()> {
     let decompressed_size = i64::from(r.try_get_32().ok_or(Error::UnexpectedEof)?);
-    if decompressed_size < 0 {
+    if !(0..=MAX_DECOMPRESSED_SIZE).contains(&decompressed_size) {
         return Err(Error::InvalidSize(decompressed_size));
     }
     let decompressed_size = decompressed_size as usize;
@@ -405,6 +413,23 @@ mod tests {
         match decompress(&bad, &mut out) {
             Err(Error::Lz4(_)) => {}
             other => panic!("expected Lz4 error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decompress_rejects_oversized_decompressed_size() {
+        // Fuzzer-found class: a `u32` decompressed-size field can claim up to
+        // ~4 GiB, forcing a huge allocation before LZ4 rejects the payload.
+        // The cap must reject the oversized claim early (InvalidSize), not
+        // attempt the allocation.
+        let mut bad = vec![Compression::Lz4 as u8];
+        // Claim 1 GiB (1048576 KiB = 0x40000000), well above the cap.
+        bad.extend_from_slice(&(0x4000_0000u32).to_le_bytes());
+        bad.extend_from_slice(&[0u8; 16]); // placeholder payload
+        let mut out = Vec::new();
+        match decompress(&bad, &mut out) {
+            Err(Error::InvalidSize(_)) => {}
+            other => panic!("expected InvalidSize for oversized claim, got {other:?}"),
         }
     }
 
