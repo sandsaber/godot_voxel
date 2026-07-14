@@ -195,6 +195,40 @@ pub fn generate_block_with_compiled_graph(
         return;
     }
 
+    // C3 (audit §9.6-C3): range-analysis fast-path. Propagate the block's
+    // world-coordinate intervals through the compiled graph. If the SDF output
+    // doesn't straddle zero, the whole block is uniform (air or solid) and can
+    // be filled without per-voxel evaluation — the same mechanism the C++ VM
+    // uses to skip interior/air blocks.
+    let x_range = crate::math::Interval::new(
+        (input.origin_in_voxels.x as f32) * coordinate_scale,
+        (input.origin_in_voxels.x as f32 + (size.x - 1) as f32 * lod_stride) * coordinate_scale,
+    );
+    let y_range = crate::math::Interval::new(
+        (input.origin_in_voxels.y as f32) * coordinate_scale,
+        (input.origin_in_voxels.y as f32 + (size.y - 1) as f32 * lod_stride) * coordinate_scale,
+    );
+    let z_range = crate::math::Interval::new(
+        (input.origin_in_voxels.z as f32) * coordinate_scale,
+        (input.origin_in_voxels.z as f32 + (size.z - 1) as f32 * lod_stride) * coordinate_scale,
+    );
+    let sdf_range = compiled.analyze_range(x_range, y_range, z_range);
+    // Only cull when the SDF is provably a single value everywhere (the graph
+    // output is constant over the whole block). Sign-only ranges (min>0 or
+    // max<0) are left to per-voxel eval because the actual SDF value may carry
+    // information the caller needs (e.g. a distance field), and hard nodes
+    // (Noise/Cos/Curve) make the range estimate imprecise. This matches the
+    // conservative spirit of C++ culling while avoiding false air/solid fills.
+    if sdf_range.is_single_value() {
+        use crate::storage::voxel_buffer::real_to_raw_voxel;
+        let depth = input.buffer.channel_depth(sdf_channel);
+        input
+            .buffer
+            .clear_channel(sdf_channel, real_to_raw_voxel(sdf_range.min, depth));
+        input.buffer.compress_uniform_channels();
+        return;
+    }
+
     let slice_size = (size.x as usize) * (size.z as usize);
     // XZ coordinates are identical across Y-slices — build once, reuse.
     let mut xs: Vec<f32> = vec![0.0; slice_size];
@@ -487,5 +521,76 @@ mod tests {
         let v21 = buffer.get_voxel_f(2, 1, 2, ChannelId::Sdf.index());
         assert!((v00 - (10.0f32.sin() + 1.0)).abs() < 1e-4, "v00={v00}");
         assert!((v21 - (12.0f32.sin() + 1.0)).abs() < 1e-4, "v21={v21}");
+    }
+
+    #[test]
+    fn c3_range_analysis_culls_uniform_sdf_block() {
+        // Constant(2.0) → OutputSdf: the SDF is +2 everywhere → fully air.
+        // C3 range analysis should detect this and fill uniformly WITHOUT
+        // per-voxel eval (the channel ends up Compression::Uniform).
+        use crate::generators::graph::{Graph, GraphPort, NodeKind};
+        use crate::storage::{ChannelDepth, Compression, VoxelFormat};
+        let mut g = Graph::new();
+        let c = g.push(NodeKind::Constant(2.0));
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: c }),
+        });
+        let gen = GraphGenerator::new(g);
+        let mut buffer = VoxelBuffer::with_size(Vector3i::new(4, 4, 4));
+        let mut format = VoxelFormat::new();
+        format.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+        format.configure_buffer(&mut buffer);
+        gen.generate_block(VoxelQueryData {
+            buffer: &mut buffer,
+            origin_in_voxels: Vector3i::new(10, 0, 0),
+            lod: 0,
+        });
+        // The C3 fast-path should have compressed the channel to uniform.
+        assert_eq!(
+            buffer.channel_compression(ChannelId::Sdf.index()),
+            Compression::Uniform,
+            "constant-positive SDF should be culled to uniform air"
+        );
+        // And the value should be the graph's actual SDF (2.0), not a sentinel,
+        // since the conservative single-value fast-path fills the real value.
+        let v = buffer.get_voxel_f(0, 0, 0, ChannelId::Sdf.index());
+        assert!(
+            (v - 2.0).abs() < 0.5,
+            "culled uniform block should hold the graph's SDF value 2.0, got {v}"
+        );
+    }
+
+    #[test]
+    fn c3_range_analysis_culls_uniform_solid_block() {
+        // Constant(-2.0) → OutputSdf: the SDF is -2 everywhere → fully solid.
+        // C3 range analysis detects the single-value output and fills it
+        // uniformly WITHOUT per-voxel eval (Compression::Uniform).
+        use crate::generators::graph::{Graph, GraphPort, NodeKind};
+        use crate::storage::{ChannelDepth, Compression, VoxelFormat};
+        let mut g = Graph::new();
+        let c = g.push(NodeKind::Constant(-2.0));
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: c }),
+        });
+        let gen = GraphGenerator::new(g);
+        let mut buffer = VoxelBuffer::with_size(Vector3i::new(4, 4, 4));
+        let mut format = VoxelFormat::new();
+        format.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+        format.configure_buffer(&mut buffer);
+        gen.generate_block(VoxelQueryData {
+            buffer: &mut buffer,
+            origin_in_voxels: Vector3i::new(0, 0, 0),
+            lod: 0,
+        });
+        assert_eq!(
+            buffer.channel_compression(ChannelId::Sdf.index()),
+            Compression::Uniform,
+            "constant-negative SDF should be culled to uniform solid"
+        );
+        let v = buffer.get_voxel_f(0, 0, 0, ChannelId::Sdf.index());
+        assert!(
+            (v - (-2.0)).abs() < 0.5,
+            "should hold the graph's SDF value -2.0, got {v}"
+        );
     }
 }

@@ -778,7 +778,130 @@ impl CompiledGraph {
         &self.nodes
     }
 
-    /// Evaluate one Y-slice, writing outputs into `scratch`/`outputs`.
+    /// Propagate input intervals through the compiled topological order to
+    /// estimate the output-SDF range over a bounding box (audit §9.6-C3).
+    ///
+    /// If the returned interval does not straddle zero, the entire block is
+    /// provably uniform (fully-solid when `max < 0`, fully-air when `min > 0`)
+    /// and `generate_block` can fill it without per-voxel evaluation — the same
+    /// mechanism the C++ VM uses to skip interior/air blocks. Hard nodes
+    /// (Noise/Cos/Curve/Smooth-SDF/etc. — non-monotone or unanalysed) fall back
+    /// to a conservative full-range `[-∞,+∞]`, so a graph containing them just
+    /// loses the optimisation without producing wrong results.
+    ///
+    /// `x`/`y`/`z` are the world-coordinate intervals spanned by the block.
+    pub fn analyze_range(
+        &self,
+        x: crate::math::Interval,
+        y: crate::math::Interval,
+        z: crate::math::Interval,
+    ) -> crate::math::Interval {
+        use crate::math::interval as iv;
+        let mut ranges: Vec<crate::math::Interval> =
+            vec![iv::Interval::infinity(); self.nodes.len()];
+        let inf = iv::Interval::infinity();
+        let resolve =
+            |ranges: &[crate::math::Interval], port: &Option<GraphPort>| -> crate::math::Interval {
+                match port {
+                    Some(p) => ranges
+                        .get(self.id_to_index.get(&p.node).copied().unwrap_or(usize::MAX))
+                        .copied()
+                        .unwrap_or(inf),
+                    None => iv::Interval::single(0.0),
+                }
+            };
+        for (i, node) in self.nodes.iter().enumerate() {
+            let r = match &node.kind {
+                NodeKind::InputX => x,
+                NodeKind::InputY => y,
+                NodeKind::InputZ => z,
+                NodeKind::Constant(v) => iv::Interval::single(*v),
+                // Easy binary ops (interval arithmetic available).
+                NodeKind::Add { a, b } => resolve(&ranges, a) + resolve(&ranges, b),
+                NodeKind::Subtract { a, b } => resolve(&ranges, a) - resolve(&ranges, b),
+                NodeKind::Multiply { a, b } => resolve(&ranges, a) * resolve(&ranges, b),
+                NodeKind::Divide { a, b } => resolve(&ranges, a) / resolve(&ranges, b),
+                NodeKind::Min { a, b } => {
+                    iv::min_interval(resolve(&ranges, a), resolve(&ranges, b))
+                }
+                NodeKind::Max { a, b } => {
+                    iv::max_interval(resolve(&ranges, a), resolve(&ranges, b))
+                }
+                // Hard / non-monotone — conservative full range.
+                NodeKind::Pow { .. } => inf,
+                NodeKind::Sin { a } => iv::sin(resolve(&ranges, a)),
+                NodeKind::Cos { .. } => inf,
+                NodeKind::Abs { a } => iv::abs(resolve(&ranges, a)),
+                NodeKind::Sqrt { a } => iv::sqrt(resolve(&ranges, a)),
+                NodeKind::Floor { a } => iv::floor(resolve(&ranges, a)),
+                NodeKind::Fract { a } => resolve(&ranges, a) - iv::floor(resolve(&ranges, a)),
+                NodeKind::Remap {
+                    a,
+                    from_start,
+                    from_end,
+                    to_start,
+                    to_end,
+                } => {
+                    let fs = iv::Interval::single(*from_start);
+                    let fe = iv::Interval::single(*from_end);
+                    let ts = iv::Interval::single(*to_start);
+                    let te = iv::Interval::single(*to_end);
+                    iv::lerp(ts, te, (resolve(&ranges, a) - fs) / (fe - fs))
+                }
+                NodeKind::Distance2D { x, y } => {
+                    iv::get_length2(resolve(&ranges, x), resolve(&ranges, y))
+                }
+                NodeKind::Distance3D { x, y, z } => iv::get_length3(
+                    resolve(&ranges, x),
+                    resolve(&ranges, y),
+                    resolve(&ranges, z),
+                ),
+                NodeKind::Normalize3D { .. } => inf,
+                NodeKind::Mix { a, b, t } => iv::lerp(
+                    resolve(&ranges, a),
+                    resolve(&ranges, b),
+                    resolve(&ranges, t),
+                ),
+                NodeKind::Clamp { a, min_v, max_v } => iv::clamp(
+                    resolve(&ranges, a),
+                    resolve(&ranges, min_v),
+                    resolve(&ranges, max_v),
+                ),
+                // Curve/Noise — non-monotone; conservative.
+                NodeKind::Curve { .. } => inf,
+                NodeKind::Noise2D { .. } | NodeKind::Noise3D { .. } => inf,
+                // SDF nodes: easy ones compose from interval primitives.
+                NodeKind::SdfPlane { y, height } => resolve(&ranges, y) - resolve(&ranges, height),
+                NodeKind::SdfBox { .. } | NodeKind::SdfTorus { .. } => inf,
+                NodeKind::SdfSphere { x, y, z, radius } => {
+                    iv::get_length3(
+                        resolve(&ranges, x),
+                        resolve(&ranges, y),
+                        resolve(&ranges, z),
+                    ) - resolve(&ranges, radius)
+                }
+                NodeKind::SdfUnion { a, b } => {
+                    iv::min_interval(resolve(&ranges, a), resolve(&ranges, b))
+                }
+                NodeKind::SdfSubtract { a, b } => {
+                    iv::max_interval(resolve(&ranges, a), -resolve(&ranges, b))
+                }
+                NodeKind::SdfSmoothUnion { .. } | NodeKind::SdfSmoothSubtract { .. } => inf,
+                // Output passes through its input interval.
+                NodeKind::OutputSdf { a } => resolve(&ranges, a),
+            };
+            ranges[i] = r;
+        }
+        // The OutputSdf node (last in topo order) holds the SDF range.
+        self.nodes
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, n)| n.kind.is_output())
+            .map(|(i, _)| ranges[i])
+            .unwrap_or(inf)
+    }
+
     ///
     /// Mirrors [`Graph::generate`] semantics (same per-node math + edge cases)
     /// but resolves ports by dense index, stores intermediates in a dense
@@ -1588,6 +1711,129 @@ mod tests {
         assert!(cap_after_first >= 8);
         compiled.generate_slice(&inputs, 8, &mut scratch, &mut out, false);
         assert!(scratch.buffers[0].capacity() >= cap_after_first);
+    }
+
+    // ---- C3: analyze_range tests (audit §9.6-C3) ----
+
+    use crate::math::Interval;
+
+    #[test]
+    fn analyze_range_constant_graph_returns_constant_interval() {
+        // Constant(2.0) → OutputSdf. Range = [2, 2], straddles zero? No (min>0 → air).
+        let mut g = Graph::new();
+        let c = g.push(NodeKind::Constant(2.0));
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: c }),
+        });
+        let compiled = CompiledGraph::compile(&g).expect("compile");
+        let r = compiled.analyze_range(
+            Interval::infinity(),
+            Interval::infinity(),
+            Interval::infinity(),
+        );
+        assert!(r.is_single_value());
+        assert_eq!(r.min, 2.0);
+        assert!(r.min > 0.0, "constant 2.0 → fully air");
+    }
+
+    #[test]
+    fn analyze_range_sdf_plane_far_above_is_solid() {
+        // SdfPlane(y, height=5): SDF = y - 5. If y range is [0,1], SDF = [-5,-4] → solid.
+        let mut g = Graph::new();
+        let y = g.push(NodeKind::InputY);
+        let h = g.push(NodeKind::Constant(5.0));
+        let plane = g.push(NodeKind::SdfPlane {
+            y: Some(GraphPort { node: y }),
+            height: Some(GraphPort { node: h }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: plane }),
+        });
+        let compiled = CompiledGraph::compile(&g).expect("compile");
+        let r = compiled.analyze_range(
+            Interval::infinity(),
+            Interval::new(0.0, 1.0),
+            Interval::infinity(),
+        );
+        assert!(
+            r.max < 0.0,
+            "y-[0,1] h=5 → SDF [-5,-4] → fully solid; got {r:?}"
+        );
+    }
+
+    #[test]
+    fn analyze_range_sdf_plane_straddling_zero_needs_per_voxel_eval() {
+        // SdfPlane(y, height=5): SDF = y - 5. If y range is [3,7], SDF = [-2,2] → straddles zero.
+        let mut g = Graph::new();
+        let y = g.push(NodeKind::InputY);
+        let h = g.push(NodeKind::Constant(5.0));
+        let plane = g.push(NodeKind::SdfPlane {
+            y: Some(GraphPort { node: y }),
+            height: Some(GraphPort { node: h }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: plane }),
+        });
+        let compiled = CompiledGraph::compile(&g).expect("compile");
+        let r = compiled.analyze_range(
+            Interval::infinity(),
+            Interval::new(3.0, 7.0),
+            Interval::infinity(),
+        );
+        assert!(
+            r.min < 0.0 && r.max > 0.0,
+            "y-[3,7] h=5 → SDF [-2,2] → straddles; got {r:?}"
+        );
+    }
+
+    #[test]
+    fn analyze_range_noise_node_falls_back_to_infinity() {
+        // Noise2D is hard → conservative infinity. The graph must NOT be culled.
+        let mut g = Graph::new();
+        let x = g.push(NodeKind::InputX);
+        let y = g.push(NodeKind::InputY);
+        let _noise = g.push(NodeKind::Noise2D {
+            x: Some(GraphPort { node: x }),
+            y: Some(GraphPort { node: y }),
+            noise: crate::generators::simple::NoiseConfig::default(),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: _noise }),
+        });
+        let compiled = CompiledGraph::compile(&g).expect("compile");
+        let r = compiled.analyze_range(
+            Interval::new(0.0, 10.0),
+            Interval::new(0.0, 10.0),
+            Interval::infinity(),
+        );
+        // Infinity straddles zero → no culling (safe).
+        assert!(
+            r.min <= 0.0 && r.max >= 0.0,
+            "noise → infinity → straddles; got {r:?}"
+        );
+    }
+
+    #[test]
+    fn analyze_range_add_of_two_constants() {
+        // Constant(3) + Constant(4) = [7,7] → air.
+        let mut g = Graph::new();
+        let a = g.push(NodeKind::Constant(3.0));
+        let b = g.push(NodeKind::Constant(4.0));
+        let add = g.push(NodeKind::Add {
+            a: Some(GraphPort { node: a }),
+            b: Some(GraphPort { node: b }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: add }),
+        });
+        let compiled = CompiledGraph::compile(&g).expect("compile");
+        let r = compiled.analyze_range(
+            Interval::infinity(),
+            Interval::infinity(),
+            Interval::infinity(),
+        );
+        assert!(r.is_single_value());
+        assert_eq!(r.min, 7.0);
     }
 
     #[test]
