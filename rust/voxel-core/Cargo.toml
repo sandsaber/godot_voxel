@@ -54,3 +54,8 @@ zstd = ["dep:zstd"]
 [[bench]]
 name = "transvoxel_bench"
 harness = false
+
+# H2-MT: end-to-end MeshBlockTask throughput (single + multi-threaded paging).
+[[bench]]
+name = "mesh_block_bench"
+harness = false

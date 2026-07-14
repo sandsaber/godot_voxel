@@ -29,14 +29,16 @@ and Android aarch64 GDExtension smoke when triggered by hand.
 
 | Milestone | Суть | Статус |
 |---|---|---|
-| **M1** | Долг по ревью кода (§9 + §7): TSan, D7, волна 3 (B1/B3/B4/B5/C1/C3), H2-MT бенч, cargo-fuzz, CI, риски §7 | 🟡 в работе: **M1.A (TSan) ✅** + **M1.B (D7) ✅** + **M1.C (волна 3) ✅** + **M1.D (graph: C1+C3) ✅** + **M1.E.1 (cargo-fuzz + OOM fix) ✅ + M1.E.3 (§7 риски) ✅ закрыто 2026-07-12**; далее H2-MT bench (item 9) |
-| **M2** | Фаза 4 до GO: multi-LOD paging (`VoxelLodTerrain`), остаток `VoxelEngine`, `VoxelDataGrid`, сквозной TSan | ⏳ |
+| **M1** | Долг по ревью кода (§9 + §7): TSan, D7, волна 3 (B1/B3/B4/B5/C1/C3), H2-MT бенч, cargo-fuzz, CI, риски §7 | ✅ **ПОЛНОСТЬЮ ЗАКРЫТ 2026-07-12** — M1.A (TSan) + M1.B (D7) + M1.C (волна 3) + M1.D (graph C1+C3) + M1.E (cargo-fuzz + OOM fix + §7 риски + H2-MT bench). CI auto-trigger (item 11) отложено до стабилизации пилота. |
+| **M2** | Фаза 4 до GO: multi-LOD paging (`VoxelLodTerrain`), остаток `VoxelEngine`, `VoxelDataGrid`, сквозной TSan | ⏳ следующий |
 | **M3** | Фаза 5: Godot binding 75+ классов + editor/edition/modifiers/instancing/terrain-root | ⏳ |
 | **M4** | Паритет и удаление C++ из `master`; форк — чистый Rust-проект | ⏳ |
 
-**Текущий фокус:** M1.A–M1.D закрыты. M1.E.1 (cargo-fuzz: 3 таргета + найден/починен OOM bug в
-`decompressed_size`) и M1.E.3 (§7 риски: cpp-reference branch, REPORT.md snapshot, on-device
-deprecate) закрыты. Остаётся H2-MT bench harness (item 9) для полного закрытия M1.E.
+**Текущий фокус:** **M1 полностью закрыт.** Все основные пункты выполнены: TSan (0 data race),
+typed storage (D7), wave 3 mesher perf (B1+B3+B4+B5), graph compile-step + range analysis (C1+C3),
+cargo-fuzz (3 таргета + найден/починен OOM bug), H2-MT bench (2.25× MT speedup), §7 риски.
+H2-MT bench результаты: single 47µs/86 Melem/s, multi 673µs/194 Melem/s (4 потока).
+**Следующий milestone — M2:** multi-LOD paging (`VoxelLodTerrain`), главный блокер Фазы 4.
 
 **D7 (M1.B):** `Channel.data` теперь `enum ChannelData { U8/U16/U32/U64(Vec<_>) }` — hot loops
 depth-dispatch один раз на канал и индексируют типизированный slice напрямую. Wire-format
