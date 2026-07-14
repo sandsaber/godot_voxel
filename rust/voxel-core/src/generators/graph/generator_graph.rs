@@ -8,7 +8,8 @@
 
 use crate::generators::base::{GenResult, VoxelGenerator, VoxelQueryData};
 use crate::generators::graph::{
-    Graph, GraphInputs, GraphNodeId, GraphOutput, GraphScratch, NodeKind,
+    CompiledGraph, CompiledScratch, Graph, GraphInputs, GraphNodeId, GraphOutput, GraphScratch,
+    NodeKind,
 };
 use crate::math::Vector3i;
 use crate::storage::voxel_buffer::ChannelId;
@@ -18,12 +19,21 @@ use std::sync::Mutex;
 /// Wraps a [`Graph`] in a [`VoxelGenerator`] that fills a `VoxelBuffer` block
 /// by executing the graph one Y-slice at a time. The graph must contain at
 /// least one `OutputSdf` node; otherwise `generate_block` is a no-op.
+///
+/// C1 (audit §9.6-C1): the graph is compiled once (lazily on first
+/// `generate_block`) into a [`CompiledGraph`], which caches the topological
+/// order, classifies Y-independent nodes (XZ-outer-group prefix), and uses
+/// dense scratch buffers. Y-independent subgraphs are evaluated once per block
+/// and cached across Y-slices instead of recomputed every slice — up to
+/// ~block-height × fewer evaluations for terrain graphs.
 pub struct GraphGenerator {
     graph: Graph,
-    /// Per-instance scratch. The generator trait is shared (`&self`) so the
-    /// scratch owns its synchronization locally instead of forcing every
-    /// generator call through an outer engine-wide mutex.
+    /// Per-instance scratch for the legacy free-function path.
     scratch: Mutex<GraphScratch>,
+    /// Lazily-compiled analysis of `graph` (built on first `generate_block`).
+    compiled: Mutex<Option<CompiledGraph>>,
+    /// Dense scratch for the compiled path.
+    compiled_scratch: Mutex<CompiledScratch>,
     /// Optional scaling applied to world coordinates before they're fed into
     /// the graph (mirrors C++ `lod` stride handling). `1.0` is the identity.
     coordinate_scale: f32,
@@ -34,6 +44,8 @@ impl GraphGenerator {
         Self {
             graph,
             scratch: Mutex::new(GraphScratch::new()),
+            compiled: Mutex::new(None),
+            compiled_scratch: Mutex::new(CompiledScratch::new()),
             coordinate_scale: 1.0,
         }
     }
@@ -58,20 +70,42 @@ impl GraphGenerator {
             .find(|n| matches!(n.kind, NodeKind::OutputSdf { .. }))
             .map(|n| n.id)
     }
+
+    /// Ensure the compiled graph is built (once). Returns a clone so the caller
+    /// doesn't hold the lock across generation. On a topology error (cycle /
+    /// dangling port) the legacy path is used instead.
+    fn ensure_compiled(&self) -> Option<CompiledGraph> {
+        let mut guard = self.compiled.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.is_none() {
+            *guard = CompiledGraph::compile(&self.graph).ok();
+        }
+        guard.clone()
+    }
 }
 
 impl VoxelGenerator for GraphGenerator {
     fn generate_block(&self, input: VoxelQueryData<'_>) -> GenResult {
-        let mut scratch = self
-            .scratch
-            .lock()
-            .expect("graph generator scratch poisoned");
-        generate_block_with_graph(&self.graph, input, &mut scratch, self.coordinate_scale);
+        // Prefer the compiled path (C1). Fall back to the legacy path if the
+        // graph failed to compile (cycle / dangling port).
+        if let Some(compiled) = self.ensure_compiled() {
+            let mut cscratch = self
+                .compiled_scratch
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            generate_block_with_compiled_graph(
+                &compiled,
+                input,
+                &mut cscratch,
+                self.coordinate_scale,
+            );
+        } else {
+            let mut scratch = self.scratch.lock().unwrap_or_else(|e| e.into_inner());
+            generate_block_with_graph(&self.graph, input, &mut scratch, self.coordinate_scale);
+        }
         GenResult::default()
     }
 
     fn used_channels_mask(&self) -> u32 {
-        // The minimal port always writes the SDF channel.
         1 << ChannelId::Sdf.index()
     }
 }
@@ -131,6 +165,58 @@ pub fn generate_block_with_graph(
         // Copy the first SDF output (if any) into the VoxelBuffer's SDF
         // channel for this slice. The C++ runtime supports multiple outputs;
         // the minimal port merges them by writing only the first.
+        if let Some((GraphOutput::Sdf, slice)) = outputs.first() {
+            write_sdf_slice(input.buffer, sdf_channel, size, y, slice);
+        }
+    }
+
+    input.buffer.compress_uniform_channels();
+}
+
+/// Compiled-path block generation with XZ-outer-group caching (audit §9.6-C1).
+///
+/// Equivalent to [`generate_block_with_graph`] but drives a [`CompiledGraph`]:
+/// the Y-independent prefix is evaluated once on the first Y-slice and cached
+/// across subsequent slices; only the Y-dependent tail re-runs per slice. For
+/// terrain graphs (mostly XZ-driven) this avoids recomputing nearly the entire
+/// graph on each of the block's Y-slices.
+pub fn generate_block_with_compiled_graph(
+    compiled: &CompiledGraph,
+    input: VoxelQueryData<'_>,
+    scratch: &mut CompiledScratch,
+    coordinate_scale: f32,
+) {
+    let size = input.buffer.size();
+    let sdf_channel = ChannelId::Sdf.index();
+    let lod_stride = (1u32 << input.lod) as f32;
+
+    // No output node → leave the buffer at its SDF default.
+    if !compiled.nodes().iter().any(|n| n.kind.is_output()) {
+        return;
+    }
+
+    let slice_size = (size.x as usize) * (size.z as usize);
+    // XZ coordinates are identical across Y-slices — build once, reuse.
+    let mut xs: Vec<f32> = vec![0.0; slice_size];
+    let mut zs: Vec<f32> = vec![0.0; slice_size];
+    for z in 0..size.z {
+        for x in 0..size.x {
+            let i = (x as usize) + (z as usize) * (size.x as usize);
+            xs[i] = (input.origin_in_voxels.x as f32 + x as f32 * lod_stride) * coordinate_scale;
+            zs[i] = (input.origin_in_voxels.z as f32 + z as f32 * lod_stride) * coordinate_scale;
+        }
+    }
+
+    let mut outputs: Vec<(GraphOutput, Vec<f32>)> = Vec::new();
+    for y in 0..size.y {
+        let world_y = (input.origin_in_voxels.y as f32 + y as f32 * lod_stride) * coordinate_scale;
+        let inputs = GraphInputs {
+            x: &xs,
+            y: world_y,
+            z: &zs,
+        };
+        // First slice: full eval. Subsequent slices: XZ-prefix cached.
+        compiled.generate_slice(&inputs, slice_size, scratch, &mut outputs, y > 0);
         if let Some((GraphOutput::Sdf, slice)) = outputs.first() {
             write_sdf_slice(input.buffer, sdf_channel, size, y, slice);
         }
@@ -345,5 +431,61 @@ mod tests {
     fn graph_generator_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<GraphGenerator>();
+    }
+
+    #[test]
+    fn compiled_path_xz_cache_produces_consistent_output_across_y_slices() {
+        // A pure-XZ graph (InputX * InputZ) on a tall block exercises the
+        // XZ-prefix cache: the first Y-slice runs the full graph, subsequent
+        // slices reuse the cached prefix. The output must be identical on
+        // every Y-slice (the graph has no Y-dependence).
+        use crate::storage::VoxelFormat;
+        let mut g = crate::generators::graph::Graph::new();
+        let x = g.push(NodeKind::InputX);
+        let z = g.push(NodeKind::InputZ);
+        let mul = g.push(NodeKind::Multiply {
+            a: Some(crate::generators::graph::GraphPort { node: x }),
+            b: Some(crate::generators::graph::GraphPort { node: z }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(crate::generators::graph::GraphPort { node: mul }),
+        });
+        let gen = GraphGenerator::new(g);
+        let mut buffer = VoxelBuffer::with_size(Vector3i::new(2, 4, 2));
+        VoxelFormat::new().configure_buffer(&mut buffer);
+        gen.generate_block(VoxelQueryData {
+            buffer: &mut buffer,
+            origin_in_voxels: Vector3i::new(1, 0, 1),
+            lod: 0,
+        });
+        // Y=0 and Y=3 slices must match (XZ-only graph).
+        let y0 = buffer.get_voxel_f(0, 0, 0, ChannelId::Sdf.index());
+        let y3 = buffer.get_voxel_f(0, 3, 0, ChannelId::Sdf.index());
+        assert!(
+            (y0 - y3).abs() < 1e-5,
+            "XZ-only graph should produce identical output on every Y-slice: y0={y0}, y3={y3}"
+        );
+    }
+
+    #[test]
+    fn compiled_path_matches_legacy_for_sin_plus_one() {
+        // The sin(x)+1 canary graph through the compiled path must produce the
+        // same SDF values as the existing golden test asserts. Uses Bit32 SDF
+        // depth (matching the golden test) for full float precision.
+        use crate::storage::{ChannelDepth, VoxelFormat};
+        let gen = GraphGenerator::new(sin_plus_one_graph());
+        let mut buffer = VoxelBuffer::with_size(Vector3i::new(4, 2, 4));
+        let mut format = VoxelFormat::new();
+        format.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+        format.configure_buffer(&mut buffer);
+        gen.generate_block(VoxelQueryData {
+            buffer: &mut buffer,
+            origin_in_voxels: Vector3i::new(10, 0, 0),
+            lod: 0,
+        });
+        let v00 = buffer.get_voxel_f(0, 0, 0, ChannelId::Sdf.index());
+        let v21 = buffer.get_voxel_f(2, 1, 2, ChannelId::Sdf.index());
+        assert!((v00 - (10.0f32.sin() + 1.0)).abs() < 1e-4, "v00={v00}");
+        assert!((v21 - (12.0f32.sin() + 1.0)).abs() < 1e-4, "v21={v21}");
     }
 }

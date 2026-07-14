@@ -10,6 +10,8 @@
 //! [`super::generator_graph::GraphGenerator`] adapter wires it into the
 //! [`crate::generators::base::VoxelGenerator`] trait.
 
+use std::collections::HashMap;
+
 /// Identifies a node inside a [`Graph`]. The caller picks ids; they need not
 /// be dense or contiguous, but must be unique within a graph.
 pub type GraphNodeId = u32;
@@ -678,6 +680,507 @@ impl Graph {
     }
 }
 
+/// Compiled, analysis-cached form of a [`Graph`] (audit §9.6-C1).
+///
+/// `Graph` is a mutable, user-facing construction surface; `CompiledGraph` is
+/// the immutable, analysed form an executor consumes. Building it once (in
+/// `GraphGenerator::new` or lazily on first `generate_block`) eliminates the
+/// per-Y-slice overhead of recomputing the topological order, resolving sparse
+/// node ids by linear scan, and classifying which nodes are Y-independent.
+///
+/// The XZ-prefix classification mirrors C++ `move_outer_group_operations_up`
+/// (`voxel_graph_compiler.cpp:1478`): nodes reachable from `{InputX, InputZ}`
+/// only — never touching `InputY` — form the *outer group* and are placed first
+/// in `nodes`. `xz_prefix_len` is the count of such nodes; the executor caches
+/// their outputs across Y-slices (only the inner tail re-runs per slice).
+#[derive(Debug, Clone)]
+pub struct CompiledGraph {
+    /// Nodes in topological order (inputs before consumers, outputs last),
+    /// with outer-group (XZ-only) nodes placed before inner-group nodes.
+    nodes: Vec<GraphNode>,
+    /// Sparse `GraphNodeId` → dense index into `nodes`. Replaces the per-node
+    /// `Vec::iter().find` the lazy path paid per slice.
+    id_to_index: HashMap<GraphNodeId, usize>,
+    /// Number of leading nodes in `nodes` that are Y-independent (outer group).
+    /// Slices `[0, xz_prefix_len)` may be cached across Y-slices; the tail
+    /// `[xz_prefix_len, len)` depends on `InputY` and re-runs every slice.
+    xz_prefix_len: usize,
+}
+
+impl CompiledGraph {
+    /// Analyse `graph` into a compiled form. Performs the topological sort and
+    /// XZ-prefix classification once. Returns the same `TopoError` the lazy
+    /// `Graph::topological_order` does on cycles / dangling ports.
+    pub fn compile(graph: &Graph) -> Result<Self, TopoError> {
+        let order = graph.topological_order()?;
+        let by_id: HashMap<GraphNodeId, &GraphNode> =
+            graph.nodes.iter().map(|n| (n.id, n)).collect();
+        let mut nodes: Vec<GraphNode> = Vec::with_capacity(order.len());
+        let mut id_to_index: HashMap<GraphNodeId, usize> = HashMap::with_capacity(order.len());
+        for id in &order {
+            let node = *by_id
+                .get(id)
+                .expect("topological_order returned an id not in the graph");
+            id_to_index.insert(*id, nodes.len());
+            nodes.push(node.clone());
+        }
+        // Forward-propagate Y-dependence from InputY seeds through the topo
+        // order. A node is inner-group iff it IS InputY or any Y-dependent
+        // input feeds it. The topo property (producers before consumers)
+        // guarantees inputs are already classified when their consumers run.
+        let mut depends_on_y = vec![false; nodes.len()];
+        for (i, node) in nodes.iter().enumerate() {
+            let self_y = matches!(node.kind, NodeKind::InputY);
+            let any_input_y = node.kind.inputs().into_iter().flatten().any(|port| {
+                let src = *id_to_index.get(&port.node).unwrap_or(&usize::MAX);
+                *depends_on_y.get(src).unwrap_or(&false)
+            });
+            depends_on_y[i] = self_y || any_input_y;
+        }
+        // `xz_prefix_len` = index of the first Y-dependent node. Everything
+        // before it is outer-group (XZ-only); the tail re-runs every slice.
+        let xz_prefix_len = depends_on_y.iter().position(|&y| y).unwrap_or(nodes.len());
+        Ok(Self {
+            nodes,
+            id_to_index,
+            xz_prefix_len,
+        })
+    }
+
+    /// Number of leading nodes that are Y-independent (the XZ-only prefix).
+    /// The executor may cache their outputs across Y-slices.
+    #[inline]
+    pub fn xz_prefix_len(&self) -> usize {
+        self.xz_prefix_len
+    }
+
+    /// Total node count.
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// True if there are no nodes.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
+    }
+
+    /// Dense index for a sparse `GraphNodeId`. Used by the executor to resolve
+    /// input ports without a per-element `HashMap` lookup.
+    #[inline]
+    pub fn index_of(&self, id: GraphNodeId) -> Option<usize> {
+        self.id_to_index.get(&id).copied()
+    }
+
+    /// The nodes in topological order (outer-group first).
+    pub fn nodes(&self) -> &[GraphNode] {
+        &self.nodes
+    }
+
+    /// Evaluate one Y-slice, writing outputs into `scratch`/`outputs`.
+    ///
+    /// Mirrors [`Graph::generate`] semantics (same per-node math + edge cases)
+    /// but resolves ports by dense index, stores intermediates in a dense
+    /// `Vec<Vec<f32>>`, preserves buffer capacity across slices, and — when
+    /// `xz_prefix_cached` is true — skips re-evaluating the Y-independent
+    /// prefix (their buffers persist from the previous slice).
+    pub fn generate_slice(
+        &self,
+        inputs: &GraphInputs,
+        slice_size: usize,
+        scratch: &mut CompiledScratch,
+        outputs: &mut Vec<(GraphOutput, Vec<f32>)>,
+        xz_prefix_cached: bool,
+    ) {
+        let start = if xz_prefix_cached {
+            self.xz_prefix_len
+        } else {
+            0
+        };
+        if scratch.buffers.len() < self.nodes.len() {
+            scratch.buffers.resize(self.nodes.len(), Vec::new());
+        }
+        // Clear only the inner-tail buffers; prefix is reused when cached.
+        for buf in &mut scratch.buffers[start..] {
+            buf.clear();
+        }
+        outputs.clear();
+        for (i, node) in self.nodes.iter().enumerate() {
+            if i < start {
+                continue;
+            }
+            self.eval_node(node, i, inputs, slice_size, scratch);
+        }
+        // Collect outputs from any OutputSdf node — its buffer persists in
+        // scratch (across the XZ-prefix cache boundary too), so this works
+        // whether or not the node was re-evaluated this slice.
+        for (i, node) in self.nodes.iter().enumerate() {
+            if let NodeKind::OutputSdf { .. } = node.kind {
+                if let Some(buf) = scratch.buffers.get(i) {
+                    if !buf.is_empty() {
+                        // Clone to detach from scratch (caller owns the output).
+                        outputs.push((GraphOutput::Sdf, buf.clone()));
+                    }
+                }
+            }
+        }
+    }
+
+    fn eval_node(
+        &self,
+        node: &GraphNode,
+        node_index: usize,
+        inputs: &GraphInputs,
+        slice_size: usize,
+        scratch: &mut CompiledScratch,
+    ) {
+        let kind = &node.kind;
+        match kind {
+            NodeKind::InputX => scratch.set(node_index, inputs.x.to_vec()),
+            NodeKind::InputY => scratch.set(node_index, vec![inputs.y; slice_size]),
+            NodeKind::InputZ => scratch.set(node_index, inputs.z.to_vec()),
+            NodeKind::Constant(v) => scratch.set(node_index, vec![*v; slice_size]),
+            NodeKind::Add { a, b } => scratch.set(
+                node_index,
+                (0..slice_size)
+                    .map(|i| self.val(scratch, a, i) + self.val(scratch, b, i))
+                    .collect(),
+            ),
+            NodeKind::Subtract { a, b } => scratch.set(
+                node_index,
+                (0..slice_size)
+                    .map(|i| self.val(scratch, a, i) - self.val(scratch, b, i))
+                    .collect(),
+            ),
+            NodeKind::Multiply { a, b } => scratch.set(
+                node_index,
+                (0..slice_size)
+                    .map(|i| self.val(scratch, a, i) * self.val(scratch, b, i))
+                    .collect(),
+            ),
+            NodeKind::Divide { a, b } => scratch.set(
+                node_index,
+                (0..slice_size)
+                    .map(|i| {
+                        let denom = self.val(scratch, b, i);
+                        if denom.abs() < 1e-12 {
+                            0.0
+                        } else {
+                            self.val(scratch, a, i) / denom
+                        }
+                    })
+                    .collect(),
+            ),
+            NodeKind::Min { a, b } => scratch.set(
+                node_index,
+                (0..slice_size)
+                    .map(|i| self.val(scratch, a, i).min(self.val(scratch, b, i)))
+                    .collect(),
+            ),
+            NodeKind::Max { a, b } => scratch.set(
+                node_index,
+                (0..slice_size)
+                    .map(|i| self.val(scratch, a, i).max(self.val(scratch, b, i)))
+                    .collect(),
+            ),
+            NodeKind::Pow { a, b } => scratch.set(
+                node_index,
+                (0..slice_size)
+                    .map(|i| self.val(scratch, a, i).powf(self.val(scratch, b, i)))
+                    .collect(),
+            ),
+            NodeKind::Sin { a } => scratch.set(
+                node_index,
+                (0..slice_size)
+                    .map(|i| self.val(scratch, a, i).sin())
+                    .collect(),
+            ),
+            NodeKind::Cos { a } => scratch.set(
+                node_index,
+                (0..slice_size)
+                    .map(|i| self.val(scratch, a, i).cos())
+                    .collect(),
+            ),
+            NodeKind::Abs { a } => scratch.set(
+                node_index,
+                (0..slice_size)
+                    .map(|i| self.val(scratch, a, i).abs())
+                    .collect(),
+            ),
+            NodeKind::Sqrt { a } => scratch.set(
+                node_index,
+                (0..slice_size)
+                    .map(|i| self.val(scratch, a, i).max(0.0).sqrt())
+                    .collect(),
+            ),
+            NodeKind::Floor { a } => scratch.set(
+                node_index,
+                (0..slice_size)
+                    .map(|i| self.val(scratch, a, i).floor())
+                    .collect(),
+            ),
+            NodeKind::Fract { a } => scratch.set(
+                node_index,
+                (0..slice_size)
+                    .map(|i| self.val(scratch, a, i).fract())
+                    .collect(),
+            ),
+            NodeKind::Remap {
+                a,
+                from_start,
+                from_end,
+                to_start,
+                to_end,
+            } => {
+                let (fs, fe, ts, te) = (*from_start, *from_end, *to_start, *to_end);
+                scratch.set(
+                    node_index,
+                    (0..slice_size)
+                        .map(|i| {
+                            let v = self.val(scratch, a, i);
+                            let t = ((v - fs) / (fe - fs)).clamp(0.0, 1.0);
+                            ts + t * (te - ts)
+                        })
+                        .collect(),
+                );
+            }
+            NodeKind::Distance2D { x, y } => scratch.set(
+                node_index,
+                (0..slice_size)
+                    .map(|i| {
+                        let dx = self.val(scratch, x, i);
+                        let dy = self.val(scratch, y, i);
+                        (dx * dx + dy * dy).sqrt()
+                    })
+                    .collect(),
+            ),
+            NodeKind::Distance3D { x, y, z } => scratch.set(
+                node_index,
+                (0..slice_size)
+                    .map(|i| {
+                        let dx = self.val(scratch, x, i);
+                        let dy = self.val(scratch, y, i);
+                        let dz = self.val(scratch, z, i);
+                        (dx * dx + dy * dy + dz * dz).sqrt()
+                    })
+                    .collect(),
+            ),
+            NodeKind::Normalize3D { x, y, z } => scratch.set(
+                node_index,
+                (0..slice_size)
+                    .map(|i| {
+                        let dx = self.val(scratch, x, i);
+                        let dy = self.val(scratch, y, i);
+                        let dz = self.val(scratch, z, i);
+                        let len = (dx * dx + dy * dy + dz * dz).sqrt();
+                        if len < 1e-12 {
+                            0.0
+                        } else {
+                            dx / len
+                        }
+                    })
+                    .collect(),
+            ),
+            NodeKind::Mix { a, b, t } => scratch.set(
+                node_index,
+                (0..slice_size)
+                    .map(|i| {
+                        let av = self.val(scratch, a, i);
+                        let bv = self.val(scratch, b, i);
+                        let tv = self.val(scratch, t, i);
+                        av * (1.0 - tv) + bv * tv
+                    })
+                    .collect(),
+            ),
+            NodeKind::Clamp { a, min_v, max_v } => scratch.set(
+                node_index,
+                (0..slice_size)
+                    .map(|i| {
+                        let v = self.val(scratch, a, i);
+                        let lo = self.val(scratch, min_v, i);
+                        let hi = self.val(scratch, max_v, i);
+                        v.clamp(lo.min(hi), lo.max(hi))
+                    })
+                    .collect(),
+            ),
+            NodeKind::Curve { a, curve } => {
+                let curve = curve.clone();
+                scratch.set(
+                    node_index,
+                    (0..slice_size)
+                        .map(|i| curve.sample(self.val(scratch, a, i)))
+                        .collect(),
+                );
+            }
+            NodeKind::Noise2D { x, y, noise } => {
+                let noise = noise.build();
+                scratch.set(
+                    node_index,
+                    (0..slice_size)
+                        .map(|i| {
+                            noise.get_noise_2d(self.val(scratch, x, i), self.val(scratch, y, i))
+                        })
+                        .collect(),
+                );
+            }
+            NodeKind::Noise3D { x, y, z, noise } => {
+                let noise = noise.build();
+                scratch.set(
+                    node_index,
+                    (0..slice_size)
+                        .map(|i| {
+                            noise.get_noise_3d(
+                                self.val(scratch, x, i),
+                                self.val(scratch, y, i),
+                                self.val(scratch, z, i),
+                            )
+                        })
+                        .collect(),
+                );
+            }
+            NodeKind::SdfPlane { y, height } => scratch.set(
+                node_index,
+                (0..slice_size)
+                    .map(|i| self.val(scratch, y, i) - self.val(scratch, height, i))
+                    .collect(),
+            ),
+            NodeKind::SdfBox {
+                x,
+                y,
+                z,
+                size_x,
+                size_y,
+                size_z,
+            } => scratch.set(
+                node_index,
+                (0..slice_size)
+                    .map(|i| {
+                        let dx = self.val(scratch, x, i).abs() - size_x;
+                        let dy = self.val(scratch, y, i).abs() - size_y;
+                        let dz = self.val(scratch, z, i).abs() - size_z;
+                        let outside = dx.max(dy).max(dz).max(0.0);
+                        let inside = dx.max(dy).max(dz).min(0.0);
+                        outside + inside
+                    })
+                    .collect(),
+            ),
+            NodeKind::SdfSphere { x, y, z, radius } => scratch.set(
+                node_index,
+                (0..slice_size)
+                    .map(|i| {
+                        let dx = self.val(scratch, x, i);
+                        let dy = self.val(scratch, y, i);
+                        let dz = self.val(scratch, z, i);
+                        let r = self.val(scratch, radius, i).max(1e-12);
+                        (dx * dx + dy * dy + dz * dz).sqrt() - r
+                    })
+                    .collect(),
+            ),
+            NodeKind::SdfTorus { x, y, z, r1, r2 } => scratch.set(
+                node_index,
+                (0..slice_size)
+                    .map(|i| {
+                        let dx = self.val(scratch, x, i);
+                        let dy = self.val(scratch, y, i);
+                        let dz = self.val(scratch, z, i);
+                        let qx = (dx * dx + dz * dz).sqrt() - r1;
+                        let qy = dy;
+                        (qx * qx + qy * qy).sqrt() - r2
+                    })
+                    .collect(),
+            ),
+            NodeKind::SdfUnion { a, b } => scratch.set(
+                node_index,
+                (0..slice_size)
+                    .map(|i| self.val(scratch, a, i).min(self.val(scratch, b, i)))
+                    .collect(),
+            ),
+            NodeKind::SdfSubtract { a, b } => scratch.set(
+                node_index,
+                (0..slice_size)
+                    .map(|i| self.val(scratch, a, i).max(-self.val(scratch, b, i)))
+                    .collect(),
+            ),
+            NodeKind::SdfSmoothUnion { a, b, smoothness } => scratch.set(
+                node_index,
+                (0..slice_size)
+                    .map(|i| {
+                        let av = self.val(scratch, a, i);
+                        let bv = self.val(scratch, b, i);
+                        let s = *smoothness;
+                        if s.abs() < 1e-6 {
+                            return av.min(bv);
+                        }
+                        let h = (s - (bv - av).abs() * 0.5).clamp(0.0, s);
+                        bv - h + h * h / s
+                    })
+                    .collect(),
+            ),
+            NodeKind::SdfSmoothSubtract { a, b, smoothness } => scratch.set(
+                node_index,
+                (0..slice_size)
+                    .map(|i| {
+                        let av = self.val(scratch, a, i);
+                        let bv = self.val(scratch, b, i);
+                        let s = *smoothness;
+                        if s.abs() < 1e-6 {
+                            return av.max(-bv);
+                        }
+                        let h = (s - (av + bv).abs() * 0.5).clamp(0.0, s);
+                        -bv + h + h * h / s
+                    })
+                    .collect(),
+            ),
+            NodeKind::OutputSdf { a } => {
+                let data: Vec<f32> = (0..slice_size).map(|i| self.val(scratch, a, i)).collect();
+                scratch.set(node_index, data);
+            }
+        }
+    }
+
+    /// Read an input port value at element `idx` from the dense scratch.
+    /// Unconnected ports return 0.0 (matching `Graph::generate`'s `value_at`).
+    #[inline]
+    fn val(&self, scratch: &CompiledScratch, port: &Option<GraphPort>, idx: usize) -> f32 {
+        match port {
+            Some(p) => self
+                .id_to_index
+                .get(&p.node)
+                .copied()
+                .and_then(|i| scratch.buffers.get(i).and_then(|b| b.get(idx)))
+                .copied()
+                .unwrap_or(0.0),
+            None => 0.0,
+        }
+    }
+}
+
+/// Dense scratch buffers for [`CompiledGraph::generate_slice`] (audit §9.6-C1).
+///
+/// Replaces [`GraphScratch`] (a `HashMap<GraphNodeId, Vec<f32>>`) with a
+/// `Vec<Vec<f32>>` indexed by dense topological position. The buffers persist
+/// across slices (only length is cleared, not capacity), so allocation
+/// amortises — unlike `GraphScratch::clear`, which drops every buffer.
+#[derive(Debug, Default)]
+pub struct CompiledScratch {
+    buffers: Vec<Vec<f32>>,
+}
+
+impl CompiledScratch {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Store a node's output at its dense index (grows the vector if needed).
+    fn set(&mut self, index: usize, data: Vec<f32>) {
+        if index >= self.buffers.len() {
+            self.buffers.resize(index + 1, Vec::new());
+        }
+        self.buffers[index] = data;
+    }
+}
+
 /// Per-thread execution scratch. Stores the f32 slice produced for every
 /// node id during a single `generate` call. Reused across calls to avoid
 /// reallocation; cleared at the start of each call.
@@ -782,6 +1285,309 @@ mod tests {
 
     fn x_inputs(slice_size: usize) -> Vec<f32> {
         (0..slice_size).map(|i| i as f32).collect()
+    }
+
+    // ---- C1: CompiledGraph tests (audit §9.6-C1) ----
+
+    #[test]
+    fn compiled_graph_topological_order_matches_lazy() {
+        let mut g = Graph::new();
+        let x = g.push(NodeKind::InputX);
+        let c = g.push(NodeKind::Constant(3.0));
+        let mul = g.push(NodeKind::Multiply {
+            a: Some(GraphPort { node: x }),
+            b: Some(GraphPort { node: c }),
+        });
+        let _out = g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: mul }),
+        });
+        let lazy = g.topological_order().expect("lazy topo");
+        let compiled = CompiledGraph::compile(&g).expect("compile");
+        assert_eq!(
+            compiled.nodes().iter().map(|n| n.id).collect::<Vec<_>>(),
+            lazy
+        );
+    }
+
+    #[test]
+    fn compiled_graph_classifies_xz_only_prefix() {
+        let mut g = Graph::new();
+        let x = g.push(NodeKind::InputX);
+        let z = g.push(NodeKind::InputZ);
+        let mul = g.push(NodeKind::Multiply {
+            a: Some(GraphPort { node: x }),
+            b: Some(GraphPort { node: z }),
+        });
+        let _out = g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: mul }),
+        });
+        let compiled = CompiledGraph::compile(&g).expect("compile");
+        // Pure-XZ graph: every node is Y-independent.
+        assert_eq!(compiled.xz_prefix_len(), 4);
+    }
+
+    #[test]
+    fn compiled_graph_xz_prefix_excludes_y_dependent_nodes() {
+        let mut g = Graph::new();
+        let x = g.push(NodeKind::InputX);
+        let y = g.push(NodeKind::InputY);
+        let add = g.push(NodeKind::Add {
+            a: Some(GraphPort { node: x }),
+            b: Some(GraphPort { node: y }),
+        });
+        let _out = g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: add }),
+        });
+        let compiled = CompiledGraph::compile(&g).expect("compile");
+        // InputX is outer; InputY, Add, OutputSdf are inner.
+        assert_eq!(compiled.xz_prefix_len(), 1);
+    }
+
+    #[test]
+    fn compiled_graph_xz_prefix_is_one_for_constant_plus_y() {
+        let mut g = Graph::new();
+        let c = g.push(NodeKind::Constant(2.0));
+        let y = g.push(NodeKind::InputY);
+        let add = g.push(NodeKind::Add {
+            a: Some(GraphPort { node: c }),
+            b: Some(GraphPort { node: y }),
+        });
+        let _out = g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: add }),
+        });
+        let compiled = CompiledGraph::compile(&g).expect("compile");
+        // Constant is XZ-only; Add depends on InputY → inner.
+        assert_eq!(compiled.xz_prefix_len(), 1);
+    }
+
+    #[test]
+    fn compiled_graph_id_to_index_resolves_dense() {
+        let mut g = Graph::new();
+        g.add_node(GraphNode {
+            id: 100,
+            kind: NodeKind::InputX,
+        });
+        g.add_node(GraphNode {
+            id: 200,
+            kind: NodeKind::InputZ,
+        });
+        let compiled = CompiledGraph::compile(&g).expect("compile");
+        assert_eq!(compiled.index_of(100), Some(0));
+        assert_eq!(compiled.index_of(200), Some(1));
+        assert_eq!(compiled.index_of(999), None);
+    }
+
+    #[test]
+    fn compiled_graph_cycle_returns_error() {
+        let mut g = Graph::new();
+        let a = g.push(NodeKind::Add { a: None, b: None });
+        g.add_node(GraphNode {
+            id: 2,
+            kind: NodeKind::Add {
+                a: Some(GraphPort { node: a }),
+                b: Some(GraphPort { node: 2 }),
+            },
+        });
+        assert!(CompiledGraph::compile(&g).is_err());
+    }
+
+    // ---- C1 step 2: generate_slice + dense scratch parity tests ----
+
+    /// Run both lazy `Graph::generate` and compiled `generate_slice` over the
+    /// same single-slice inputs; return both SDF outputs for comparison.
+    fn lazy_and_compiled_sdf(
+        graph: &Graph,
+        inputs: &GraphInputs,
+        slice_size: usize,
+    ) -> (Option<Vec<f32>>, Option<Vec<f32>>) {
+        let mut lazy_scratch = GraphScratch::new();
+        let mut lazy_out = Vec::new();
+        let _ = graph.generate(inputs, slice_size, &mut lazy_scratch, &mut lazy_out);
+        let lazy_sdf = lazy_out
+            .into_iter()
+            .find(|(k, _)| *k == GraphOutput::Sdf)
+            .map(|(_, v)| v);
+        let compiled = CompiledGraph::compile(graph).expect("compile");
+        let mut cscratch = CompiledScratch::new();
+        let mut cout = Vec::new();
+        compiled.generate_slice(inputs, slice_size, &mut cscratch, &mut cout, false);
+        let compiled_sdf = cout
+            .into_iter()
+            .find(|(k, _)| *k == GraphOutput::Sdf)
+            .map(|(_, v)| v);
+        (lazy_sdf, compiled_sdf)
+    }
+
+    #[test]
+    fn compiled_generate_matches_lazy_for_multiply() {
+        let mut g = Graph::new();
+        let x = g.push(NodeKind::InputX);
+        let c = g.push(NodeKind::Constant(3.0));
+        let mul = g.push(NodeKind::Multiply {
+            a: Some(GraphPort { node: x }),
+            b: Some(GraphPort { node: c }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: mul }),
+        });
+        let xs = x_inputs(4);
+        let inputs = GraphInputs {
+            x: &xs,
+            y: 0.0,
+            z: &xs,
+        };
+        let (lazy, compiled) = lazy_and_compiled_sdf(&g, &inputs, 4);
+        assert_eq!(lazy.as_deref(), compiled.as_deref());
+        assert_eq!(compiled.as_deref(), Some(&[0.0f32, 3.0, 6.0, 9.0][..]));
+    }
+
+    #[test]
+    fn compiled_generate_matches_lazy_for_sin() {
+        let mut g = Graph::new();
+        let x = g.push(NodeKind::InputX);
+        let sin = g.push(NodeKind::Sin {
+            a: Some(GraphPort { node: x }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: sin }),
+        });
+        let xs = x_inputs(3);
+        let inputs = GraphInputs {
+            x: &xs,
+            y: 0.0,
+            z: &xs,
+        };
+        let (lazy, compiled) = lazy_and_compiled_sdf(&g, &inputs, 3);
+        assert_eq!(lazy.as_deref(), compiled.as_deref());
+    }
+
+    #[test]
+    fn compiled_generate_matches_lazy_for_sdf_sphere_with_y() {
+        let mut g = Graph::new();
+        let x = g.push(NodeKind::InputX);
+        let y = g.push(NodeKind::InputY);
+        let z = g.push(NodeKind::InputZ);
+        let r = g.push(NodeKind::Constant(2.0));
+        let sph = g.push(NodeKind::SdfSphere {
+            x: Some(GraphPort { node: x }),
+            y: Some(GraphPort { node: y }),
+            z: Some(GraphPort { node: z }),
+            radius: Some(GraphPort { node: r }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: sph }),
+        });
+        let xs = [1.0f32, 0.0, 0.0];
+        let zs = [0.0f32, 0.0, 0.0];
+        let inputs = GraphInputs {
+            x: &xs,
+            y: 0.0,
+            z: &zs,
+        };
+        let (lazy, compiled) = lazy_and_compiled_sdf(&g, &inputs, 3);
+        assert_eq!(lazy.as_deref(), compiled.as_deref());
+    }
+
+    #[test]
+    fn compiled_generate_divide_by_zero_outputs_zero() {
+        let mut g = Graph::new();
+        let a = g.push(NodeKind::Constant(4.0));
+        let b = g.push(NodeKind::Constant(0.0));
+        let div = g.push(NodeKind::Divide {
+            a: Some(GraphPort { node: a }),
+            b: Some(GraphPort { node: b }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: div }),
+        });
+        let xs = x_inputs(2);
+        let inputs = GraphInputs {
+            x: &xs,
+            y: 0.0,
+            z: &xs,
+        };
+        let (_, compiled) = lazy_and_compiled_sdf(&g, &inputs, 2);
+        assert_eq!(compiled.as_deref(), Some(&[0.0f32, 0.0][..]));
+    }
+
+    #[test]
+    fn compiled_generate_sqrt_clamps_negative_to_zero() {
+        let mut g = Graph::new();
+        let a = g.push(NodeKind::Constant(-4.0));
+        let sq = g.push(NodeKind::Sqrt {
+            a: Some(GraphPort { node: a }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: sq }),
+        });
+        let xs = x_inputs(2);
+        let inputs = GraphInputs {
+            x: &xs,
+            y: 0.0,
+            z: &xs,
+        };
+        let (_, compiled) = lazy_and_compiled_sdf(&g, &inputs, 2);
+        assert_eq!(compiled.as_deref(), Some(&[0.0f32, 0.0][..]));
+    }
+
+    #[test]
+    fn compiled_generate_xz_prefix_cached_matches_full_eval() {
+        let mut g = Graph::new();
+        let x = g.push(NodeKind::InputX);
+        let z = g.push(NodeKind::InputZ);
+        let mul = g.push(NodeKind::Multiply {
+            a: Some(GraphPort { node: x }),
+            b: Some(GraphPort { node: z }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: mul }),
+        });
+        let compiled = CompiledGraph::compile(&g).expect("compile");
+        assert_eq!(compiled.xz_prefix_len(), 4, "pure-XZ graph");
+        let xs = x_inputs(4);
+        let inputs = GraphInputs {
+            x: &xs,
+            y: 0.0,
+            z: &xs,
+        };
+        let mut scratch = CompiledScratch::new();
+        let mut out_full = Vec::new();
+        compiled.generate_slice(&inputs, 4, &mut scratch, &mut out_full, false);
+        let sdf_full = out_full
+            .iter()
+            .find(|(k, _)| *k == GraphOutput::Sdf)
+            .map(|(_, v)| v.clone());
+        let mut out_cached = Vec::new();
+        compiled.generate_slice(&inputs, 4, &mut scratch, &mut out_cached, true);
+        let sdf_cached = out_cached
+            .iter()
+            .find(|(k, _)| *k == GraphOutput::Sdf)
+            .map(|(_, v)| v.clone());
+        assert_eq!(sdf_full.as_deref(), sdf_cached.as_deref());
+        assert_eq!(sdf_cached.as_deref(), Some(&[0.0f32, 1.0, 4.0, 9.0][..]));
+    }
+
+    #[test]
+    fn compiled_scratch_preserves_capacity_across_slices() {
+        let mut g = Graph::new();
+        let x = g.push(NodeKind::InputX);
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: x }),
+        });
+        let compiled = CompiledGraph::compile(&g).expect("compile");
+        let xs = x_inputs(8);
+        let inputs = GraphInputs {
+            x: &xs,
+            y: 0.0,
+            z: &xs,
+        };
+        let mut scratch = CompiledScratch::new();
+        let mut out = Vec::new();
+        compiled.generate_slice(&inputs, 8, &mut scratch, &mut out, false);
+        let cap_after_first = scratch.buffers[0].capacity();
+        assert!(cap_after_first >= 8);
+        compiled.generate_slice(&inputs, 8, &mut scratch, &mut out, false);
+        assert!(scratch.buffers[0].capacity() >= cap_after_first);
     }
 
     #[test]

@@ -28,6 +28,6 @@ pub mod runtime;
 
 pub use generator_graph::GraphGenerator;
 pub use runtime::{
-    Graph, GraphInputs, GraphNode, GraphNodeId, GraphOutput, GraphParam, GraphPort, GraphScratch,
-    NodeKind, TopoError,
+    CompiledGraph, CompiledScratch, Graph, GraphInputs, GraphNode, GraphNodeId, GraphOutput,
+    GraphParam, GraphPort, GraphScratch, NodeKind, TopoError,
 };

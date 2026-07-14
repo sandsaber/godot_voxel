@@ -29,15 +29,15 @@ and Android aarch64 GDExtension smoke when triggered by hand.
 
 | Milestone | Суть | Статус |
 |---|---|---|
-| **M1** | Долг по ревью кода (§9 + §7): TSan, D7, волна 3 (B1/B3/B4/B5/C1/C3), H2-MT бенч, cargo-fuzz, CI, риски §7 | 🟡 в работе: **M1.A (TSan) ✅** + **M1.B (D7) ✅** + **M1.C (волна 3: B1+B3+B4+B5) ✅ полностью закрыта 2026-07-12**; далее M1.D (graph runtime C1/C3) |
+| **M1** | Долг по ревью кода (§9 + §7): TSan, D7, волна 3 (B1/B3/B4/B5/C1/C3), H2-MT бенч, cargo-fuzz, CI, риски §7 | 🟡 в работе: **M1.A (TSan) ✅** + **M1.B (D7) ✅** + **M1.C (волна 3) ✅** + **M1.D/C1 (graph compile-step) ✅ закрыт 2026-07-12**; далее C3 (range analysis) |
 | **M2** | Фаза 4 до GO: multi-LOD paging (`VoxelLodTerrain`), остаток `VoxelEngine`, `VoxelDataGrid`, сквозной TSan | ⏳ |
 | **M3** | Фаза 5: Godot binding 75+ классов + editor/edition/modifiers/instancing/terrain-root | ⏳ |
 | **M4** | Паритет и удаление C++ из `master`; форк — чистый Rust-проект | ⏳ |
 
-**Текущий фокус:** M1.A (TSan), M1.B (D7), M1.C (волна 3: B1 typed SDF sampler + B3 MeshArrays pool +
-B4 gather-scratch + B5 Cubes/Blocky zero-copy) закрыты (см. §9.7). Следующий шаг — **M1.D**: graph
-runtime C1 (compile-шаг `CompiledGraph`: topo-кэш + dense-индексы + XZ-outer-group кэш) и C3
-(range analysis).
+**Текущий фокус:** M1.A (TSan), M1.B (D7), M1.C (волна 3: B1+B3+B4+B5), M1.D/C1 (graph compile-step:
+`CompiledGraph` с topo-кэшем, dense scratch и XZ-outer-group cache) закрыты (см. §9.7). Следующий
+шаг — M1.D/C3 (range analysis поверх compiled graph: SDF-блок вне нуля заполняется uniform без
+per-voxel eval), затем M1.E (H2-MT бенч, cargo-fuzz, CI, §7 риски).
 
 **D7 (M1.B):** `Channel.data` теперь `enum ChannelData { U8/U16/U32/U64(Vec<_>) }` — hot loops
 depth-dispatch один раз на канал и индексируют типизированный slice напрямую. Wire-format
