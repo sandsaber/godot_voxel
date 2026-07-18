@@ -30,7 +30,7 @@ and Android aarch64 GDExtension smoke when triggered by hand.
 | Milestone | Суть | Статус |
 |---|---|---|
 | **M1** | Долг по ревью кода (§9 + §7): TSan, D7, волна 3 (B1/B3/B4/B5/C1/C3), H2-MT бенч, cargo-fuzz, CI, риски §7 | ✅ **ПОЛНОСТЬЮ ЗАКРЫТ 2026-07-12** — M1.A (TSan) + M1.B (D7) + M1.C (волна 3) + M1.D (graph C1+C3) + M1.E (cargo-fuzz + OOM fix + §7 риски + H2-MT bench). CI auto-trigger (item 11) отложено до стабилизации пилота. |
-| **M2** | Фаза 4 до GO: multi-LOD paging (`VoxelLodTerrain`), остаток `VoxelEngine`, `VoxelDataGrid`, сквозной TSan | 🟡 начат: M2.1 Шаг 1 (LodOctree ✅) + Шаг 2 (LoadBlockForTerrainTask LOD ✅); далее Шаг 3 (multi-LOD VoxelTerrainCore) |
+| **M2** | Фаза 4 до GO: multi-LOD paging (`VoxelLodTerrain`), остаток `VoxelEngine`, `VoxelDataGrid`, сквозной TSan | 🟡 в работе: **M2.1 (multi-LOD paging MVP: LodOctree + 2 LOD + per-LOD dispatch + viewer boxes) ✅ закрыт 2026-07-12**; далее M2.2 (transition cells) |
 | **M3** | Фаза 5: Godot binding 75+ классов + editor/edition/modifiers/instancing/terrain-root | ⏳ |
 | **M4** | Паритет и удаление C++ из `master`; форк — чистый Rust-проект | ⏳ |
 
@@ -39,6 +39,9 @@ typed storage (D7), wave 3 mesher perf (B1+B3+B4+B5), graph compile-step + range
 cargo-fuzz (3 таргета + найден/починен OOM bug), H2-MT bench (2.25× MT speedup), §7 риски.
 H2-MT bench результаты: single 47µs/86 Melem/s, multi 673µs/194 Melem/s (4 потока).
 **Следующий milestone — M2:** multi-LOD paging (`VoxelLodTerrain`), главный блокер Фазы 4.
+**M2.1 (MVP) закрыт:** LodOctree + LoadBlockForTerrainTask LOD + per-LOD struct/dispatch + per-LOD
+viewer boxes + end-to-end paging на 2+ LOD levels (hard seams, no transition meshes).
+Далее M2.2: transition cells (бесшовные LOD-переходы).
 
 **D7 (M1.B):** `Channel.data` теперь `enum ChannelData { U8/U16/U32/U64(Vec<_>) }` — hot loops
 depth-dispatch один раз на канал и индексируют типизированный slice напрямую. Wire-format
