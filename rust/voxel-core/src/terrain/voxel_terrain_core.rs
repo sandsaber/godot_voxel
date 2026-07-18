@@ -486,6 +486,7 @@ impl VoxelTerrainCore {
             // hands the result back via `BlockDataOutput`.
             Box::new(LoadBlockForTerrainTask::new(
                 bpos,
+                0,
                 data.clone(),
                 stream.clone(),
             )) as Box<dyn ThreadedTask>
@@ -764,15 +765,22 @@ fn num_threads() -> usize {
 /// can consume it.
 struct LoadBlockForTerrainTask {
     position: Vector3i,
+    lod_index: u8,
     data: Arc<SharedVoxelData>,
     stream: Arc<dyn VoxelStream>,
     output: Option<BlockDataOutput>,
 }
 
 impl LoadBlockForTerrainTask {
-    fn new(position: Vector3i, data: Arc<SharedVoxelData>, stream: Arc<dyn VoxelStream>) -> Self {
+    fn new(
+        position: Vector3i,
+        lod_index: u8,
+        data: Arc<SharedVoxelData>,
+        stream: Arc<dyn VoxelStream>,
+    ) -> Self {
         Self {
             position,
+            lod_index,
             data,
             stream,
             output: None,
@@ -790,29 +798,31 @@ impl ThreadedTask for LoadBlockForTerrainTask {
         let bs = self.data.block_size() as i32;
         let format = settings.format;
         let generator = settings.generator;
+        let lod = self.lod_index;
         let mut voxels = VoxelBuffer::with_size(Vector3i::splat(bs));
         format.configure_buffer(&mut voxels);
-        let query = crate::streams::VoxelLoadQuery::new(&mut voxels, self.position, 0);
+        let query = crate::streams::VoxelLoadQuery::new(&mut voxels, self.position, lod);
         match self.stream.load_voxel_block(query) {
             Ok(crate::streams::LoadResult::Found) => {
-                self.output = Some(BlockDataOutput::loaded(self.position, 0, voxels, false));
+                self.output = Some(BlockDataOutput::loaded(self.position, lod, voxels, false));
             }
             Ok(crate::streams::LoadResult::NotFound) => {
                 // Fall back to the generator if installed.
                 if let Some(gen) = generator {
                     use crate::generators::base::VoxelQueryData;
+                    let lod_stride = 1i32 << lod;
                     gen.generate_block(VoxelQueryData {
                         buffer: &mut voxels,
-                        origin_in_voxels: self.position * bs,
-                        lod: 0,
+                        origin_in_voxels: self.position * bs * lod_stride,
+                        lod: lod as u32,
                     });
-                    self.output = Some(BlockDataOutput::loaded(self.position, 0, voxels, false));
+                    self.output = Some(BlockDataOutput::loaded(self.position, lod, voxels, false));
                 } else {
-                    self.output = Some(BlockDataOutput::not_found(self.position, 0));
+                    self.output = Some(BlockDataOutput::not_found(self.position, lod));
                 }
             }
             Err(_err) => {
-                self.output = Some(BlockDataOutput::loaded_dropped(self.position, 0));
+                self.output = Some(BlockDataOutput::loaded_dropped(self.position, lod));
             }
         }
         crate::tasks::TaskRunOutcome::Complete(self)
@@ -1011,7 +1021,7 @@ mod tests {
         })));
 
         let task =
-            LoadBlockForTerrainTask::new(Vector3i::zero(), data, Arc::new(MemoryStream::new()));
+            LoadBlockForTerrainTask::new(Vector3i::zero(), 0, data, Arc::new(MemoryStream::new()));
         let outcome = Box::new(task).run(ThreadedTaskContext::new(0, TaskPriority::max()));
         let mut completed = match outcome {
             TaskRunOutcome::Complete(task) => task,
@@ -1029,7 +1039,7 @@ mod tests {
             data: Arc::downgrade(&data),
         });
 
-        let task = LoadBlockForTerrainTask::new(Vector3i::zero(), data, stream);
+        let task = LoadBlockForTerrainTask::new(Vector3i::zero(), 0, data, stream);
         let outcome = Box::new(task).run(ThreadedTaskContext::new(0, TaskPriority::max()));
         let mut completed = match outcome {
             TaskRunOutcome::Complete(task) => task,
