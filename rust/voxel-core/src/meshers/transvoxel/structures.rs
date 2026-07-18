@@ -114,6 +114,9 @@ impl Default for ReuseCell {
 pub struct Cache {
     /// Two decks, indexed by `pos.z & 1`.
     decks: [Vec<ReuseCell>; 2],
+    /// 2D reuse cache for transition cells (one deck; transition cells are
+    /// indexed by (x, y) on a face, not by z).
+    decks_2d: [Vec<ReuseTransitionCell>; 1],
     block_size: crate::math::Vector3i,
 }
 
@@ -121,6 +124,7 @@ impl Default for Cache {
     fn default() -> Self {
         Self {
             decks: [Vec::new(), Vec::new()],
+            decks_2d: [Vec::new()],
             block_size: crate::math::Vector3i::zero(),
         }
     }
@@ -151,6 +155,43 @@ impl Cache {
         let j = (pos.z as usize) & 1;
         let i = (pos.y as usize) * (self.block_size.x as usize) + (pos.x as usize);
         &mut self.decks[j][i]
+    }
+
+    // ---- Transition-cell reuse cache (M2.2) ----
+
+    /// Resize the 2D transition reuse cache. Called once per transition face.
+    pub fn reset_reuse_cells_2d(&mut self, block_size: crate::math::Vector3i) {
+        let area = (block_size.x as usize) * (block_size.y as usize);
+        for deck in &mut self.decks_2d {
+            deck.clear();
+            deck.resize(area, ReuseTransitionCell::default());
+        }
+    }
+
+    #[inline]
+    pub fn get_reuse_cell_2d(&self, x: usize, y: usize) -> &ReuseTransitionCell {
+        let i = y * (self.block_size.x as usize) + x;
+        &self.decks_2d[0][i]
+    }
+
+    #[inline]
+    pub fn get_reuse_cell_2d_mut(&mut self, x: usize, y: usize) -> &mut ReuseTransitionCell {
+        let i = y * (self.block_size.x as usize) + x;
+        &mut self.decks_2d[0][i]
+    }
+}
+
+/// Reuse cell for transition meshing (LOD seams). Mirrors C++
+/// `ReuseTransitionCell` (transvoxel.h:110-113). Transition cells have up to
+/// 12 vertices per cell (vs 4 for regular cells).
+#[derive(Debug, Clone, Copy)]
+pub struct ReuseTransitionCell {
+    pub vertices: [i32; 12],
+}
+
+impl Default for ReuseTransitionCell {
+    fn default() -> Self {
+        Self { vertices: [-1; 12] }
     }
 }
 
