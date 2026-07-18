@@ -6,8 +6,10 @@
 //! `terrain/variable_lod/`. Godot `Node3D` / `RenderingServer` glue lives in
 //! the `voxel-gdext` crate.
 
+pub mod lod_octree;
 pub mod voxel_terrain_core;
 
+pub use lod_octree::{LodOctree, OctreeNodeData, OctreeUpdateActions};
 pub use voxel_terrain_core::{
     MeshBlockEntry, PairedViewer, ViewerId, ViewerState, VoxelTerrainCore, VoxelTerrainEvent,
     VoxelTerrainStats,
