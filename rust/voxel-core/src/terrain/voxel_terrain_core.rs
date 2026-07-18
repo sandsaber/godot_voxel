@@ -282,34 +282,48 @@ impl VoxelTerrainCore {
         // Compute boxes for every paired viewer (new and updated alike).
         for paired in self.paired_viewers.iter_mut() {
             if !seen.contains(&paired.id) {
-                // Viewer was removed: collapse boxes to empty so the diff
-                // treats it as "everything went out of range".
                 paired.prev_state = paired.state.clone();
                 paired.state.data_box = Box3i::default();
                 paired.state.mesh_box = Box3i::default();
+                paired.state.data_box_per_lod = Vec::new();
+                paired.state.mesh_box_per_lod = Vec::new();
                 paired.state.requires_meshes = false;
                 continue;
             }
-            compute_viewer_boxes(&mut paired.state, data_block_size, mesh_block_size);
+            if self.lod_count > 1 {
+                compute_viewer_boxes_multi_lod(&mut paired.state, data_block_size, self.lod_count);
+            } else {
+                compute_viewer_boxes(&mut paired.state, data_block_size, mesh_block_size);
+            }
         }
 
-        // Diff each viewer and apply view/unview operations. We collect the
-        // ops into vectors first to avoid borrowing self mutably inside the
-        // loop while iterating paired_viewers.
-        let mut data_unview_boxes: Vec<(Box3i,)> = Vec::new();
-        let mut data_view_boxes: Vec<(Box3i,)> = Vec::new();
+        // Diff each viewer and apply view/unview operations.
+        if self.lod_count > 1 {
+            self.process_viewers_multi_lod();
+        } else {
+            self.process_viewers_single_lod();
+        }
+
+        // Drop unpaired viewers from the list now that their boxes have
+        // collapsed (matches the C++ swap-and-pop at the end of
+        // process_viewers).
+        self.paired_viewers.retain(|p| seen.contains(&p.id));
+    }
+
+    /// Single-LOD diff path (backward compat: lod_count == 1).
+    fn process_viewers_single_lod(&mut self) {
+        let mut data_unview_boxes: Vec<Box3i> = Vec::new();
+        let mut data_view_boxes: Vec<Box3i> = Vec::new();
         let mut mesh_unview_positions: Vec<Vector3i> = Vec::new();
         let mut mesh_view_positions: Vec<Vector3i> = Vec::new();
 
         for paired in self.paired_viewers.iter() {
             if paired.prev_state.data_box != paired.state.data_box {
-                let removed = paired.prev_state.data_box.difference(paired.state.data_box);
-                let added = paired.state.data_box.difference(paired.prev_state.data_box);
-                for box_removed in removed {
-                    data_unview_boxes.push((box_removed,));
+                for box_removed in paired.prev_state.data_box.difference(paired.state.data_box) {
+                    data_unview_boxes.push(box_removed);
                 }
-                for box_added in added {
-                    data_view_boxes.push((box_added,));
+                for box_added in paired.state.data_box.difference(paired.prev_state.data_box) {
+                    data_view_boxes.push(box_added);
                 }
             }
             if paired.prev_state.mesh_box != paired.state.mesh_box {
@@ -326,10 +340,10 @@ impl VoxelTerrainCore {
             }
         }
 
-        for (box_unviewed,) in data_unview_boxes {
+        for box_unviewed in data_unview_boxes {
             self.apply_data_unview(box_unviewed, 0);
         }
-        for (box_viewed,) in data_view_boxes {
+        for box_viewed in data_view_boxes {
             self.apply_data_view(box_viewed, 0);
         }
         for pos in &mesh_unview_positions {
@@ -338,11 +352,80 @@ impl VoxelTerrainCore {
         for pos in &mesh_view_positions {
             self.view_mesh_block(*pos, 0);
         }
+    }
 
-        // Drop unpaired viewers from the list now that their boxes have
-        // collapsed (matches the C++ swap-and-pop at the end of
-        // process_viewers).
-        self.paired_viewers.retain(|p| seen.contains(&p.id));
+    /// Multi-LOD diff path: diff per-LOD boxes and dispatch view/unview per LOD.
+    fn process_viewers_multi_lod(&mut self) {
+        let lod_count = self.lod_count as usize;
+        // Collect ops per LOD (to avoid borrow conflicts).
+        let mut data_unview: Vec<Vec<Box3i>> = vec![Vec::new(); lod_count];
+        let mut data_view: Vec<Vec<Box3i>> = vec![Vec::new(); lod_count];
+        let mut mesh_unview: Vec<Vec<Vector3i>> = vec![Vec::new(); lod_count];
+        let mut mesh_view: Vec<Vec<Vector3i>> = vec![Vec::new(); lod_count];
+
+        for paired in self.paired_viewers.iter() {
+            for lod in 0..lod_count {
+                let prev_data = paired
+                    .prev_state
+                    .data_box_per_lod
+                    .get(lod)
+                    .copied()
+                    .unwrap_or_default();
+                let curr_data = paired
+                    .state
+                    .data_box_per_lod
+                    .get(lod)
+                    .copied()
+                    .unwrap_or_default();
+                if prev_data != curr_data {
+                    for b in prev_data.difference(curr_data) {
+                        data_unview[lod].push(b);
+                    }
+                    for b in curr_data.difference(prev_data) {
+                        data_view[lod].push(b);
+                    }
+                }
+                let prev_mesh = paired
+                    .prev_state
+                    .mesh_box_per_lod
+                    .get(lod)
+                    .copied()
+                    .unwrap_or_default();
+                let curr_mesh = paired
+                    .state
+                    .mesh_box_per_lod
+                    .get(lod)
+                    .copied()
+                    .unwrap_or_default();
+                if prev_mesh != curr_mesh {
+                    for slab in prev_mesh.difference(curr_mesh) {
+                        for pos in slab.iter_cells_zxy() {
+                            mesh_unview[lod].push(pos);
+                        }
+                    }
+                    for slab in curr_mesh.difference(prev_mesh) {
+                        for pos in slab.iter_cells_zxy() {
+                            mesh_view[lod].push(pos);
+                        }
+                    }
+                }
+            }
+        }
+
+        for lod in 0..lod_count {
+            for box_ in &data_unview[lod] {
+                self.apply_data_unview(*box_, lod);
+            }
+            for box_ in &data_view[lod] {
+                self.apply_data_view(*box_, lod);
+            }
+            for pos in &mesh_unview[lod] {
+                self.unview_mesh_block(*pos, lod);
+            }
+            for pos in &mesh_view[lod] {
+                self.view_mesh_block(*pos, lod);
+            }
+        }
     }
 
     fn apply_data_view(&mut self, box_to_load: Box3i, lod: usize) {
@@ -753,6 +836,54 @@ fn compute_viewer_boxes(state: &mut ViewerState, data_block_size: i32, mesh_bloc
 
 fn ceil_div(a: i32, b: i32) -> i32 {
     (a + b - 1) / b
+}
+
+/// Compute per-LOD data/mesh boxes for a viewer. Each LOD level `N` uses a
+/// block size of `data_block_size * (1 << N)`, so coarser LODs cover more world
+/// space per block. The view distance (in voxels) is the same for all LODs —
+/// the effect is that fewer, larger blocks are loaded at higher LODs. This is
+/// the simplest multi-LOD strategy (the C++ clipbox system uses a per-LOD
+/// distance falloff; this MVP uses uniform distance for simplicity).
+fn compute_viewer_boxes_multi_lod(state: &mut ViewerState, data_block_size: i32, lod_count: u8) {
+    if !state.requires_meshes {
+        // No meshes: just keep data resident. Only LOD 0 for simplicity.
+        let h_blocks = ceil_div(state.horizontal_view_distance_voxels, data_block_size);
+        let v_blocks = ceil_div(state.vertical_view_distance_voxels, data_block_size);
+        let block_pos = floor_div_vec(state.local_position_voxels, data_block_size);
+        state.data_box =
+            Box3i::from_center_extents(block_pos, Vector3i::new(h_blocks, v_blocks, h_blocks));
+        state.mesh_box = Box3i::default();
+        state.data_box_per_lod = vec![state.data_box];
+        state.mesh_box_per_lod = vec![Box3i::default()];
+        return;
+    }
+
+    state.data_box_per_lod = Vec::with_capacity(lod_count as usize);
+    state.mesh_box_per_lod = Vec::with_capacity(lod_count as usize);
+
+    for lod in 0..lod_count as i32 {
+        let lod_block_size = data_block_size << lod;
+        let mesh_h = ceil_div(state.horizontal_view_distance_voxels, lod_block_size);
+        let mesh_v = ceil_div(state.vertical_view_distance_voxels, lod_block_size);
+        let mesh_pos = floor_div_vec(state.local_position_voxels, lod_block_size);
+        let mesh_box = Box3i::from_center_extents(mesh_pos, Vector3i::new(mesh_h, mesh_v, mesh_h));
+
+        // Data box is mesh box padded by 1 (in this LOD's block units) for
+        // meshing neighbours.
+        let data_h = mesh_h + 1;
+        let data_v = mesh_v + 1;
+        let data_pos = floor_div_vec(state.local_position_voxels, lod_block_size);
+        let data_box = Box3i::from_center_extents(data_pos, Vector3i::new(data_h, data_v, data_h));
+
+        state.data_box_per_lod.push(data_box);
+        state.mesh_box_per_lod.push(mesh_box);
+
+        // LOD-0 backward compat fields.
+        if lod == 0 {
+            state.data_box = data_box;
+            state.mesh_box = mesh_box;
+        }
+    }
 }
 
 fn floor_div_vec(v: Vector3i, b: i32) -> Vector3i {
@@ -1311,6 +1442,45 @@ mod tests {
         // Single-LOD: lod_count == 1, behaves identically to pre-M2.
         assert_eq!(core.lod_count(), 1);
         assert_eq!(core.mesh_blocks().len(), 0);
+    }
+
+    #[test]
+    fn multi_lod_terrain_loads_blocks_at_both_lod_levels() {
+        // End-to-end: a 2-LOD terrain with a viewer should produce mesh blocks
+        // at both LOD 0 (fine) and LOD 1 (coarse, larger blocks).
+        let mut data = VoxelData::new();
+        data.set_bounds(Box3i::new(Vector3i::splat(-512), Vector3i::splat(2048)));
+        data.set_streaming_enabled(false);
+        data.set_full_load_completed(true);
+        let mesher = Arc::new(crate::meshers::TransvoxelMesher::new());
+        let dep = MeshingDependency::new(mesher, None);
+        let mut core =
+            VoxelTerrainCore::new_with_lod_count(data, Arc::new(MemoryStream::new()), dep, 2);
+        assert_eq!(core.lod_count(), 2);
+
+        // Viewer at origin with a small view distance.
+        let viewers = vec![ViewerUpdate {
+            id: 0,
+            world_position_voxels: Vector3i::zero(),
+            horizontal_view_distance_voxels: 48,
+            vertical_view_distance_voxels: 48,
+            requires_meshes: true,
+        }];
+        // Run several process ticks to let paging converge.
+        for _ in 0..20 {
+            core.process(&viewers);
+        }
+        // Both LOD levels should have at least some mesh blocks.
+        let lod0_count = core.mesh_blocks_at_lod(0).len();
+        let lod1_count = core.mesh_blocks_at_lod(1).len();
+        assert!(
+            lod0_count > 0,
+            "LOD 0 should have mesh blocks, got {lod0_count}"
+        );
+        assert!(
+            lod1_count > 0,
+            "LOD 1 should have mesh blocks, got {lod1_count}"
+        );
     }
 }
 
