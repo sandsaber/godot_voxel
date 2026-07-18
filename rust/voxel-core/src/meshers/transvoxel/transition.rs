@@ -39,6 +39,8 @@ pub const SIDE_NEGATIVE_Y: u8 = 2;
 pub const SIDE_POSITIVE_Y: u8 = 3;
 pub const SIDE_NEGATIVE_Z: u8 = 4;
 pub const SIDE_POSITIVE_Z: u8 = 5;
+/// Number of cube sides (matches C++ `Cube::SIDE_COUNT`).
+pub const SIDE_COUNT: u8 = 6;
 
 /// Scale factor applied to border offsets when computing secondary positions.
 /// Matches `TRANSITION_CELL_SCALE` in transvoxel.cpp:22.

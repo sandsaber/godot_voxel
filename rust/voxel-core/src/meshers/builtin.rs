@@ -13,8 +13,8 @@
 
 use crate::math::Vector3i;
 use crate::meshers::transvoxel::{
-    build_regular_mesh, BuildRegularMeshParams, Cache, MeshArrays, RegularMesherInput, MAX_PADDING,
-    MIN_PADDING,
+    build_regular_mesh, build_transition_mesh, BuildRegularMeshParams, Cache, MeshArrays,
+    RegularMesherInput, MAX_PADDING, MIN_PADDING, SIDE_COUNT,
 };
 use crate::meshers::{MesherInput, MesherOutput, Surface, SurfaceArrays, VoxelMesher};
 use crate::storage::funcs;
@@ -199,6 +199,20 @@ impl VoxelMesher for TransvoxelMesher {
                 &mut cache.borrow_mut(),
                 &mut arrays,
             );
+            // M2.2: build transition meshes on all 6 faces when LOD transitions
+            // are needed (lod_hint = true). Transition verts are appended to the
+            // same MeshArrays, producing a watertight surface across LOD seams.
+            if input.lod_hint {
+                for dir in 0..SIDE_COUNT {
+                    build_transition_mesh(
+                        &transvoxel_input,
+                        &params,
+                        dir,
+                        &mut cache.borrow_mut(),
+                        &mut arrays,
+                    );
+                }
+            }
         });
         if input.collision_hint && !arrays.indices.is_empty() {
             output.collision_surface.submesh_vertex_end = arrays.vertices.len() as i32;
@@ -704,6 +718,34 @@ mod tests {
     fn transvoxel_mesher_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<TransvoxelMesher>();
+    }
+
+    #[test]
+    fn transvoxel_lod_hint_produces_transition_geometry() {
+        // When lod_hint=true, TransvoxelMesher should build transition meshes
+        // on the 6 faces, producing more vertices than regular-only. Use a
+        // large sphere that intersects the block boundary so transition cells
+        // actually cross the isolevel.
+        let mesher = TransvoxelMesher::new();
+        let voxels = sphere_buffer(16, 12.0);
+
+        let mut input_no_lod = MesherInput::new(&voxels, Vector3i::zero(), 0);
+        input_no_lod.lod_hint = false;
+        let mut out_no_lod = MesherOutput::default();
+        mesher.build(&mut out_no_lod, &input_no_lod);
+        let verts_no_lod = out_no_lod.total_vertex_count();
+
+        let mut input_lod = MesherInput::new(&voxels, Vector3i::zero(), 0);
+        input_lod.lod_hint = true;
+        let mut out_lod = MesherOutput::default();
+        mesher.build(&mut out_lod, &input_lod);
+        let verts_lod = out_lod.total_vertex_count();
+
+        // Transition meshes add vertices on the LOD seam faces.
+        assert!(
+            verts_lod > verts_no_lod,
+            "lod_hint should produce more vertices (transition geometry): lod={verts_lod} vs no_lod={verts_no_lod}"
+        );
     }
 
     #[test]

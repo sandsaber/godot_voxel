@@ -21,8 +21,8 @@ pub use regular::{
 };
 pub use structures::{Cache, MeshArrays, ReuseCell, ReuseTransitionCell};
 pub use transition::{
-    build_transition_mesh, SIDE_NEGATIVE_X, SIDE_NEGATIVE_Y, SIDE_NEGATIVE_Z, SIDE_POSITIVE_X,
-    SIDE_POSITIVE_Y, SIDE_POSITIVE_Z,
+    build_transition_mesh, SIDE_COUNT, SIDE_NEGATIVE_X, SIDE_NEGATIVE_Y, SIDE_NEGATIVE_Z,
+    SIDE_POSITIVE_X, SIDE_POSITIVE_Y, SIDE_POSITIVE_Z,
 };
 pub use transition_tables::{
     get_transition_cell_class, get_transition_cell_data, TransitionCellData,
