@@ -13,8 +13,10 @@
 pub mod regular;
 pub mod regular_tables;
 pub mod structures;
+pub mod transition_tables;
 
 pub use regular::{
     build_regular_mesh, BuildRegularMeshParams, RegularMesherInput, MAX_PADDING, MIN_PADDING,
 };
-pub use structures::{Cache, MeshArrays, ReuseCell};
+pub use structures::{Cache, MeshArrays, ReuseCell, ReuseTransitionCell};
+pub use transition_tables::{get_transition_cell_class, get_transition_cell_data, TransitionCellData};
