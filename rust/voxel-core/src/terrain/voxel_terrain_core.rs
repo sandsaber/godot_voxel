@@ -327,16 +327,16 @@ impl VoxelTerrainCore {
         }
 
         for (box_unviewed,) in data_unview_boxes {
-            self.apply_data_unview(box_unviewed);
+            self.apply_data_unview(box_unviewed, 0);
         }
         for (box_viewed,) in data_view_boxes {
-            self.apply_data_view(box_viewed);
+            self.apply_data_view(box_viewed, 0);
         }
         for pos in &mesh_unview_positions {
-            self.unview_mesh_block(*pos);
+            self.unview_mesh_block(*pos, 0);
         }
         for pos in &mesh_view_positions {
-            self.view_mesh_block(*pos);
+            self.view_mesh_block(*pos, 0);
         }
 
         // Drop unpaired viewers from the list now that their boxes have
@@ -345,42 +345,40 @@ impl VoxelTerrainCore {
         self.paired_viewers.retain(|p| seen.contains(&p.id));
     }
 
-    fn apply_data_view(&mut self, box_to_load: Box3i) {
+    fn apply_data_view(&mut self, box_to_load: Box3i, lod: usize) {
         let mut missing = Vec::new();
         let mut found_positions = Vec::new();
         {
             let voxel_box = block_box_to_voxel_box(box_to_load, self.data_block_size());
-            let _write_region = self.data.write_region(0, voxel_box);
+            let _write_region = self.data.write_region(lod, voxel_box);
             self.data.view_area(
                 box_to_load,
-                0,
+                lod,
                 Some(&mut missing),
                 Some(&mut found_positions),
                 None,
             );
         }
         for bpos in missing {
-            // Track loading viewers so duplicates coalesce and cancelled
-            // loads can be re-requested.
-            let entry = self.loading_blocks[0].entry(bpos).or_insert(0);
+            let entry = self.loading_blocks[lod].entry(bpos).or_insert(0);
             *entry += 1;
             if *entry == 1 {
-                self.blocks_pending_load[0].push(bpos);
+                self.blocks_pending_load[lod].push(bpos);
             }
         }
-        let _ = found_positions; // found blocks already resident; nothing to do
+        let _ = found_positions;
     }
 
-    fn apply_data_unview(&mut self, box_to_unload: Box3i) {
+    fn apply_data_unview(&mut self, box_to_unload: Box3i, lod: usize) {
         let mut removed_positions = Vec::new();
         let mut missing_positions = Vec::new();
         let mut saves = Vec::new();
         {
             let voxel_box = block_box_to_voxel_box(box_to_unload, self.data_block_size());
-            let _write_region = self.data.write_region(0, voxel_box);
+            let _write_region = self.data.write_region(lod, voxel_box);
             self.data.unview_area(
                 box_to_unload,
-                0,
+                lod,
                 Some(&mut removed_positions),
                 Some(&mut missing_positions),
                 Some(&mut saves),
@@ -392,16 +390,15 @@ impl VoxelTerrainCore {
         for bpos in removed_positions {
             self.stats.blocks_unloaded += 1;
             self.events.push(VoxelTerrainEvent::DataBlockUnloaded(bpos));
-            // Cancel any pending load for this block.
-            self.loading_blocks[0].remove(&bpos);
-            self.blocks_pending_load[0].retain(|p| *p != bpos);
+            self.loading_blocks[lod].remove(&bpos);
+            self.blocks_pending_load[lod].retain(|p| *p != bpos);
         }
         for bpos in missing_positions {
-            if let Some(count) = self.loading_blocks[0].get_mut(&bpos) {
+            if let Some(count) = self.loading_blocks[lod].get_mut(&bpos) {
                 *count = count.saturating_sub(1);
                 if *count == 0 {
-                    self.loading_blocks[0].remove(&bpos);
-                    self.blocks_pending_load[0].retain(|p| *p != bpos);
+                    self.loading_blocks[lod].remove(&bpos);
+                    self.blocks_pending_load[lod].retain(|p| *p != bpos);
                 }
             }
         }
@@ -419,21 +416,19 @@ impl VoxelTerrainCore {
         self.task_runner.enqueue(Box::new(task), false);
     }
 
-    fn view_mesh_block(&mut self, bpos: Vector3i) {
-        let entry = self.mesh_maps[0]
+    fn view_mesh_block(&mut self, bpos: Vector3i, lod: usize) {
+        let entry = self.mesh_maps[lod]
             .entry(bpos)
             .or_insert_with(|| MeshBlockEntry {
                 position: bpos,
                 ..MeshBlockEntry::default()
             });
         entry.mesh_viewers += 1;
-        // Try to schedule an immediate mesh update — if data is already
-        // resident the mesh can produce geometry right away.
-        self.try_schedule_mesh_update(bpos);
+        self.try_schedule_mesh_update(bpos, lod);
     }
 
-    fn unview_mesh_block(&mut self, bpos: Vector3i) {
-        let Some(entry) = self.mesh_maps[0].get_mut(&bpos) else {
+    fn unview_mesh_block(&mut self, bpos: Vector3i, lod: usize) {
+        let Some(entry) = self.mesh_maps[lod].get_mut(&bpos) else {
             return;
         };
         if entry.mesh_viewers > 0 {
@@ -442,83 +437,78 @@ impl VoxelTerrainCore {
         if entry.mesh_viewers == 0 {
             let was_loaded = entry.is_loaded;
             let pool = self.mesh_arrays_pool.clone();
-            // Return this block's arrays to the pool before dropping the entry.
-            if let Some(removed) = self.mesh_maps[0].remove(&bpos) {
+            if let Some(removed) = self.mesh_maps[lod].remove(&bpos) {
                 if let Some(prev) = removed.output {
                     release_mesh_arrays_owned(&pool, prev);
                 }
             }
-            self.blocks_pending_update[0].retain(|p| *p != bpos);
+            self.blocks_pending_update[lod].retain(|p| *p != bpos);
             if was_loaded {
                 self.events.push(VoxelTerrainEvent::MeshBlockExited(bpos));
             }
         }
     }
 
-    /// `try_schedule_mesh_update`: if the data neighbourhood is resident,
-    /// queue the mesh block for meshing. Matches C++ lines 435-462.
-    fn try_schedule_mesh_update(&mut self, bpos: Vector3i) {
-        let already = self.mesh_maps[0]
+    fn try_schedule_mesh_update(&mut self, bpos: Vector3i, lod: usize) {
+        let already = self.mesh_maps[lod]
             .get(&bpos)
             .map(|e| e.is_in_update_list)
             .unwrap_or(false);
         if already {
             return;
         }
-        let Some(entry) = self.mesh_maps[0].get(&bpos) else {
+        let Some(entry) = self.mesh_maps[lod].get(&bpos) else {
             return;
         };
         if entry.mesh_viewers == 0 {
             return;
         }
-        // factor == 1: data_box == mesh_block padded by 1.
         let data_box = Box3i::new(bpos, Vector3i::splat(1)).padded(1);
         let voxel_box = block_box_to_voxel_box(data_box, self.data_block_size());
-        let _read_region = self.data.read_region(0, voxel_box);
-        if !self.data.has_all_blocks_in_area(data_box, 0) {
+        let _read_region = self.data.read_region(lod, voxel_box);
+        if !self.data.has_all_blocks_in_area(data_box, lod) {
             return;
         }
-        let entry = self.mesh_maps[0]
+        let entry = self.mesh_maps[lod]
             .get_mut(&bpos)
             .expect("mesh block exists after the early return");
         entry.is_in_update_list = true;
-        self.blocks_pending_update[0].push(bpos);
+        self.blocks_pending_update[lod].push(bpos);
     }
 
-    /// After a data block loads, mesh blocks that touch it may now satisfy
-    /// their neighbour-residency gate. Matches C++
-    /// `try_schedule_mesh_update_from_data`.
-    fn try_schedule_mesh_update_from_data(&mut self, voxel_box: Box3i) {
-        // Pad by 1 so we catch mesh blocks whose data window overlaps the
-        // newly-loaded block.
+    fn try_schedule_mesh_update_from_data(&mut self, voxel_box: Box3i, lod: usize) {
         let padded = voxel_box.padded(1);
         let data_block_size = self.data_block_size();
         let mesh_box = padded.downscaled(data_block_size);
         for bpos in mesh_box.iter_cells_zxy() {
-            if self.mesh_maps[0].contains_key(&bpos) {
-                self.try_schedule_mesh_update(bpos);
+            if self.mesh_maps[lod].contains_key(&bpos) {
+                self.try_schedule_mesh_update(bpos, lod);
             }
         }
     }
 
     fn send_data_load_requests(&mut self) {
-        if self.blocks_pending_load[0].is_empty() {
-            return;
-        }
-        let positions = std::mem::take(&mut self.blocks_pending_load[0]);
         let data = self.data.clone();
         let stream = self.stream.clone();
-        let tasks = positions.into_iter().map(|bpos| {
-            // Spawn a tiny task that loads the block from the stream and
-            // hands the result back via `BlockDataOutput`.
-            Box::new(LoadBlockForTerrainTask::new(
-                bpos,
-                0,
-                data.clone(),
-                stream.clone(),
-            )) as Box<dyn ThreadedTask>
-        });
-        self.task_runner.enqueue_many(tasks, false);
+        let mut all_tasks: Vec<Box<dyn ThreadedTask>> = Vec::new();
+        for lod in 0..self.lod_count as usize {
+            if self.blocks_pending_load[lod].is_empty() {
+                continue;
+            }
+            let positions = std::mem::take(&mut self.blocks_pending_load[lod]);
+            let tasks = positions.into_iter().map(|bpos| {
+                Box::new(LoadBlockForTerrainTask::new(
+                    bpos,
+                    lod as u8,
+                    data.clone(),
+                    stream.clone(),
+                )) as Box<dyn ThreadedTask>
+            });
+            all_tasks.extend(tasks);
+        }
+        if !all_tasks.is_empty() {
+            self.task_runner.enqueue_many(all_tasks, false);
+        }
     }
 
     fn drain_completed_tasks(&mut self) {
@@ -537,75 +527,78 @@ impl VoxelTerrainCore {
     }
 
     fn process_meshing(&mut self) {
-        if self.blocks_pending_update[0].is_empty() {
-            return;
-        }
-        let positions = std::mem::take(&mut self.blocks_pending_update[0]);
         let data = self.data.clone();
         let meshing_dependency = self.meshing_dependency.clone();
         let mesh_arrays_pool = self.mesh_arrays_pool.clone();
-        let mut tasks: Vec<Box<dyn ThreadedTask>> = Vec::with_capacity(positions.len());
-        for bpos in positions {
-            // Reset the in-list flag now that the task is being dispatched
-            // (the C++ side does this at line 1978 of process_meshing).
-            if let Some(entry) = self.mesh_maps[0].get_mut(&bpos) {
-                entry.is_in_update_list = false;
+        let mut all_tasks: Vec<Box<dyn ThreadedTask>> = Vec::new();
+        for lod in 0..self.lod_count as usize {
+            if self.blocks_pending_update[lod].is_empty() {
+                continue;
             }
-            let task = MeshBlockTask::new(MeshBlockTaskParams {
-                position_in_blocks: bpos,
-                lod_index: 0,
-                data: data.clone(),
-                meshing_dependency: meshing_dependency.clone(),
-                collision_hint: false,
-                lod_hint: false,
-                mesh_arrays_pool: Some(mesh_arrays_pool.clone()),
+            let positions = std::mem::take(&mut self.blocks_pending_update[lod]);
+            let tasks = positions.into_iter().map(|bpos| {
+                if let Some(entry) = self.mesh_maps[lod].get_mut(&bpos) {
+                    entry.is_in_update_list = false;
+                }
+                Box::new(MeshBlockTask::new(MeshBlockTaskParams {
+                    position_in_blocks: bpos,
+                    lod_index: lod as u8,
+                    data: data.clone(),
+                    meshing_dependency: meshing_dependency.clone(),
+                    collision_hint: false,
+                    lod_hint: false,
+                    mesh_arrays_pool: Some(mesh_arrays_pool.clone()),
+                })) as Box<dyn ThreadedTask>
             });
-            tasks.push(Box::new(task));
+            all_tasks.extend(tasks);
         }
-        self.task_runner.enqueue_many(tasks, false);
+        if !all_tasks.is_empty() {
+            self.task_runner.enqueue_many(all_tasks, false);
+        }
     }
 
     /// Apply a data-load result (the C++ `apply_data_block_response`).
     pub fn apply_data_block_response(&mut self, output: BlockDataOutput) {
         let bpos = output.position_in_blocks;
+        let lod = output.lod_index as usize;
         match output.kind {
             BlockDataOutputKind::Loaded | BlockDataOutputKind::NeedsGeneration => {
                 if output.dropped {
-                    // The load failed; if we still want it, re-request.
-                    if self.loading_blocks[0].contains_key(&bpos) {
-                        self.blocks_pending_load[0].push(bpos);
+                    if self.loading_blocks[lod].contains_key(&bpos) {
+                        self.blocks_pending_load[lod].push(bpos);
                     }
                     return;
                 }
                 let Some(voxels) = output.voxels else {
                     return;
                 };
-                let viewer_count = self.loading_blocks[0].remove(&bpos).unwrap_or(0);
+                let viewer_count = self.loading_blocks[lod].remove(&bpos).unwrap_or(0);
                 if viewer_count == 0 {
                     return;
                 }
-                let mut block = VoxelDataBlock::with_voxels(voxels, 0);
+                let mut block = VoxelDataBlock::with_voxels(voxels, lod as u8);
                 for _ in 0..viewer_count {
                     block.viewers.add();
                 }
                 block.set_edited(true);
                 let inserted = {
                     let bs = self.data_block_size();
-                    let voxel_box = Box3i::new(bpos * bs, Vector3i::splat(bs));
-                    let _write_region = self.data.write_region(0, voxel_box);
+                    let lod_stride = 1i32 << lod;
+                    let voxel_box = Box3i::new(bpos * bs * lod_stride, Vector3i::splat(bs));
+                    let _write_region = self.data.write_region(lod, voxel_box);
                     self.data.try_set_block(bpos, block)
                 };
                 if inserted {
                     self.stats.blocks_loaded += 1;
                     self.events.push(VoxelTerrainEvent::DataBlockLoaded(bpos));
                     let bs = self.data_block_size();
-                    let voxel_box = Box3i::new(bpos * bs, Vector3i::splat(bs));
-                    self.try_schedule_mesh_update_from_data(voxel_box);
+                    let lod_stride = 1i32 << lod;
+                    let voxel_box = Box3i::new(bpos * bs * lod_stride, Vector3i::splat(bs));
+                    self.try_schedule_mesh_update_from_data(voxel_box, lod);
                 }
             }
             BlockDataOutputKind::NotFound => {
-                // Treat as "no data here" — stop trying to load.
-                self.loading_blocks[0].remove(&bpos);
+                self.loading_blocks[lod].remove(&bpos);
             }
             BlockDataOutputKind::Saved => {}
         }
@@ -614,22 +607,18 @@ impl VoxelTerrainCore {
     /// Apply a mesh result (the C++ `apply_mesh_update`).
     pub fn apply_mesh_update(&mut self, output: BlockMeshOutput) {
         let bpos = output.position_in_blocks;
-        // Take the pool handle up front so we can release into it while a mesh
-        // map entry is mutably borrowed (the entry borrows `self.mesh_maps[0]`).
+        let lod = output.lod_index as usize;
         let pool = self.mesh_arrays_pool.clone();
         if output.dropped {
             self.stats.meshes_dropped += 1;
             return;
         }
-        let Some(entry) = self.mesh_maps[0].get_mut(&bpos) else {
-            // Block was unloaded between dispatch and completion. The new
-            // output's buffers are no longer needed — return them to the pool.
+        let Some(entry) = self.mesh_maps[lod].get_mut(&bpos) else {
             release_mesh_arrays_owned(&pool, output.surfaces);
             self.stats.meshes_dropped += 1;
             return;
         };
         let became_loaded = !entry.is_loaded && !output.surfaces.is_empty();
-        // Return the previous block's arrays to the pool before overwriting.
         if let Some(prev) = entry.output.as_mut() {
             if let Some(arrays) = prev.take_first_transvoxel_arrays() {
                 pool.release(arrays);
