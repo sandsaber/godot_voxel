@@ -39,10 +39,14 @@ pub type ViewerId = u32;
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ViewerState {
     pub local_position_voxels: Vector3i,
-    /// Block-coord box of data blocks the viewer wants resident.
+    /// LOD-0 data box (backward compat for single-LOD code).
     pub data_box: Box3i,
-    /// Block-coord box of mesh blocks the viewer wants rendered.
+    /// LOD-0 mesh box (backward compat for single-LOD code).
     pub mesh_box: Box3i,
+    /// Per-LOD data boxes (index 0 = LOD 0). Empty when single-LOD.
+    pub data_box_per_lod: Vec<Box3i>,
+    /// Per-LOD mesh boxes. Empty when single-LOD.
+    pub mesh_box_per_lod: Vec<Box3i>,
     pub horizontal_view_distance_voxels: i32,
     pub vertical_view_distance_voxels: i32,
     pub requires_meshes: bool,
@@ -107,29 +111,27 @@ pub struct ViewerUpdate {
     pub requires_meshes: bool,
 }
 
-/// Engine-agnostic single-LOD paging terrain core.
+/// Engine-agnostic paging terrain core (single- or multi-LOD).
 pub struct VoxelTerrainCore {
     data: Arc<SharedVoxelData>,
-    mesh_map: HashMap<Vector3i, MeshBlockEntry>,
+    /// Number of LOD levels (1 = single-LOD backward compat).
+    lod_count: u8,
+    /// Per-LOD mesh block maps. Index 0 = LOD 0.
+    mesh_maps: Vec<HashMap<Vector3i, MeshBlockEntry>>,
     paired_viewers: Vec<PairedViewer>,
-    blocks_pending_load: Vec<Vector3i>,
-    blocks_pending_update: Vec<Vector3i>,
-    loading_blocks: HashMap<Vector3i, u32>,
+    /// Per-LOD pending load positions.
+    blocks_pending_load: Vec<Vec<Vector3i>>,
+    /// Per-LOD pending mesh-update positions.
+    blocks_pending_update: Vec<Vec<Vector3i>>,
+    /// Per-LOD loading-block refcounts.
+    loading_blocks: Vec<HashMap<Vector3i, u32>>,
     meshing_dependency: Arc<MeshingDependency>,
     stream: Arc<dyn VoxelStream>,
     task_runner: ThreadedTaskRunner,
-    /// Free-list pool of reusable `MeshArrays` buffers (audit §9.6-B3). Mesh
-    /// tasks acquire a cleared buffer from here instead of allocating fresh;
-    /// re-meshed/unloaded blocks return their previous arrays here.
     mesh_arrays_pool: Arc<MeshArraysPool>,
-    /// Maximum horizontal/vertical view distance the terrain will honour.
-    /// Anything larger requested by a viewer is clamped.
     pub max_view_distance_voxels: i32,
-    /// When `false`, no new loads/meshes are scheduled (matches C++
-    /// `_automatic_loading_enabled`).
     pub automatic_loading_enabled: bool,
     pub stats: VoxelTerrainStats,
-    /// Pending events waiting to be drained by the caller.
     pub events: Vec<VoxelTerrainEvent>,
 }
 
@@ -143,15 +145,30 @@ impl VoxelTerrainCore {
         stream: Arc<dyn VoxelStream>,
         meshing_dependency: Arc<MeshingDependency>,
     ) -> Self {
+        Self::new_with_lod_count(data, stream, meshing_dependency, 1)
+    }
+
+    /// Build a multi-LOD terrain core. `lod_count` must be ≥ 1. The underlying
+    /// `VoxelData` is configured with the matching LOD cascade.
+    pub fn new_with_lod_count(
+        mut data: VoxelData,
+        stream: Arc<dyn VoxelStream>,
+        meshing_dependency: Arc<MeshingDependency>,
+        lod_count: u8,
+    ) -> Self {
+        assert!(lod_count >= 1, "lod_count must be >= 1");
+        data.set_lod_count(lod_count as usize);
         let data = Arc::new(SharedVoxelData::new(data));
         let task_runner = ThreadedTaskRunner::new(num_threads());
+        let n = lod_count as usize;
         Self {
             data,
-            mesh_map: HashMap::new(),
+            lod_count,
+            mesh_maps: (0..n).map(|_| HashMap::new()).collect(),
             paired_viewers: Vec::new(),
-            blocks_pending_load: Vec::new(),
-            blocks_pending_update: Vec::new(),
-            loading_blocks: HashMap::new(),
+            blocks_pending_load: (0..n).map(|_| Vec::new()).collect(),
+            blocks_pending_update: (0..n).map(|_| Vec::new()).collect(),
+            loading_blocks: (0..n).map(|_| HashMap::new()).collect(),
             meshing_dependency,
             stream,
             task_runner,
@@ -183,10 +200,20 @@ impl VoxelTerrainCore {
         self.data.block_size() as i32
     }
 
-    /// Reference to the underlying mesh-block hashmap (read-only). Tests and
+    /// Reference to the LOD-0 mesh-block hashmap (read-only). Tests and
     /// the future Godot binding use this to find blocks needing upload.
     pub fn mesh_blocks(&self) -> &HashMap<Vector3i, MeshBlockEntry> {
-        &self.mesh_map
+        &self.mesh_maps[0]
+    }
+
+    /// Reference to the mesh-block hashmap for a specific LOD.
+    pub fn mesh_blocks_at_lod(&self, lod: u8) -> &HashMap<Vector3i, MeshBlockEntry> {
+        &self.mesh_maps[lod as usize]
+    }
+
+    /// Number of LOD levels.
+    pub fn lod_count(&self) -> u8 {
+        self.lod_count
     }
 
     /// Per-frame entry point: pump viewer updates, enqueue pending work, and
@@ -335,10 +362,10 @@ impl VoxelTerrainCore {
         for bpos in missing {
             // Track loading viewers so duplicates coalesce and cancelled
             // loads can be re-requested.
-            let entry = self.loading_blocks.entry(bpos).or_insert(0);
+            let entry = self.loading_blocks[0].entry(bpos).or_insert(0);
             *entry += 1;
             if *entry == 1 {
-                self.blocks_pending_load.push(bpos);
+                self.blocks_pending_load[0].push(bpos);
             }
         }
         let _ = found_positions; // found blocks already resident; nothing to do
@@ -366,15 +393,15 @@ impl VoxelTerrainCore {
             self.stats.blocks_unloaded += 1;
             self.events.push(VoxelTerrainEvent::DataBlockUnloaded(bpos));
             // Cancel any pending load for this block.
-            self.loading_blocks.remove(&bpos);
-            self.blocks_pending_load.retain(|p| *p != bpos);
+            self.loading_blocks[0].remove(&bpos);
+            self.blocks_pending_load[0].retain(|p| *p != bpos);
         }
         for bpos in missing_positions {
-            if let Some(count) = self.loading_blocks.get_mut(&bpos) {
+            if let Some(count) = self.loading_blocks[0].get_mut(&bpos) {
                 *count = count.saturating_sub(1);
                 if *count == 0 {
-                    self.loading_blocks.remove(&bpos);
-                    self.blocks_pending_load.retain(|p| *p != bpos);
+                    self.loading_blocks[0].remove(&bpos);
+                    self.blocks_pending_load[0].retain(|p| *p != bpos);
                 }
             }
         }
@@ -393,10 +420,12 @@ impl VoxelTerrainCore {
     }
 
     fn view_mesh_block(&mut self, bpos: Vector3i) {
-        let entry = self.mesh_map.entry(bpos).or_insert_with(|| MeshBlockEntry {
-            position: bpos,
-            ..MeshBlockEntry::default()
-        });
+        let entry = self.mesh_maps[0]
+            .entry(bpos)
+            .or_insert_with(|| MeshBlockEntry {
+                position: bpos,
+                ..MeshBlockEntry::default()
+            });
         entry.mesh_viewers += 1;
         // Try to schedule an immediate mesh update — if data is already
         // resident the mesh can produce geometry right away.
@@ -404,7 +433,7 @@ impl VoxelTerrainCore {
     }
 
     fn unview_mesh_block(&mut self, bpos: Vector3i) {
-        let Some(entry) = self.mesh_map.get_mut(&bpos) else {
+        let Some(entry) = self.mesh_maps[0].get_mut(&bpos) else {
             return;
         };
         if entry.mesh_viewers > 0 {
@@ -414,12 +443,12 @@ impl VoxelTerrainCore {
             let was_loaded = entry.is_loaded;
             let pool = self.mesh_arrays_pool.clone();
             // Return this block's arrays to the pool before dropping the entry.
-            if let Some(removed) = self.mesh_map.remove(&bpos) {
+            if let Some(removed) = self.mesh_maps[0].remove(&bpos) {
                 if let Some(prev) = removed.output {
                     release_mesh_arrays_owned(&pool, prev);
                 }
             }
-            self.blocks_pending_update.retain(|p| *p != bpos);
+            self.blocks_pending_update[0].retain(|p| *p != bpos);
             if was_loaded {
                 self.events.push(VoxelTerrainEvent::MeshBlockExited(bpos));
             }
@@ -429,15 +458,14 @@ impl VoxelTerrainCore {
     /// `try_schedule_mesh_update`: if the data neighbourhood is resident,
     /// queue the mesh block for meshing. Matches C++ lines 435-462.
     fn try_schedule_mesh_update(&mut self, bpos: Vector3i) {
-        let already = self
-            .mesh_map
+        let already = self.mesh_maps[0]
             .get(&bpos)
             .map(|e| e.is_in_update_list)
             .unwrap_or(false);
         if already {
             return;
         }
-        let Some(entry) = self.mesh_map.get(&bpos) else {
+        let Some(entry) = self.mesh_maps[0].get(&bpos) else {
             return;
         };
         if entry.mesh_viewers == 0 {
@@ -450,12 +478,11 @@ impl VoxelTerrainCore {
         if !self.data.has_all_blocks_in_area(data_box, 0) {
             return;
         }
-        let entry = self
-            .mesh_map
+        let entry = self.mesh_maps[0]
             .get_mut(&bpos)
             .expect("mesh block exists after the early return");
         entry.is_in_update_list = true;
-        self.blocks_pending_update.push(bpos);
+        self.blocks_pending_update[0].push(bpos);
     }
 
     /// After a data block loads, mesh blocks that touch it may now satisfy
@@ -468,17 +495,17 @@ impl VoxelTerrainCore {
         let data_block_size = self.data_block_size();
         let mesh_box = padded.downscaled(data_block_size);
         for bpos in mesh_box.iter_cells_zxy() {
-            if self.mesh_map.contains_key(&bpos) {
+            if self.mesh_maps[0].contains_key(&bpos) {
                 self.try_schedule_mesh_update(bpos);
             }
         }
     }
 
     fn send_data_load_requests(&mut self) {
-        if self.blocks_pending_load.is_empty() {
+        if self.blocks_pending_load[0].is_empty() {
             return;
         }
-        let positions = std::mem::take(&mut self.blocks_pending_load);
+        let positions = std::mem::take(&mut self.blocks_pending_load[0]);
         let data = self.data.clone();
         let stream = self.stream.clone();
         let tasks = positions.into_iter().map(|bpos| {
@@ -510,10 +537,10 @@ impl VoxelTerrainCore {
     }
 
     fn process_meshing(&mut self) {
-        if self.blocks_pending_update.is_empty() {
+        if self.blocks_pending_update[0].is_empty() {
             return;
         }
-        let positions = std::mem::take(&mut self.blocks_pending_update);
+        let positions = std::mem::take(&mut self.blocks_pending_update[0]);
         let data = self.data.clone();
         let meshing_dependency = self.meshing_dependency.clone();
         let mesh_arrays_pool = self.mesh_arrays_pool.clone();
@@ -521,7 +548,7 @@ impl VoxelTerrainCore {
         for bpos in positions {
             // Reset the in-list flag now that the task is being dispatched
             // (the C++ side does this at line 1978 of process_meshing).
-            if let Some(entry) = self.mesh_map.get_mut(&bpos) {
+            if let Some(entry) = self.mesh_maps[0].get_mut(&bpos) {
                 entry.is_in_update_list = false;
             }
             let task = MeshBlockTask::new(MeshBlockTaskParams {
@@ -545,15 +572,15 @@ impl VoxelTerrainCore {
             BlockDataOutputKind::Loaded | BlockDataOutputKind::NeedsGeneration => {
                 if output.dropped {
                     // The load failed; if we still want it, re-request.
-                    if self.loading_blocks.contains_key(&bpos) {
-                        self.blocks_pending_load.push(bpos);
+                    if self.loading_blocks[0].contains_key(&bpos) {
+                        self.blocks_pending_load[0].push(bpos);
                     }
                     return;
                 }
                 let Some(voxels) = output.voxels else {
                     return;
                 };
-                let viewer_count = self.loading_blocks.remove(&bpos).unwrap_or(0);
+                let viewer_count = self.loading_blocks[0].remove(&bpos).unwrap_or(0);
                 if viewer_count == 0 {
                     return;
                 }
@@ -578,7 +605,7 @@ impl VoxelTerrainCore {
             }
             BlockDataOutputKind::NotFound => {
                 // Treat as "no data here" — stop trying to load.
-                self.loading_blocks.remove(&bpos);
+                self.loading_blocks[0].remove(&bpos);
             }
             BlockDataOutputKind::Saved => {}
         }
@@ -588,13 +615,13 @@ impl VoxelTerrainCore {
     pub fn apply_mesh_update(&mut self, output: BlockMeshOutput) {
         let bpos = output.position_in_blocks;
         // Take the pool handle up front so we can release into it while a mesh
-        // map entry is mutably borrowed (the entry borrows `self.mesh_map`).
+        // map entry is mutably borrowed (the entry borrows `self.mesh_maps[0]`).
         let pool = self.mesh_arrays_pool.clone();
         if output.dropped {
             self.stats.meshes_dropped += 1;
             return;
         }
-        let Some(entry) = self.mesh_map.get_mut(&bpos) else {
+        let Some(entry) = self.mesh_maps[0].get_mut(&bpos) else {
             // Block was unloaded between dispatch and completion. The new
             // output's buffers are no longer needed — return them to the pool.
             release_mesh_arrays_owned(&pool, output.surfaces);
@@ -1266,6 +1293,35 @@ mod tests {
         assert_eq!(state.mesh_box.size, Vector3i::splat(2));
         // Data box adds 1 block of padding for meshing neighbours (factor 1).
         assert!(state.data_box.size.x >= state.mesh_box.size.x);
+    }
+
+    // ---- M2.1 step 3: multi-LOD VoxelTerrainCore ----
+
+    #[test]
+    fn multi_lod_terrain_creates_correct_lod_count() {
+        let mut data = VoxelData::new();
+        data.set_bounds(Box3i::new(Vector3i::splat(-512), Vector3i::splat(2048)));
+        let mesher = Arc::new(crate::meshers::TransvoxelMesher::new());
+        let dep = MeshingDependency::new(mesher, None);
+        let core =
+            VoxelTerrainCore::new_with_lod_count(data, Arc::new(MemoryStream::new()), dep, 3);
+        assert_eq!(core.lod_count(), 3);
+        // Each LOD has its own mesh map.
+        assert_eq!(core.mesh_blocks_at_lod(0).len(), 0);
+        assert_eq!(core.mesh_blocks_at_lod(1).len(), 0);
+        assert_eq!(core.mesh_blocks_at_lod(2).len(), 0);
+    }
+
+    #[test]
+    fn single_lod_terrain_backward_compat() {
+        let mut data = VoxelData::new();
+        data.set_bounds(Box3i::new(Vector3i::splat(-512), Vector3i::splat(2048)));
+        let mesher = Arc::new(crate::meshers::TransvoxelMesher::new());
+        let dep = MeshingDependency::new(mesher, None);
+        let core = VoxelTerrainCore::new_generator_only(data, dep);
+        // Single-LOD: lod_count == 1, behaves identically to pre-M2.
+        assert_eq!(core.lod_count(), 1);
+        assert_eq!(core.mesh_blocks().len(), 0);
     }
 }
 
