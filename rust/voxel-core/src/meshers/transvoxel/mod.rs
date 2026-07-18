@@ -13,10 +13,17 @@
 pub mod regular;
 pub mod regular_tables;
 pub mod structures;
+pub mod transition;
 pub mod transition_tables;
 
 pub use regular::{
     build_regular_mesh, BuildRegularMeshParams, RegularMesherInput, MAX_PADDING, MIN_PADDING,
 };
 pub use structures::{Cache, MeshArrays, ReuseCell, ReuseTransitionCell};
-pub use transition_tables::{get_transition_cell_class, get_transition_cell_data, TransitionCellData};
+pub use transition::{
+    build_transition_mesh, SIDE_NEGATIVE_X, SIDE_NEGATIVE_Y, SIDE_NEGATIVE_Z, SIDE_POSITIVE_X,
+    SIDE_POSITIVE_Y, SIDE_POSITIVE_Z,
+};
+pub use transition_tables::{
+    get_transition_cell_class, get_transition_cell_data, TransitionCellData,
+};
