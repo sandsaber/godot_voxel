@@ -370,15 +370,22 @@ impl VoxelTerrain {
     /// Resolve the Godot generator resource into a voxel-core generator.
     /// If no resource is set, defaults to Waves(60, 128).
     fn resolve_generator(&self) -> voxel_core::storage::SharedVoxelGenerator {
-        use crate::generators::{VoxelGeneratorFlat, VoxelGeneratorWaves};
+        use crate::generators::{
+            VoxelGeneratorFlat, VoxelGeneratorHeightmap, VoxelGeneratorNoise, VoxelGeneratorWaves,
+        };
 
         if let Some(res) = &self.generator_resource {
-            // Try casting to each known generator type.
             if let Ok(waves) = res.clone().try_cast::<VoxelGeneratorWaves>() {
                 return waves.bind().create_core_generator();
             }
             if let Ok(flat) = res.clone().try_cast::<VoxelGeneratorFlat>() {
                 return flat.bind().create_core_generator();
+            }
+            if let Ok(noise) = res.clone().try_cast::<VoxelGeneratorNoise>() {
+                return noise.bind().create_core_generator();
+            }
+            if let Ok(hm) = res.clone().try_cast::<VoxelGeneratorHeightmap>() {
+                return hm.bind().create_core_generator();
             }
         }
         // Default: Waves with sensible parameters.

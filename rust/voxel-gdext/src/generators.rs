@@ -8,7 +8,8 @@
 use godot::prelude::*;
 use std::sync::Arc;
 
-use voxel_core::generators::simple::{Flat, Waves};
+use voxel_core::generators::base::HeightmapParams;
+use voxel_core::generators::simple::{Flat, HeightmapNoise, Noise, NoiseConfig, Waves};
 use voxel_core::storage::SharedVoxelGenerator;
 
 // ---------------------------------------------------------------------------
@@ -89,5 +90,115 @@ impl VoxelGeneratorFlat {
             ..Flat::default()
         };
         Arc::new(flat)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// VoxelGeneratorNoise
+// ---------------------------------------------------------------------------
+
+/// A 3D noise terrain generator. Produces caves / overhangs via 3D FastNoiseLite.
+/// Wraps [`voxel_core::generators::simple::Noise`].
+#[derive(GodotClass)]
+#[class(base = Resource, tool)]
+pub struct VoxelGeneratorNoise {
+    base: Base<Resource>,
+    /// Random seed for the noise.
+    #[var]
+    pub seed: i64,
+    /// Noise frequency (higher = more detail).
+    #[var]
+    pub frequency: f32,
+    /// Bottom of the noise slab (world Y).
+    #[var]
+    pub height_start: f32,
+    /// Vertical extent of the slab.
+    #[var]
+    pub height_range: f32,
+}
+
+#[godot_api]
+impl IResource for VoxelGeneratorNoise {
+    fn init(base: Base<Resource>) -> Self {
+        Self {
+            base,
+            seed: 0,
+            frequency: 0.05,
+            height_start: -100.0,
+            height_range: 200.0,
+        }
+    }
+}
+
+#[godot_api]
+impl VoxelGeneratorNoise {
+    pub fn create_core_generator(&self) -> SharedVoxelGenerator {
+        // Use NoiseConfig.build() to avoid direct fastnoise_lite dependency.
+        let config = NoiseConfig {
+            seed: Some(self.seed as i32),
+            frequency: Some(self.frequency),
+            ..NoiseConfig::default()
+        };
+        let noise = Noise {
+            noise: config.build(),
+            height_start: self.height_start,
+            height_range: self.height_range,
+            ..Noise::default()
+        };
+        Arc::new(noise)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// VoxelGeneratorHeightmap
+// ---------------------------------------------------------------------------
+
+/// A heightmap terrain generator driven by 2D noise. Produces rolling hills
+/// with controllable seed, frequency, and height range.
+/// Wraps [`voxel_core::generators::simple::HeightmapNoise`].
+#[derive(GodotClass)]
+#[class(base = Resource, tool)]
+pub struct VoxelGeneratorHeightmap {
+    base: Base<Resource>,
+    /// Random seed.
+    #[var]
+    pub seed: i64,
+    /// Noise frequency.
+    #[var]
+    pub frequency: f32,
+    /// Height range of the terrain (amplitude).
+    #[var]
+    pub height_range: f32,
+}
+
+#[godot_api]
+impl IResource for VoxelGeneratorHeightmap {
+    fn init(base: Base<Resource>) -> Self {
+        Self {
+            base,
+            seed: 0,
+            frequency: 0.02,
+            height_range: 100.0,
+        }
+    }
+}
+
+#[godot_api]
+impl VoxelGeneratorHeightmap {
+    pub fn create_core_generator(&self) -> SharedVoxelGenerator {
+        let config = NoiseConfig {
+            seed: Some(self.seed as i32),
+            frequency: Some(self.frequency),
+            ..NoiseConfig::default()
+        };
+        let hm = HeightmapNoise {
+            noise_config: config,
+            curve: None,
+            heightmap: HeightmapParams {
+                height_range: self.height_range,
+                ..Default::default()
+            },
+        };
+        Arc::new(hm)
     }
 }
