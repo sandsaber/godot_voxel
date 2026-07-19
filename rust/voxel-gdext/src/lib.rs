@@ -10,6 +10,7 @@
 //! it (see `rust/voxel-gdext/voxel_gdext.gdextension.in`). Restart the editor.
 
 mod generators;
+mod streams;
 mod terrain;
 
 use godot::init::{gdextension, ExtensionLibrary, InitStage};

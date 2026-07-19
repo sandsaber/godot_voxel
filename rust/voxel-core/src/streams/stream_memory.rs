@@ -1,10 +1,10 @@
-//! `streams::stream_memory` — "fake" in-memory voxel stream for testing.
+//! `streams::stream_memory` — supported in-memory voxel stream backend.
 //!
-//! Ported from `streams/voxel_stream_memory.{h,cpp}`. An in-memory stand-in for
-//! a real [`VoxelStream`]: it stores blocks in a map keyed on `(position, lod)`
-//! and round-trips them through `save_block` / `load_block` instead of touching
-//! the filesystem. The C++ class exists almost entirely for unit tests, and the
-//! Rust port keeps that role.
+//! Ported from `streams/voxel_stream_memory.{h,cpp}`. This runtime backend
+//! stores blocks in a map keyed on `(position, lod)` and round-trips them
+//! through `save_block` / `load_block` without touching the filesystem. It is
+//! suitable for transient terrain data that only needs to live for the current
+//! process.
 //!
 //! ## What changed from C++
 //!
@@ -34,8 +34,8 @@ use std::sync::{
     RwLockWriteGuard as StdRwLockWriteGuard,
 };
 
-/// In-memory voxel stream: stores block copies in a `HashMap`, never touching
-/// the filesystem. Ported from `VoxelStreamMemory` (data-storage half only).
+/// Supported in-memory [`VoxelStream`] backend that stores block copies in a
+/// `HashMap` without touching the filesystem.
 ///
 /// The stream owns every stored [`VoxelBuffer`]. [`MemoryStream::save_block`]
 /// copies the supplied buffer in (matching the C++ `copy_to`), and
