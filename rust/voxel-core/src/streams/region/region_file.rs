@@ -258,7 +258,10 @@ impl<F: VoxelFile> RegionFile<F> {
             Vector3i::new(fixed[o] as i32, fixed[o + 1] as i32, fixed[o + 2] as i32);
         o += 3;
         for d in &mut self.header.format.channel_depths {
-            *d = ChannelDepth::from_u8_discard_invalid(fixed[o]);
+            let raw_depth = fixed[o];
+            *d = channel_depth_from_u8(raw_depth).ok_or_else(|| {
+                RegionError::BadHeader(format!("invalid channel depth {raw_depth:#x}"))
+            })?;
             o += 1;
         }
         self.header.format.sector_size = u16::from_le_bytes([fixed[o], fixed[o + 1]]) as u32;
@@ -626,19 +629,13 @@ fn io(e: std::io::Error) -> RegionError {
     RegionError::Io(e.to_string())
 }
 
-// A small extension trait so the header reader can decode depth bytes without
-// pulling in the full enum API. Kept private to this module.
-impl ChannelDepth {
-    fn from_u8_discard_invalid(v: u8) -> Self {
-        match v {
-            0 => Self::Bit8,
-            1 => Self::Bit16,
-            2 => Self::Bit32,
-            3 => Self::Bit64,
-            // Unknown depths default to 8-bit (the C++ would error; we degrade
-            // gracefully since the format is otherwise valid).
-            _ => Self::Bit8,
-        }
+fn channel_depth_from_u8(v: u8) -> Option<ChannelDepth> {
+    match v {
+        0 => Some(ChannelDepth::Bit8),
+        1 => Some(ChannelDepth::Bit16),
+        2 => Some(ChannelDepth::Bit32),
+        3 => Some(ChannelDepth::Bit64),
+        _ => None,
     }
 }
 
@@ -842,6 +839,24 @@ mod tests {
         let mut bytes = std::fs::read(&path).unwrap();
         let sector_size_offset = MAGIC_AND_VERSION_SIZE + 1 + 3 + MAX_CHANNELS;
         bytes[sector_size_offset..sector_size_offset + 2].copy_from_slice(&0u16.to_le_bytes());
+        std::fs::write(&path, bytes).unwrap();
+
+        assert!(matches!(
+            RegionFile::open(&path, false),
+            Err(RegionError::BadHeader(_))
+        ));
+    }
+
+    #[test]
+    fn open_rejects_invalid_persisted_channel_depth() {
+        let dir = TestDirectory::new().unwrap();
+        let path = dir.path().join("invalid-channel-depth.vxr");
+        let mut created = RegionFile::open(&path, true).unwrap();
+        created.close().unwrap();
+
+        let mut bytes = std::fs::read(&path).unwrap();
+        let first_channel_depth_offset = MAGIC_AND_VERSION_SIZE + 1 + 3;
+        bytes[first_channel_depth_offset] = 0xff;
         std::fs::write(&path, bytes).unwrap();
 
         assert!(matches!(
