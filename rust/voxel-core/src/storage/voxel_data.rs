@@ -621,7 +621,7 @@ impl VoxelData {
 
     pub fn set_lod_count(&mut self, lod_count: usize) {
         assert!(
-            (1..MAX_LOD).contains(&lod_count),
+            (1..=MAX_LOD).contains(&lod_count),
             "LOD count is outside the supported range"
         );
         if lod_count == self.lods.len() {
@@ -1540,6 +1540,7 @@ fn clone_block(block: &VoxelDataBlock) -> VoxelDataBlock {
 #[cfg(test)]
 mod tests {
     use super::{BlockLocation, SharedVoxelData, SharedVoxelGenerator, VoxelData};
+    use crate::constants::voxel_constants::MAX_LOD;
     use crate::generators::base::{GenResult, VoxelGenerator, VoxelQueryData};
     use crate::math::{Box3i, Vector3i};
     use crate::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelDataBlock, VoxelFormat};
@@ -1590,6 +1591,15 @@ mod tests {
         assert_eq!(data.bounds(), bounds);
         assert!(data.is_full_load_completed());
         assert_eq!(data.block_count(), 0);
+    }
+
+    #[test]
+    fn lod_count_accepts_the_supported_maximum() {
+        let mut data = VoxelData::new();
+
+        data.set_lod_count(MAX_LOD);
+
+        assert_eq!(data.lod_count(), MAX_LOD);
     }
 
     #[test]

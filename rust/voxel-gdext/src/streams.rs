@@ -9,6 +9,7 @@ pub(crate) struct MemoryStreamHandle {
 }
 
 impl MemoryStreamHandle {
+    #[cfg(test)]
     pub(crate) fn typed_stream(&self) -> Arc<MemoryStream> {
         self.stream.clone()
     }

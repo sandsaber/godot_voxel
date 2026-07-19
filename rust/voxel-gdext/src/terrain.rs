@@ -13,6 +13,7 @@ use godot::classes::mesh::PrimitiveType;
 use godot::classes::{ArrayMesh, INode3D, Material, MeshInstance3D};
 use godot::prelude::*;
 
+use voxel_core::constants::voxel_constants::MAX_LOD;
 use voxel_core::engine::MeshingDependency;
 use voxel_core::math::Vector3i;
 use voxel_core::meshers::TransvoxelMesher;
@@ -191,7 +192,16 @@ impl INode3D for VoxelTerrain {
 #[cfg(test)]
 mod stream_selection_tests {
     use super::*;
+    use voxel_core::constants::voxel_constants::MAX_LOD;
     use voxel_core::streams::{MemoryStream, VoxelStream};
+
+    #[test]
+    fn lod_count_is_clamped_before_narrowing_to_u8() {
+        assert_eq!(clamp_lod_count(0), 1);
+        assert_eq!(clamp_lod_count(-1), 1);
+        assert_eq!(clamp_lod_count(256), MAX_LOD as u8);
+        assert_eq!(clamp_lod_count(MAX_LOD as i32), MAX_LOD as u8);
+    }
 
     #[test]
     fn explicit_stream_wins_and_only_multi_lod_gets_an_internal_fallback() {
@@ -213,6 +223,10 @@ fn select_terrain_stream(
                 as Arc<dyn voxel_core::streams::VoxelStream>
         })
     })
+}
+
+fn clamp_lod_count(count: i32) -> u8 {
+    count.clamp(1, MAX_LOD as i32) as u8
 }
 
 #[godot_api]
@@ -264,7 +278,7 @@ impl VoxelTerrain {
 
     #[func]
     fn set_lod_count(&mut self, count: i32) {
-        self.lod_count = count.max(1) as u8;
+        self.lod_count = clamp_lod_count(count);
     }
 
     /// Material override applied to all terrain mesh blocks.
