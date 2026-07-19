@@ -40,6 +40,9 @@ pub struct VoxelTerrain {
     /// Mesh block positions that have been uploaded to Godot MeshInstance3D
     /// children, keyed by `mesh_block_pos`.
     mesh_instances: HashMap<Vector3i, Gd<MeshInstance3D>>,
+    /// Generator resource (VoxelGeneratorWaves or VoxelGeneratorFlat).
+    /// Set via the `generator` property in the Godot inspector.
+    generator_resource: Option<Gd<Resource>>,
 }
 
 #[godot_api]
@@ -49,12 +52,11 @@ impl INode3D for VoxelTerrain {
             base,
             core: None,
             mesh_instances: HashMap::new(),
+            generator_resource: None,
         }
     }
 
     fn ready(&mut self) {
-        // Initialise the terrain core with a Waves generator + transvoxel mesher.
-        // For MVP: generator-only (no stream save/load).
         let mut data = VoxelData::new();
         data.set_bounds(voxel_core::math::Box3i::new(
             Vector3i::splat(-512),
@@ -65,6 +67,10 @@ impl INode3D for VoxelTerrain {
         let mut format = VoxelFormat::new();
         format.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
         data.set_format(format);
+
+        // Install generator from property, or default to Waves.
+        let generator = self.resolve_generator();
+        data.set_generator(Some(generator));
 
         let mesher = Arc::new(TransvoxelMesher::new());
         let meshing_dep = MeshingDependency::new(mesher, None);
@@ -151,6 +157,44 @@ impl VoxelTerrain {
     #[func]
     fn get_version(&self) -> GString {
         voxel_core::VERSION.to_godot()
+    }
+
+    /// The generator resource (VoxelGeneratorWaves or VoxelGeneratorFlat).
+    /// Set this in the inspector to choose the terrain shape.
+    #[func]
+    fn get_generator(&self) -> Variant {
+        match &self.generator_resource {
+            Some(g) => g.to_variant(),
+            None => Variant::nil(),
+        }
+    }
+
+    #[func]
+    fn set_generator(&mut self, value: Gd<Resource>) {
+        self.generator_resource = Some(value);
+    }
+}
+
+impl VoxelTerrain {
+    /// Resolve the Godot generator resource into a voxel-core generator.
+    /// If no resource is set, defaults to Waves(60, 128).
+    fn resolve_generator(&self) -> voxel_core::storage::SharedVoxelGenerator {
+        use crate::generators::{VoxelGeneratorFlat, VoxelGeneratorWaves};
+
+        if let Some(res) = &self.generator_resource {
+            // Try casting to each known generator type.
+            if let Ok(waves) = res.clone().try_cast::<VoxelGeneratorWaves>() {
+                return waves.bind().create_core_generator();
+            }
+            if let Ok(flat) = res.clone().try_cast::<VoxelGeneratorFlat>() {
+                return flat.bind().create_core_generator();
+            }
+        }
+        // Default: Waves with sensible parameters.
+        let mut waves = voxel_core::generators::simple::Waves::default();
+        waves.set_pattern_size(voxel_core::math::Vector2f::new(128.0, 128.0));
+        waves.heightmap.height_range = 60.0;
+        Arc::new(waves)
     }
 }
 

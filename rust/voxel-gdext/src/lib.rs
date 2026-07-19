@@ -9,6 +9,7 @@
 //! Build the `.so`/`.dylib`/`.dll`, then add a `.gdextension` file pointing at
 //! it (see `rust/voxel-gdext/voxel_gdext.gdextension.in`). Restart the editor.
 
+mod generators;
 mod terrain;
 
 use godot::init::{gdextension, ExtensionLibrary, InitStage};
