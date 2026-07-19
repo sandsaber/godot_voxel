@@ -292,6 +292,10 @@ impl<F: VoxelFile> RegionFile<F> {
             }
         }
 
+        if !self.header.format.validate() {
+            return Err(RegionError::BadHeader("invalid persisted format".into()));
+        }
+
         // LUT.
         let block_count = self.header.format.region_size.volume_u64() as usize;
         let lut_bytes = block_count * std::mem::size_of::<RegionBlockInfo>();
@@ -791,6 +795,22 @@ mod tests {
     }
 
     #[test]
+    fn open_with_format_rejects_unrepresentable_sector_size_for_new_file() {
+        let dir = TestDirectory::new().unwrap();
+        let path = dir.path().join("unrepresentable-sector-size.vxr");
+        let format = RegionFormat {
+            sector_size: u16::MAX as u32 + 1,
+            ..RegionFormat::default()
+        };
+
+        assert!(matches!(
+            RegionFile::open_with_format(&path, true, format),
+            Err(RegionError::BadHeader(_))
+        ));
+        assert!(!path.exists());
+    }
+
+    #[test]
     fn open_with_format_ignores_creation_format_for_existing_file() {
         let dir = TestDirectory::new().unwrap();
         let path = dir.path().join("existing.vxr");
@@ -810,6 +830,24 @@ mod tests {
 
         let reopened = RegionFile::open_with_format(&path, false, invalid_creation_format).unwrap();
         assert_eq!(reopened.format(), &persisted_format);
+    }
+
+    #[test]
+    fn open_rejects_invalid_persisted_format() {
+        let dir = TestDirectory::new().unwrap();
+        let path = dir.path().join("invalid-persisted-format.vxr");
+        let mut created = RegionFile::open(&path, true).unwrap();
+        created.close().unwrap();
+
+        let mut bytes = std::fs::read(&path).unwrap();
+        let sector_size_offset = MAGIC_AND_VERSION_SIZE + 1 + 3 + MAX_CHANNELS;
+        bytes[sector_size_offset..sector_size_offset + 2].copy_from_slice(&0u16.to_le_bytes());
+        std::fs::write(&path, bytes).unwrap();
+
+        assert!(matches!(
+            RegionFile::open(&path, false),
+            Err(RegionError::BadHeader(_))
+        ));
     }
 
     #[test]

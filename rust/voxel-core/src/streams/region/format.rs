@@ -89,7 +89,7 @@ impl RegionFormat {
         for d in &self.channel_depths {
             bytes_per_block += (d.bit_count() / 8) as u64 * voxels_per_block;
         }
-        if self.sector_size == 0 {
+        if self.sector_size == 0 || self.sector_size > u16::MAX as u32 {
             return false;
         }
         let sectors_per_block = bytes_per_block.div_ceil(self.sector_size as u64);
