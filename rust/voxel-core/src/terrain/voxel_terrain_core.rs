@@ -1327,6 +1327,42 @@ mod tests {
     }
 
     #[test]
+    fn memory_stream_restores_saved_edit_in_a_new_terrain_core() {
+        let stream = Arc::new(MemoryStream::new());
+        let mut first = build_core_with_stream(stream.clone());
+        let block_size = first.data_block_size();
+        let edited_voxel = Vector3i::new(1, 1, 1);
+        let channel = ChannelId::Type.index();
+        let viewer = [ViewerUpdate {
+            id: 1,
+            world_position_voxels: Vector3i::zero(),
+            horizontal_view_distance_voxels: block_size,
+            vertical_view_distance_voxels: block_size,
+            requires_meshes: true,
+        }];
+
+        process_until(&mut first, &viewer, |core, _| {
+            core.data().block_snapshot(Vector3i::zero(), 0).is_some()
+        });
+        assert!(first.data().try_set_voxel(91, edited_voxel, channel));
+        first
+            .data()
+            .mark_area_modified(Box3i::new(edited_voxel, Vector3i::splat(1)), false);
+        process_until(&mut first, &[], |_core, _| stream.len() == 1);
+        drop(first);
+
+        let mut second = build_core_with_stream(stream);
+        process_until(&mut second, &viewer, |core, _| {
+            core.data().block_snapshot(Vector3i::zero(), 0).is_some()
+        });
+        let restored = second
+            .data()
+            .block_snapshot(Vector3i::zero(), 0)
+            .expect("saved block restored");
+        assert_eq!(restored.voxels().get_voxel(1, 1, 1, channel), 91);
+    }
+
+    #[test]
     fn loaded_blocks_keep_viewer_refs_from_coalesced_pending_loads() {
         let mut core = build_core();
         let bs = core.data_block_size();

@@ -38,6 +38,10 @@ pub struct VoxelTerrain {
     core: Option<VoxelTerrainCore>,
     mesh_instances: HashMap<Vector3i, Gd<MeshInstance3D>>,
     generator_resource: Option<Gd<Resource>>,
+    #[export]
+    #[var(get = get_stream, set = set_stream)]
+    stream: PhantomVar<Option<Gd<Resource>>>,
+    stream_resource: Option<Gd<Resource>>,
     lod_count: u8,
     dirty_blocks: std::collections::HashSet<Vector3i>,
     /// Optional material override applied to all mesh blocks.
@@ -54,6 +58,8 @@ impl INode3D for VoxelTerrain {
             core: None,
             mesh_instances: HashMap::new(),
             generator_resource: None,
+            stream: Default::default(),
+            stream_resource: None,
             lod_count: 1,
             dirty_blocks: std::collections::HashSet::new(),
             material_override: None,
@@ -78,12 +84,26 @@ impl INode3D for VoxelTerrain {
 
         let mesher = Arc::new(TransvoxelMesher::new());
         let meshing_dep = MeshingDependency::new(mesher, None);
-        let core = if self.lod_count > 1 {
-            let stream: Arc<dyn voxel_core::streams::VoxelStream> =
-                Arc::new(voxel_core::streams::MemoryStream::new());
-            VoxelTerrainCore::new_with_lod_count(data, stream, meshing_dep, self.lod_count)
-        } else {
-            VoxelTerrainCore::new_generator_only(data, meshing_dep)
+        let stream_was_assigned = self.stream_resource.is_some();
+        let explicit_stream = self
+            .stream_resource
+            .clone()
+            .and_then(crate::streams::resolve_core_stream);
+        if stream_was_assigned && explicit_stream.is_none() {
+            godot_error!("VoxelTerrain.stream must be VoxelStreamMemory or VoxelStreamRegionFiles");
+        }
+        let has_explicit_stream = explicit_stream.is_some();
+        let selected_stream = select_terrain_stream(explicit_stream, self.lod_count);
+
+        let core = match selected_stream {
+            Some(stream) => {
+                if has_explicit_stream {
+                    data.set_streaming_enabled(true);
+                    data.set_full_load_completed(false);
+                }
+                VoxelTerrainCore::new_with_lod_count(data, stream, meshing_dep, self.lod_count)
+            }
+            None => VoxelTerrainCore::new_generator_only(data, meshing_dep),
         };
         self.core = Some(core);
         godot_print!(
@@ -168,6 +188,33 @@ impl INode3D for VoxelTerrain {
     }
 }
 
+#[cfg(test)]
+mod stream_selection_tests {
+    use super::*;
+    use voxel_core::streams::{MemoryStream, VoxelStream};
+
+    #[test]
+    fn explicit_stream_wins_and_only_multi_lod_gets_an_internal_fallback() {
+        let explicit: Arc<dyn VoxelStream> = Arc::new(MemoryStream::new());
+        let selected = select_terrain_stream(Some(explicit.clone()), 1).unwrap();
+        assert!(Arc::ptr_eq(&selected, &explicit));
+        assert!(select_terrain_stream(None, 1).is_none());
+        assert!(select_terrain_stream(None, 2).is_some());
+    }
+}
+
+fn select_terrain_stream(
+    explicit: Option<Arc<dyn voxel_core::streams::VoxelStream>>,
+    lod_count: u8,
+) -> Option<Arc<dyn voxel_core::streams::VoxelStream>> {
+    explicit.or_else(|| {
+        (lod_count > 1).then(|| {
+            Arc::new(voxel_core::streams::MemoryStream::new())
+                as Arc<dyn voxel_core::streams::VoxelStream>
+        })
+    })
+}
+
 #[godot_api]
 impl VoxelTerrain {
     /// Returns the number of loaded mesh blocks (all LODs).
@@ -195,6 +242,16 @@ impl VoxelTerrain {
     #[func]
     fn set_generator(&mut self, value: Gd<Resource>) {
         self.generator_resource = Some(value);
+    }
+
+    #[func]
+    fn get_stream(&self) -> Option<Gd<Resource>> {
+        self.stream_resource.clone()
+    }
+
+    #[func]
+    fn set_stream(&mut self, value: Option<Gd<Resource>>) {
+        self.stream_resource = value;
     }
 
     /// Number of LOD levels (1 = single-LOD, 2+ = multi-LOD with transitions).
