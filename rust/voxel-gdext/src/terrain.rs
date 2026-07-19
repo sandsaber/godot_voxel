@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use godot::classes::mesh::PrimitiveType;
-use godot::classes::{ArrayMesh, INode3D, MeshInstance3D};
+use godot::classes::{ArrayMesh, INode3D, Material, MeshInstance3D};
 use godot::prelude::*;
 
 use voxel_core::engine::MeshingDependency;
@@ -35,17 +35,15 @@ use voxel_core::terrain::{ViewerUpdate, VoxelTerrainCore};
 #[class(base = Node3D, tool)]
 pub struct VoxelTerrain {
     base: Base<Node3D>,
-    /// The engine-agnostic terrain core (lazy-initialised on first `_ready`).
     core: Option<VoxelTerrainCore>,
-    /// Mesh block positions that have been uploaded to Godot MeshInstance3D
-    /// children, keyed by `mesh_block_pos`.
     mesh_instances: HashMap<Vector3i, Gd<MeshInstance3D>>,
-    /// Generator resource (VoxelGeneratorWaves or VoxelGeneratorFlat).
     generator_resource: Option<Gd<Resource>>,
-    /// Number of LOD levels (1 = single-LOD, 2+ = multi-LOD with transitions).
     lod_count: u8,
-    /// Blocks that were edited and need re-meshing.
     dirty_blocks: std::collections::HashSet<Vector3i>,
+    /// Optional material override applied to all mesh blocks.
+    material_override: Option<Gd<Material>>,
+    /// Whether to generate collision shapes for mesh blocks.
+    generate_collision: bool,
 }
 
 #[godot_api]
@@ -58,6 +56,8 @@ impl INode3D for VoxelTerrain {
             generator_resource: None,
             lod_count: 1,
             dirty_blocks: std::collections::HashSet::new(),
+            material_override: None,
+            generate_collision: false,
         }
     }
 
@@ -208,6 +208,31 @@ impl VoxelTerrain {
     #[func]
     fn set_lod_count(&mut self, count: i32) {
         self.lod_count = count.max(1) as u8;
+    }
+
+    /// Material override applied to all terrain mesh blocks.
+    #[func]
+    fn get_material_override(&self) -> Variant {
+        match &self.material_override {
+            Some(m) => m.to_variant(),
+            None => Variant::nil(),
+        }
+    }
+
+    #[func]
+    fn set_material_override(&mut self, value: Gd<Material>) {
+        self.material_override = Some(value);
+    }
+
+    /// Whether to generate trimesh collision for terrain blocks.
+    #[func]
+    fn get_generate_collision(&self) -> bool {
+        self.generate_collision
+    }
+
+    #[func]
+    fn set_generate_collision(&mut self, enabled: bool) {
+        self.generate_collision = enabled;
     }
 
     /// Set a voxel's SDF value at world position. Triggers a re-mesh of the
@@ -439,6 +464,14 @@ impl VoxelTerrain {
         let mut instance = MeshInstance3D::new_alloc();
         instance.set_mesh(&array_mesh);
         instance.set_position(origin);
+        // Apply material override if set.
+        if let Some(mat) = &self.material_override {
+            instance.set_material_override(mat);
+        }
+        // Generate collision if enabled.
+        if self.generate_collision {
+            instance.create_trimesh_collision();
+        }
         let instance_name = format!("mesh_{}_{}_{}", bpos.x, bpos.y, bpos.z);
         instance.set_name(&instance_name);
         self.base_mut().add_child(&instance);
