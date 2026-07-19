@@ -576,21 +576,34 @@ impl RegionFile<StdVoxelFile> {
     /// Open an existing region file for read+write, or create it if
     /// `create_if_not_found` and it's missing.
     pub fn open(path: &Path, create_if_not_found: bool) -> Result<Self, RegionError> {
-        let mut rf = Self::with_format(RegionFormat::default());
+        Self::open_with_format(path, create_if_not_found, RegionFormat::default())
+    }
+
+    pub fn open_with_format(
+        path: &Path,
+        create_if_not_found: bool,
+        create_format: RegionFormat,
+    ) -> Result<Self, RegionError> {
+        if !create_format.validate() {
+            return Err(RegionError::BadHeader("invalid creation format".into()));
+        }
         if path.exists() {
-            rf.file = Some(StdVoxelFile::open_rw(path).map_err(io)?);
-            rf.load_header()?;
+            let mut region = Self::with_format(create_format);
+            region.file = Some(StdVoxelFile::open_rw(path).map_err(io)?);
+            region.load_header()?;
+            Ok(region)
         } else if create_if_not_found {
-            rf.file = Some(StdVoxelFile::create(path).map_err(io)?);
-            rf.blocks_begin_offset = rf.header.format.header_size_v3() as u64;
-            rf.save_header()?;
+            let mut region = Self::with_format(create_format);
+            region.file = Some(StdVoxelFile::create(path).map_err(io)?);
+            region.blocks_begin_offset = region.header.format.header_size_v3() as u64;
+            region.save_header()?;
+            Ok(region)
         } else {
-            return Err(RegionError::Io(format!(
+            Err(RegionError::Io(format!(
                 "file not found: {}",
                 path.display()
-            )));
+            )))
         }
-        Ok(rf)
     }
 }
 
@@ -632,6 +645,7 @@ mod tests {
     use crate::io::voxel_file::test_support::MemoryFile;
     use crate::storage::voxel_buffer::{Allocator, MAX_CHANNELS};
     use crate::storage::ChannelDepth;
+    use crate::testing::TestDirectory;
 
     /// Build a small region (2×2×2 blocks of 2³ voxels) for tests. Channel
     /// depths match `VoxelBuffer`'s defaults so `verify_block` passes on
@@ -743,6 +757,22 @@ mod tests {
         assert_eq!(rf.header_block_count(), 8); // 2×2×2
         assert!(rf.is_open());
         assert!(!rf.has_block(Vector3i::new(0, 0, 0)));
+    }
+
+    #[test]
+    fn open_with_format_uses_requested_format_for_new_file() {
+        let dir = TestDirectory::new().unwrap();
+        let path = dir.path().join("custom.vxr");
+        let format = RegionFormat {
+            region_size: Vector3i::splat(2),
+            sector_size: 256,
+            ..RegionFormat::default()
+        };
+
+        let mut created = RegionFile::open_with_format(&path, true, format.clone()).unwrap();
+        created.close().unwrap();
+        let reopened = RegionFile::open(&path, false).unwrap();
+        assert_eq!(reopened.format(), &format);
     }
 
     #[test]
