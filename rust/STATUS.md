@@ -31,7 +31,7 @@ and Android aarch64 GDExtension smoke when triggered by hand.
 |---|---|---|
 | **M1** | Долг по ревью кода (§9 + §7): TSan, D7, волна 3 (B1/B3/B4/B5/C1/C3), H2-MT бенч, cargo-fuzz, CI, риски §7 | ✅ **ПОЛНОСТЬЮ ЗАКРЫТ 2026-07-12** — M1.A (TSan) + M1.B (D7) + M1.C (волна 3) + M1.D (graph C1+C3) + M1.E (cargo-fuzz + OOM fix + §7 риски + H2-MT bench). CI auto-trigger (item 11) отложено до стабилизации пилота. |
 | **M2** | Фаза 4 до GO: multi-LOD paging (`VoxelLodTerrain`), остаток `VoxelEngine`, `VoxelDataGrid`, сквозной TSan | ✅ **GO-критерий закрыт:** M2.1 (multi-LOD paging) + M2.2 (transition cells) + TSan (M1.A). Clipbox/fading/VoxelEngine residual — deferred polish. |
-| **M3** | Фаза 5: Godot binding 75+ классов + editor/edition/modifiers/instancing/terrain-root | 🟡 начат: **VoxelTerrain (Node3D) + VoxelViewer (Node3D)** — первые Godot классы, rendering path функционален |
+| **M3** | Фаза 5: Godot binding 75+ классов + editor/edition/modifiers/instancing/terrain-root | 🟡 в работе: VoxelTerrain + VoxelViewer + 4 generators (Waves/Flat/Noise/Heightmap) + edition tools (set/get_voxel_sdf, raycast) + lod_count property + dirty re-upload |
 | **M4** | Паритет и удаление C++ из `master`; форк — чистый Rust-проект | ⏳ |
 
 **Текущий фокус:** **M1 полностью закрыт.** Все основные пункты выполнены: TSan (0 data race),
@@ -41,10 +41,10 @@ H2-MT bench результаты: single 47µs/86 Melem/s, multi 673µs/194 Mele
 **M2 GO-критерий закрыт.** Multi-LOD paging (M2.1) + transition cells (M2.2) + TSan (M1.A) = Фаза 4
 выполнена. Clipbox streaming / fading / VoxelEngine residual deferred как polish.
 **Следующий milestone — M3 (Phase 5):** Godot binding + editor.
-**M3 начат:** VoxelTerrain (Node3D) + VoxelViewer (Node3D) — первые Godot классы
-с rendering path (paging → mesh → ArrayMesh upload → MeshInstance3D). Далее:
-generator/stream binding (VoxelGenerator как Resource property), edition tools,
-editor plugins.
+**M3 в работе:** VoxelTerrain (Node3D) + VoxelViewer (Node3D) + 4 generator Resources
+(Waves/Flat/Noise/Heightmap) + edition tools (set/get_voxel_sdf, raycast) +
+lod_count property + dirty block re-upload. Rendering + editing функциональны.
+Далее: stream binding, editor plugins, instancing, modifiers.
 
 **D7 (M1.B):** `Channel.data` теперь `enum ChannelData { U8/U16/U32/U64(Vec<_>) }` — hot loops
 depth-dispatch один раз на канал и индексируют типизированный slice напрямую. Wire-format
