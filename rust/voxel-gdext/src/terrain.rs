@@ -287,6 +287,83 @@ impl VoxelTerrain {
             PackedInt32Array::new()
         }
     }
+
+    /// SDF raycast: march along a ray from `origin` in `direction` (normalized)
+    /// up to `max_distance` voxels. Returns the hit position as
+    /// `[x, y, z, hit]` where `hit` is 1.0 if the ray hit terrain, 0.0 otherwise.
+    /// Uses a simple fixed-step SDF march (no spatial acceleration — MVP).
+    #[func]
+    #[allow(clippy::too_many_arguments)]
+    fn raycast(
+        &self,
+        origin_x: f64,
+        origin_y: f64,
+        origin_z: f64,
+        dir_x: f64,
+        dir_y: f64,
+        dir_z: f64,
+        max_distance: f64,
+    ) -> PackedFloat32Array {
+        let Some(core) = self.core.as_ref() else {
+            return PackedFloat32Array::new();
+        };
+        let data = core.data();
+        let channel = ChannelId::Sdf.index();
+        let settings = data.settings_snapshot();
+        let depth = settings.format.depths[channel];
+        let block_size_po2 = data.block_size_po2();
+
+        let ox = origin_x as f32;
+        let oy = origin_y as f32;
+        let oz = origin_z as f32;
+        let dx = dir_x as f32;
+        let dy = dir_y as f32;
+        let dz = dir_z as f32;
+        let max_d = max_distance as f32;
+
+        // Normalise direction.
+        let dlen = (dx * dx + dy * dy + dz * dz).sqrt();
+        if dlen < 1e-6 {
+            return PackedFloat32Array::from(&[0.0, 0.0, 0.0, 0.0]);
+        }
+        let ndx = dx / dlen;
+        let ndy = dy / dlen;
+        let ndz = dz / dlen;
+
+        // March with 1-voxel steps.
+        let step = 1.0f32;
+        let mut t = 0.0f32;
+        while t < max_d {
+            let px = ox + ndx * t;
+            let py = oy + ndy * t;
+            let pz = oz + ndz * t;
+            let vi = Vector3i::new(px as i32, py as i32, pz as i32);
+            let block_pos = voxel_core::storage::voxel_data_map::VoxelDataMap::voxel_to_block_b(
+                vi,
+                block_size_po2,
+            );
+            let raw = data.with_lod_map(0, |map| {
+                map.get_block(block_pos)
+                    .filter(|b| b.has_voxels())
+                    .map(|b| {
+                        b.voxels().get_voxel(
+                            vi.x.rem_euclid(data.block_size() as i32),
+                            vi.y.rem_euclid(data.block_size() as i32),
+                            vi.z.rem_euclid(data.block_size() as i32),
+                            channel,
+                        )
+                    })
+                    .unwrap_or(0)
+            });
+            let sdf = voxel_core::storage::voxel_buffer::raw_voxel_to_real(raw, depth);
+            // SDF < 0 means inside solid → hit.
+            if sdf < 0.0 {
+                return PackedFloat32Array::from(&[px, py, pz, 1.0]);
+            }
+            t += step;
+        }
+        PackedFloat32Array::from(&[0.0, 0.0, 0.0, 0.0])
+    }
 }
 
 impl VoxelTerrain {
