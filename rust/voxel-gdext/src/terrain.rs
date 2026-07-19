@@ -41,8 +41,11 @@ pub struct VoxelTerrain {
     /// children, keyed by `mesh_block_pos`.
     mesh_instances: HashMap<Vector3i, Gd<MeshInstance3D>>,
     /// Generator resource (VoxelGeneratorWaves or VoxelGeneratorFlat).
-    /// Set via the `generator` property in the Godot inspector.
     generator_resource: Option<Gd<Resource>>,
+    /// Number of LOD levels (1 = single-LOD, 2+ = multi-LOD with transitions).
+    lod_count: u8,
+    /// Blocks that were edited and need re-meshing.
+    dirty_blocks: std::collections::HashSet<Vector3i>,
 }
 
 #[godot_api]
@@ -53,6 +56,8 @@ impl INode3D for VoxelTerrain {
             core: None,
             mesh_instances: HashMap::new(),
             generator_resource: None,
+            lod_count: 1,
+            dirty_blocks: std::collections::HashSet::new(),
         }
     }
 
@@ -68,15 +73,23 @@ impl INode3D for VoxelTerrain {
         format.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
         data.set_format(format);
 
-        // Install generator from property, or default to Waves.
         let generator = self.resolve_generator();
         data.set_generator(Some(generator));
 
         let mesher = Arc::new(TransvoxelMesher::new());
         let meshing_dep = MeshingDependency::new(mesher, None);
-        let core = VoxelTerrainCore::new_generator_only(data, meshing_dep);
+        let core = if self.lod_count > 1 {
+            let stream: Arc<dyn voxel_core::streams::VoxelStream> =
+                Arc::new(voxel_core::streams::MemoryStream::new());
+            VoxelTerrainCore::new_with_lod_count(data, stream, meshing_dep, self.lod_count)
+        } else {
+            VoxelTerrainCore::new_generator_only(data, meshing_dep)
+        };
         self.core = Some(core);
-        godot_print!("VoxelTerrain ready — terrain core initialised");
+        godot_print!(
+            "VoxelTerrain ready — terrain core initialised (lod_count={})",
+            self.lod_count
+        );
     }
 
     fn process(&mut self, _delta: f64) {
@@ -108,9 +121,15 @@ impl INode3D for VoxelTerrain {
         /// Pending mesh upload: (position, vertices, normals, indices, lod)
         type PendingMesh = (Vector3i, Vec<f32>, Vec<f32>, Vec<i32>, u8);
         let mut to_upload: Vec<PendingMesh> = Vec::new();
+        let dirty = std::mem::take(&mut self.dirty_blocks);
         for lod in 0..core.lod_count() {
             for (&bpos, entry) in core.mesh_blocks_at_lod(lod).iter() {
-                if !entry.is_loaded || self.mesh_instances.contains_key(&bpos) {
+                if !entry.is_loaded {
+                    continue;
+                }
+                // Upload if: (a) not yet uploaded, or (b) dirty (edited).
+                let is_dirty = dirty.contains(&bpos);
+                if !is_dirty && self.mesh_instances.contains_key(&bpos) {
                     continue;
                 }
                 if let Some(output) = &entry.output {
@@ -138,8 +157,12 @@ impl INode3D for VoxelTerrain {
             }
         }
 
-        // Upload after releasing the core borrow.
+        // Upload after releasing the core borrow. For dirty blocks, remove old
+        // MeshInstance3D first so we replace it with the new mesh.
         for (bpos, verts, norms, idx, lod) in to_upload {
+            if let Some(mut old) = self.mesh_instances.remove(&bpos) {
+                old.queue_free();
+            }
             self.upload_mesh(bpos, &verts, &norms, &idx, lod);
         }
     }
@@ -174,6 +197,19 @@ impl VoxelTerrain {
         self.generator_resource = Some(value);
     }
 
+    /// Number of LOD levels (1 = single-LOD, 2+ = multi-LOD with transitions).
+    /// Must be set before _ready (in the inspector or via script before adding
+    /// to the scene tree).
+    #[func]
+    fn get_lod_count(&self) -> i32 {
+        self.lod_count as i32
+    }
+
+    #[func]
+    fn set_lod_count(&mut self, count: i32) {
+        self.lod_count = count.max(1) as u8;
+    }
+
     /// Set a voxel's SDF value at world position. Triggers a re-mesh of the
     /// affected block on the next process tick.
     #[func]
@@ -192,6 +228,12 @@ impl VoxelTerrain {
         let ok = data.try_set_voxel(raw, pos, channel);
         if ok {
             data.mark_area_modified(voxel_core::math::Box3i::new(pos, Vector3i::splat(1)), false);
+            // Mark the block dirty so the process loop re-uploads its mesh.
+            let block_pos = voxel_core::storage::voxel_data_map::VoxelDataMap::voxel_to_block_b(
+                pos,
+                data.block_size_po2(),
+            );
+            self.dirty_blocks.insert(block_pos);
         }
         ok
     }
