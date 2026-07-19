@@ -173,6 +173,78 @@ impl VoxelTerrain {
     fn set_generator(&mut self, value: Gd<Resource>) {
         self.generator_resource = Some(value);
     }
+
+    /// Set a voxel's SDF value at world position. Triggers a re-mesh of the
+    /// affected block on the next process tick.
+    #[func]
+    fn set_voxel_sdf(&mut self, world_x: i32, world_y: i32, world_z: i32, value: f32) -> bool {
+        let Some(core) = self.core.as_ref() else {
+            return false;
+        };
+        let pos = Vector3i::new(world_x, world_y, world_z);
+        let data = core.data();
+        let channel = ChannelId::Sdf.index();
+        let settings = data.settings_snapshot();
+        let raw = voxel_core::storage::voxel_buffer::real_to_raw_voxel(
+            value,
+            settings.format.depths[channel],
+        );
+        let ok = data.try_set_voxel(raw, pos, channel);
+        if ok {
+            data.mark_area_modified(voxel_core::math::Box3i::new(pos, Vector3i::splat(1)), false);
+        }
+        ok
+    }
+
+    /// Get a voxel's SDF value at world position.
+    #[func]
+    fn get_voxel_sdf(&self, world_x: i32, world_y: i32, world_z: i32) -> f32 {
+        let Some(core) = self.core.as_ref() else {
+            return 0.0;
+        };
+        let pos = Vector3i::new(world_x, world_y, world_z);
+        let data = core.data();
+        let channel = ChannelId::Sdf.index();
+        // SharedVoxelData doesn't expose get_voxel directly; use the settings
+        // default if no block is loaded. This is a read-only diagnostic.
+        let settings = data.settings_snapshot();
+        let block_pos = voxel_core::storage::voxel_data_map::VoxelDataMap::voxel_to_block_b(
+            pos,
+            data.block_size_po2(),
+        );
+        let raw = data.with_lod_map(0, |map| {
+            map.get_block(block_pos)
+                .filter(|b| b.has_voxels())
+                .map(|b| {
+                    b.voxels().get_voxel(
+                        pos.x.rem_euclid(data.block_size() as i32),
+                        pos.y.rem_euclid(data.block_size() as i32),
+                        pos.z.rem_euclid(data.block_size() as i32),
+                        channel,
+                    )
+                })
+                .unwrap_or(0)
+        });
+        voxel_core::storage::voxel_buffer::raw_voxel_to_real(raw, settings.format.depths[channel])
+    }
+
+    /// Returns the terrain bounds as [min_x, min_y, min_z, size_x, size_y, size_z].
+    #[func]
+    fn get_bounds(&self) -> PackedInt32Array {
+        if let Some(core) = self.core.as_ref() {
+            let bounds = core.data().bounds();
+            PackedInt32Array::from(&[
+                bounds.position.x,
+                bounds.position.y,
+                bounds.position.z,
+                bounds.size.x,
+                bounds.size.y,
+                bounds.size.z,
+            ])
+        } else {
+            PackedInt32Array::new()
+        }
+    }
 }
 
 impl VoxelTerrain {
