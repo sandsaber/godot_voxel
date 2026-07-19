@@ -584,15 +584,15 @@ impl RegionFile<StdVoxelFile> {
         create_if_not_found: bool,
         create_format: RegionFormat,
     ) -> Result<Self, RegionError> {
-        if !create_format.validate() {
-            return Err(RegionError::BadHeader("invalid creation format".into()));
-        }
         if path.exists() {
-            let mut region = Self::with_format(create_format);
+            let mut region = Self::with_format(RegionFormat::default());
             region.file = Some(StdVoxelFile::open_rw(path).map_err(io)?);
             region.load_header()?;
             Ok(region)
         } else if create_if_not_found {
+            if !create_format.validate() {
+                return Err(RegionError::BadHeader("invalid creation format".into()));
+            }
             let mut region = Self::with_format(create_format);
             region.file = Some(StdVoxelFile::create(path).map_err(io)?);
             region.blocks_begin_offset = region.header.format.header_size_v3() as u64;
@@ -773,6 +773,43 @@ mod tests {
         created.close().unwrap();
         let reopened = RegionFile::open(&path, false).unwrap();
         assert_eq!(reopened.format(), &format);
+    }
+
+    #[test]
+    fn open_with_format_rejects_oversized_block_size_for_new_file() {
+        let dir = TestDirectory::new().unwrap();
+        let path = dir.path().join("invalid.vxr");
+        let format = RegionFormat {
+            block_size_po2: 22,
+            ..RegionFormat::default()
+        };
+
+        assert!(matches!(
+            RegionFile::open_with_format(&path, true, format),
+            Err(RegionError::BadHeader(_))
+        ));
+    }
+
+    #[test]
+    fn open_with_format_ignores_creation_format_for_existing_file() {
+        let dir = TestDirectory::new().unwrap();
+        let path = dir.path().join("existing.vxr");
+        let persisted_format = RegionFormat {
+            region_size: Vector3i::splat(2),
+            sector_size: 256,
+            ..RegionFormat::default()
+        };
+        let invalid_creation_format = RegionFormat {
+            block_size_po2: 0,
+            ..RegionFormat::default()
+        };
+
+        let mut created =
+            RegionFile::open_with_format(&path, true, persisted_format.clone()).unwrap();
+        created.close().unwrap();
+
+        let reopened = RegionFile::open_with_format(&path, false, invalid_creation_format).unwrap();
+        assert_eq!(reopened.format(), &persisted_format);
     }
 
     #[test]

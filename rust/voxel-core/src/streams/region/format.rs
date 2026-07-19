@@ -79,7 +79,7 @@ impl RegionFormat {
         if self.region_size.z < 0 || self.region_size.z as u32 >= MAX_BLOCKS_ACROSS {
             return false;
         }
-        if self.block_size_po2 == 0 {
+        if !(1..=8).contains(&self.block_size_po2) {
             return false;
         }
 
