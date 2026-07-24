@@ -1,7 +1,12 @@
 # Аудит миграции godot_voxel → Rust
 
 > Дата исходного аудита: 2026-07-06 · Ветка: `rust/pilot` (403b81ba, синхронизирована с `origin/rust/pilot`, рабочее дерево чистое)
-> Обновления после аудита фиксируются в §9.7, чтобы отделять исходные находки от уже закрытых пунктов.
+> Повторный аудит: **2026-07-10** · HEAD: `60225f11de4a` · ветка синхронизирована с
+> `origin/rust/pilot`; до изменения этого документа рабочее дерево было чистым.
+> История исправлений исходного аудита сохранена в §9.7; актуальный пересмотр реализации,
+> новые находки и варианты решений находятся в **§11**.
+> Актуализация: **2026-07-24** · линия `origin/rust/pilot` до `e56895ae` сведена с 12
+> локальными data-safety/correctness-коммитами; текущий статус и результаты проверки — §11.10.
 > Метод: проверка заявлений `MIGRATION_PLAN.md` / `rust/STATUS.md` / `REPORT.md` против фактического кода,
 > прогон тестов/clippy/fmt/сборки/бенчмарков, инвентаризация LOC C++ vs Rust,
 > **плюс ревью качества кода**: 5 независимых проходов по подсистемам (storage, meshers,
@@ -12,20 +17,24 @@
 
 ## 1. Резюме
 
-**Заявленное состояние подтверждается фактически.** Все ключевые утверждения документации
-(количество тестов, чистый clippy/fmt, сборка gdext, parity H1, реальная многопоточность,
-real SpatialLock3D) проверены и совпадают с кодом. Расхождений «документация говорит одно,
-код — другое» не найдено.
+**Инфраструктурные заявления подтверждаются, но исходный вывод о корректности пересмотрен.**
+Тесты, clippy/fmt, сборка gdext, H1-goldens, worker pool и `SpatialLock3D` фактически есть
+и проходят. Внедрение A1–A5 также подтверждено на уровне внешних generator/mesher/data-lock.
+Однако повторная сверка с C++ и проверка failure-paths выявили несколько не покрытых тестами
+расхождений и рисков: возможную потерю dirty-блоков, UB в safe API, неограниченные аллокации
+при разборе входных данных, ошибки graph/mesher parity и гонки жизненного цикла mesh-output.
+Поэтому формулировка «алгоритмы портированы корректно» без оговорок больше не используется.
 
-Портировано **~36 900 строк Rust** против **~142 100 строк C++** модуля (без thirdparty) —
-**~26% по сырому LOC**, но портированная часть — это концентрированное compute-ядро
-(math/storage/meshers/streams/generators/terrain-core). Весь Godot-facing слой
-(binding, editor, edition-инструменты, инстансинг, multi-LOD terrain, GPU) — не начат.
+На момент повторного аудита было портировано **38 697 строк Rust** против **142 148 строк C++**
+модуля (без thirdparty) —
+**~27,2% по сырому LOC**, но портированная часть — это концентрированное compute-ядро
+(math/storage/meshers/streams/generators/terrain-core). После этого снимка добавлены multi-LOD,
+transition cells и Godot-facing MVP; актуальная декомпозиция находится в §10.1 и `STATUS.md`.
 
-**Ревью качества кода (§9)**: алгоритмы портированы корректно и идиоматично, но найдены
-два системных долга — Mutex-сериализация всего конвейера (многопоточность пока косметическая,
-§9.1) и абстракционные издержки в горячем пути мешинга, которые C++ целенаправленно устранял
-(§9.2). Плюс набор конкретных фиксов с приоритетами (§9.5).
+**Вердикт повторного аудита (§11):** внешний Mutex-трио исходного аудита в основном снят, но
+на 2026-07-10 production-readiness блокировали safe-API soundness, bounded decode и сохранение
+dirty data, а также набор P1 correctness/parity проблем. Первые блокеры и часть parity-пунктов
+после аудита закрыты; актуализация и оставшаяся очередь — §11.9–11.10.
 
 | Фаза | Заявлено | Аудит |
 |---|---|---|
@@ -38,20 +47,23 @@ real SpatialLock3D) проверены и совпадают с кодом. Ра
 
 ---
 
-## 2. Проверенные факты (прогон 2026-07-07, macOS)
+## 2. Проверенные факты (повторный прогон 2026-07-10, macOS)
 
 | Проверка | Заявлено | Фактически |
 |---|---|---|
-| `cargo test -p voxel-core` | 655 unit + 11 integration + 1 doc-test | ✅ 655 unit + 11 integration (5 e2e + 2 parity + 2 sphere + 1 tables + 1 threaded stress) + 1 doc-test, 0 failed, 1 ignored (diagnostic dump) |
-| `cargo clippy --workspace --all-targets` | чистый | ✅ чистый |
-| `cargo fmt --check` | чистый | ✅ чистый |
-| `cargo build -p voxel-gdext` | собирается | ✅ собирается |
+| `cargo test -p voxel-core` | 655 unit + 11 integration + 1 doc-test | ✅ 655 unit passed; integration: 11 passed (5 e2e + 2 parity + 2 sphere + 1 tables + 1 threaded stress), 1 diagnostic ignored; 1 doc-test passed; 0 failed |
+| `cargo test --workspace` | — | ✅ 655 unit + 11 integration + 1 doc-test passed, 1 integration ignored, 0 failed |
+| `cargo test -p voxel-core --all-features` | — | ✅ 657 unit + 11 integration + 1 doc-test passed, 1 integration ignored, 0 failed |
+| `cargo clippy --workspace --all-targets --all-features -- -D warnings` | чистый | ✅ чистый |
+| `cargo fmt --all -- --check` | чистый | ✅ чистый |
+| `cargo build --workspace --all-features` | собирается | ✅ собирается |
 | H1 mesh parity vs C++ goldens | pass (sphere_16: 888 verts/3912 idx; sphere_32: 3696/18600) | ✅ `transvoxel_parity` проходит против закоммиченных C++ goldens |
 | Transvoxel-таблицы | byte-identical upstream C++ | ✅ `transvoxel_tables_parity` проходит |
 | `ThreadedTaskRunner` | реальные потоки | ✅ `std::thread::spawn` в worker-пуле (`tasks/threaded_task_runner.rs`) |
-| `SpatialLock3D` | real overlap-aware region lock | ✅ подтверждено (`thread/mod.rs`): overlapping reads coexist, overlapping writes block, disjoint boxes proceed |
-| Код без заглушек-паник | — | ✅ ни одного `todo!`/`unimplemented!`/`FIXME`; 6 TODO-комментариев (унаследованы из C++, безобидны) |
-| H2 perf (Rust ~1.5× быстрее C++) | 28.5µs/143 Melem/s vs 44.1µs/93 Mvoxels/s | ✅ бенчи перепрогнаны (macOS): sphere_16 = 27.5µs / 149 Melem/s, sphere_32 = 206 Melem/s — числа воспроизводятся. **Но** бенч меряет ядро `build_regular_mesh` в обход адаптера `builtin.rs` — см. §9.4 |
+| `SpatialLock3D` | real overlap-aware region lock | ✅ базовая механика подтверждена (`thread/mod.rs`): overlapping reads coexist, overlapping writes block; touching half-open boxes считаются пересекающимися, fairness/lock-order оговорены в §11.6 |
+| Код без явных заглушек | — | ✅ `todo!`/`unimplemented!` в production-path не найдено; это не отменяет failure-path и parity-находки §11 |
+| H2 perf (Rust ~1.5× быстрее C++) | 28.5µs/143 Melem/s vs 44.1µs/93 Mvoxels/s | ✅ criterion перепрогнан (`sample-size 10`): sphere_16 ≈27,2µs / 150 Melem/s, sphere_32 ≈156µs / 210 Melem/s, sphere_64 ≈958µs / 274 Melem/s. **Но** бенч меряет ядро `build_regular_mesh` в обход адаптера `builtin.rs` — см. §9.4 и §11.6 |
+| Воспроизводимость Cargo | — | ⚠️ `rust/Cargo.lock` существует локально, но игнорируется `rust/.gitignore:4`; CI-команды не используют `--locked` (§11.7) |
 
 ---
 
@@ -61,10 +73,10 @@ real SpatialLock3D) проверены и совпадают с кодом. Ра
 
 | Директория | LOC | Содержимое | Rust-покрытие |
 |---|---:|---|---|
-| terrain/ | 25 233 | fixed_lod (4,1k), variable_lod (9,9k), instancing (9,2k), root (2,0k) | 🟡 только engine-agnostic single-LOD ядро (1 084) |
+| terrain/ | 25 233 | fixed_lod (4,1k), variable_lod (9,9k), instancing (9,2k), root (2,0k) | 🟡 только engine-agnostic single-LOD ядро (1 243) |
 | util/ | 23 809 | godot-shims (7,8k), math (4,9k), noise (3,1k), containers, thread, tasks, io | 🟢 math/string/io/tasks/thread портированы; godot-shims N/A; FastNoise2 нет |
 | generators/ | 19 386 | graph (14,1k), multipass (2,3k), simple (1,4k) | 🟡 minimal graph runtime (1,8k), simple частично; multipass нет |
-| meshers/ | 16 503 | blocky (9,2k), transvoxel (4,6k), cubes (1,6k) | 🟢 все три ядра + адаптеры VoxelMesher (7 780) |
+| meshers/ | 16 503 | blocky (9,2k), transvoxel (4,6k), cubes (1,6k) | 🟢 все три ядра + адаптеры VoxelMesher (8 165) |
 | editor/ | 12 833 | 11 EditorPlugin-ов (graph editor 5,5k и др.) | 🔴 ноль |
 | tests/ | 9 025 | C++ тест-сюита | ➖ своя Rust-сюита, не зеркалирует C++ |
 | storage/ | 8 126 | buffer, data/map/block/grid, format, mixel4, metadata | 🟢 ядро портировано; metadata/ и VoxelDataGrid нет |
@@ -75,11 +87,11 @@ real SpatialLock3D) проверены и совпадают с кодом. Ра
 | modifiers/ | 1 467 | VoxelModifier стек | 🔴 ноль |
 | constants/ | 670 | cube tables и др. | 🟢 портировано |
 
-### Rust — 36 907 LOC
+### Rust — 38 697 LOC
 
-- `voxel-core/src` — **36 825 LOC**: math 6 332 · meshers 7 780 · storage 5 456 · streams 4 687 ·
-  generators 3 182 · format/vox 1 485 · string 1 353 · tasks 1 318 · io 1 255 · engine 1 249 ·
-  terrain 1 084 · thread 472 · constants 466 · containers 265 · прочее 441.
+- `voxel-core/src` — **38 615 LOC**: meshers 8 165 · storage 6 352 · math 6 332 · streams 4 794 ·
+  generators 3 228 · format/vox 1 505 · tasks 1 397 · string 1 353 · terrain 1 243 · engine 1 241 ·
+  io 1 255 · thread 578 · constants 466 · containers 265 · прочее 441.
 - `voxel-gdext/src` — **82 LOC**: entry point + один класс `VoxelRustHello` (hello-world). Реальных биндингов нет.
 - Инфраструктура: workspace с pinned toolchain 1.96.1 + 4 mobile-таргета, criterion-бенчи,
   `cpp-baseline/` C++ harness (goldens + perf), `scripts/android-build.sh` (NDK r29 + rust-lld workaround).
@@ -96,8 +108,11 @@ GraphGenerator (24+ узлов) / Waves / Flat / Noise / HeightmapNoise
   → VoxelData (LOD-каскад, view/unview refcount, copy/paste, generator fallback)
   → MeshBlockTask (gather 3×3×3 + gap-fill)
   → VoxelMesher: Transvoxel / Cubes / Blocky
-  → VoxelTerrainCore (single-LOD paging: viewers → loads → meshing → outputs → unload)
-  → VoxelEngine (volume/viewer registry, ThreadedTaskRunner, drain loop, приоритеты)
+  → VoxelTerrainCore (single-LOD paging: viewers → loads → meshing → outputs → unload;
+                      пока владеет отдельным ThreadedTaskRunner)
+
+VoxelEngine foundation (отдельно: volume/viewer registry, свой runner, priority sync;
+                        пока не оркестрирует VoxelTerrainCore)
 ```
 
 ---
@@ -131,7 +146,7 @@ GraphGenerator (24+ узлов) / Waves / Flat / Noise / HeightmapNoise
 | generators/simple | Flat/Waves/Noise/HeightmapNoise | Image, Noise2D-generator варианты |
 | util/thread | Mutex/RwLock/Semaphore, real SpatialLock3D, реальный task runner | `SpatialLock2D`, ThreadSanitizer end-to-end |
 | meshers/transvoxel | regular cells, parity с C++ | transition cells (LOD-переходы) для variable LOD |
-| meshers/cubes | greedy/simple + palette | atlased mode (UV packing) |
+| meshers/cubes | greedy/simple + palette | C++ default raw-color mode, atlased mode (UV packing) |
 
 ---
 
@@ -151,7 +166,9 @@ GraphGenerator (24+ узлов) / Waves / Flat / Noise / HeightmapNoise
    валидирована, on-device — формальность для pure-Rust кода без платформ-специфики».
 3. **GO-критерий Фазы 4 по TSan — ✅ закрыто 2026-07-12 (M1.A).** ThreadSanitizer прогнан на
    Linux/nightly через workspace-член `tsan` (5 тестов: edit/load/mesh stress + SpatialLock3D
-   + ThreadedTaskRunner). 0 data race. См. §9.7.
+   + ThreadedTaskRunner). 0 data race. См. §9.7. При этом TSan не доказывает корректность
+   cancellation/versioning, save lifecycle и panic-liveness; оставшиеся логические риски
+   продолжают отслеживаться в датированном повторном аудите §11.
 4. **Parity-покрытие тестами точечное.** Byte-parity доказан для transvoxel-таблиц и двух golden-сфер;
    остальные модули покрыты юнит-тестами, портированными «по мотивам» C++, но C++ тест-сюита
    (9 025 LOC, 61 файл) не зеркалируется системно. Риск тихих поведенческих расхождений в углах.
@@ -180,11 +197,17 @@ GraphGenerator (24+ узлов) / Waves / Flat / Noise / HeightmapNoise
 > C++-референсом; все находки ниже имеют точные file:line и перепроверены выборочно
 > вручную. Бенчмарки перепрогнаны. Оценки модулей:
 > **streams/math/io 8/10 · storage 7/10 · generators 7/10 · meshers 6/10 · конкурентность 5/10.**
+>
+> **Исторический раздел.** §9.1–§9.6 фиксируют состояние и рекомендации 2026-07-06;
+> §9.7 — внедрённые после него изменения. Не следует читать старые оценки как текущий
+> production-verdict: повторная проверка и актуальные ссылки находятся в §11.
 
-### 9.1 Критично: конкурентная модель фактически однопоточная
+### 9.1 Исходная критическая находка: внешняя сериализация конвейера
 
-Три слоя полной сериализации в горячем пути. Любого из них достаточно, чтобы
-свести пользу пула потоков к нулю; вместе они делают число worker-потоков косметическим:
+В исходном состоянии были три слоя полной сериализации в горячем пути. Внешние
+generator/mesher/data-lock из пп. 1–3 сняты изменениями A1–A5 (§9.7), поэтому этот абзац
+нельзя использовать как описание текущей реализации. Остались внутренняя сериализация
+`GraphGenerator` и per-LOD map contention — см. §11.5–§11.6.
 
 1. **`Mutex` вокруг мешера держится на весь `build()`** — `meshers/mesh_block_task.rs:124-178`:
    guard берётся до gather и живёт через весь `mesher.build()` (самый дорогой шаг конвейера).
@@ -625,32 +648,18 @@ Linux/nightly закрыт 2026-07-12 (M1.A):** формальный GO-крит
 конкурентности выполнен — data race не найдена на edit/load/mesh stress, `SpatialLock3D`
 под нагрузкой и `ThreadedTaskRunner` enqueue/postpone путях.
 
-## 10. Вывод
+## 10. Переход от исходного аудита к повторному
 
-Миграция идёт дисциплинированно: каждая фаза закрывается тестами, документация точна,
-код без заглушек-паник, parity подтверждён исполняемыми тестами, зависимость от C-кода
-минимальна (важно для Android/WASM). Ревью кода подтверждает: **алгоритмическая корректность
-и идиоматика на высоте** (порт не механический: Option вместо сентинелей, RAII-пул, точные
-byte-parity тесты), но **два системных долга** требуют внимания до продолжения Фазы 4/5:
+Исходный аудит полезно сохранять как историю: он правильно обнаружил внешние mutex-узкие места,
+и большая часть A1–A5 действительно внедрена. Но вывод «после stress остаётся только TSan»
+больше не подтверждается. TSan не найдёт логические ошибки cancellation/versioning, потерю
+данных при save, неверную семантику graph nodes или неограниченные аллокации парсеров.
 
-1. **Конкурентная модель** (§9.1): trait-level сериализация генерации/мешинга снята,
-   callbacks больше не выполняются под data/map lock, а `SharedVoxelData` worker bridge
-   перешёл на settings lock + per-LOD map locks, task runner получил semaphore/staging и
-   неблокирующий terrain drain, macOS stress для edit/load/mesh зелёный. Формально закрыть
-   GO Фазы 4 ещё мешает TSan-проверка.
-2. **Горячий путь мешинга** (§9.2): адаптерный слой вернул абстракционные издержки, которые C++
-   целенаправленно устранял; заявление H2 о 1.5× преимуществе не распространяется на end-to-end конвейер.
+Актуальный roadmap и прогресс после повторного аудита зафиксированы в §10.1. Детальный
+повторный аудит от 2026-07-10 сохранён в §11 как датированный снимок: он не отменяет закрытые
+пункты §9.7, а уточняет границы их действия и добавляет проверенные failure-path/parity-находки.
 
-План действий — три волны из §9.6: (1) волна 1 закрыта,
-(2) волна 2 — A3, A5 и macOS stress закрыты, дальше TSan
-(закрывает GO-критерий Фазы 4 формально), (3) волна 3 — перф-фиксы горячего пути и graph runtime
-с перемером H2 end-to-end. Параллельно: настроить upstream-tracking (`cpp-reference`) и
-вернуться к автоматическому Rust CI/bench smoke/x86_64-android smoke, когда GitHub flow будет готов.
-Multi-LOD paging начинать после волны 2 — уже на исправленной threading-модели.
-
----
-
-## 11. Цель: полностью закрыть аудит (постановка 2026-07-12)
+## 10.1 Roadmap и прогресс после повторного аудита (2026-07-12—20)
 
 > Постановка от заказчика: «сначала закрыть §9 (долг по ревью кода), затем пройти весь путь
 > до конца миграции (вариант охвата 4); коммитить и пушить по шагам, обновлять статус».
@@ -658,7 +667,7 @@ Multi-LOD paging начинать после волны 2 — уже на исп
 > Сам аудит при этом НЕ переписывается ретроактивно — исходные находки §9 остаются как есть,
 > закрытые пункты отмечаются в журнале §9.7, а прогресс по дорожной карте — здесь и в `STATUS.md`.
 
-### 11.1 Definition of Done — «Аудит полностью закрыт»
+### 10.1.1 Definition of Done — «Аудит полностью закрыт»
 
 Все четыре milestone'а ниже выполнены, каждый подтверждён прогонами (тесты/clippy/fmt/бенчи)
 и зафиксирован коммитом + записью в §9.7 или соответствующей фазовой секции `STATUS.md`.
@@ -674,7 +683,7 @@ Multi-LOD paging начинать после волны 2 — уже на исп
 последовательно после M1. Опционально-отложенные подсистемы (GPU/`detail_rendering`/`shaders`,
 `sqlite`, `multipass`, `FastNoise2`, physics/Rapier) выносятся за скобки DoD и трекаются отдельно.
 
-### 11.2 Дорожная карта (порядок исполнения)
+### 10.1.2 Дорожная карта (порядок исполнения)
 
 Работа ведётся в ветке `rust/pilot` (как сейчас), каждый пункт — отдельный коммит + push.
 После каждого milestone — обновление `rust/STATUS.md` и журнала `§9.7`. Инвариант на всём
@@ -800,14 +809,14 @@ CI auto-trigger (item 11) отложено до стабилизации пил�
     как зеркало upstream для отслеживания будущих bugfix'ов.
 **DoD M4:** `master` собирается и проходит все тесты без C++; `cpp-reference` обновляется из Zylann/master.
 
-### 11.3 Что НЕ входит в DoD (опционально/отложено)
+### 10.1.3 Что НЕ входит в DoD (опционально/отложено)
 
 - GPU-путь: `engine/gpu`, `engine/detail_rendering` (normal maps), `shaders/` (~7.1k LOC).
 - `streams/sqlite` (2.2k), `generators/multipass` (2.3k), `util/noise` FastNoise2/SpotNoise (~3.1k).
 - Physics (Rapier, §9 плана — не начат).
 Эти подсистемы трекаются отдельно; их отсутствие не блокирует ни один milestone.
 
-### 11.4 Процесс (по требованию заказчика)
+### 10.1.4 Процесс (по требованию заказчика)
 
 - Ветка: `rust/pilot` (как сейчас); milestone может выделять долгоживущую ветку `rust/m{1,2,3}` по необходимости.
 - Каждый пункт дорожной карты → отдельный коммит + `git push`; сообщение коммита по образцу
@@ -815,3 +824,482 @@ CI auto-trigger (item 11) отложено до стабилизации пил�
 - После каждого milestone — обновление `rust/STATUS.md` (фаза/тесты/секция «what remains») и
   журнала `§9.7` (для M1) или новой фазовой секции (для M2+).
 - Инварианты (тесты/clippy/fmt/golden-parity) проверяются перед каждым push.
+
+---
+
+## 11. Повторный аудит реализации — 2026-07-10
+
+### 11.1 Объём и критерии
+
+Проверен HEAD `60225f11de4a` на ветке `rust/pilot`. До изменения только этого документа
+рабочее дерево было чистым; ветка совпадала с `origin/rust/pilot` (`0 ahead / 0 behind`).
+Ревью включало:
+
+- повторный прогон workspace и all-features тестов, fmt, clippy с `-D warnings`, сборки и
+  criterion-бенчмарка;
+- трассировку ownership/error/cancellation/shutdown путей terrain → tasks → streams;
+- сверку graph, mesh-gather, Blocky/Cubes/Transvoxel и region/VOX форматов с C++-референсом;
+- проверку того, что тесты действительно доказывают заявленные свойства, а не только проходят;
+- поиск safe-API soundness, allocation amplification, on-disk integrity и lock-ordering рисков.
+
+Не выполнялись on-device Android smoke, Linux TSan/Miri, fault-injection с реальным process kill,
+долгий soak и автоматический RustSec scan. Их отсутствие явно учитывается в verdict, а не
+подменяется зелёным `cargo test`.
+
+Приоритеты:
+
+- **P0** — закрыть до production persistence, импорта недоверенных файлов или публичного binding;
+- **P1** — закрыть до заявления C++ parity / завершения Фазы 4;
+- **P2** — не блокирует исследовательскую ветку, но требует задачи, теста и измеримого DoD.
+
+### 11.2 Что из прежнего плана подтверждено
+
+| Пункт | Текущий статус | Граница подтверждения |
+|---|---|---|
+| A1 generator `&self + Arc<dyn>` | 🟡 частично | внешний mutex снят; `GraphGenerator` всё ещё держит один scratch-mutex на весь block call |
+| A2 mesher `&self + Arc<dyn>` | ✅ | общий внешний mutex снят, Transvoxel cache — TLS; geometry/output scratch reuse не сделан |
+| A3 settings + per-LOD map + `SpatialLock3D` | 🟡 частично | cross-LOD lock снят; весь map одного LOD остаётся одним `RwLock`, edit transaction не атомарна |
+| A4 callbacks вне data/map locks | ✅ для текущих load/gather путей | generator/mesher/stream вызываются после snapshot/drop; публичный API всё ещё допускает иной lock order |
+| A5 semaphore/staging/nonblocking drain | 🟡 механика есть | stale/cancelled outputs, panic liveness, приоритеты terrain и persistence shutdown не закрыты |
+| B2 uniform Transvoxel fast-path | ✅ вычислительно | выдаётся пустая surface вместо C++ zero-surfaces; direct golden обходит adapter/depth paths |
+| C2 uniform graph compression | ✅ | подтверждено тестом constant-output |
+| D1 deferred region header | ✅ только I/O amplification | crash consistency и multi-handle coherency не обеспечены |
+| D2 negative `.vox` SIZE | ✅ только этот кейс | framing и cumulative allocation budgets отсутствуют |
+
+### 11.3 Сводка новых и уточнённых находок
+
+| ID | Приоритет | Находка | Последствие |
+|---|---|---|---|
+| SAVE-1 | **P0** | dirty block удаляется до подтверждения save; error/cancel/shutdown теряют единственный payload | безвозвратная потеря edits |
+| SAVE-2 | **P0** | save одного блока не сериализованы/не версионированы | старый completion может перезаписать новое состояние |
+| SAFE-1 | **P0** | public safe `Vector3/4::get/set` достигают `unreachable_unchecked` | UB из safe Rust в release |
+| DECODE-1 | **P0** | compression/block/region/VOX readers аллоцируют по недоверенным размерам без budget | OOM/abort, memory amplification |
+| REGION-1 | **P1** | LUT/header не валидируются полностью; wire limits проверяются только `debug_assert` | чтение/запись повреждённых region files |
+| REGION-2 | **P1** | compaction + deferred header не crash-consistent | старый LUT указывает на уже сдвинутые данные |
+| REGION-3 | **P1** | несколько `RegionFile` handles имеют независимые LUT/cache без path lock/reload | lost update и overwrite одного файла |
+| EDIT-1 | ✅ закрыто 2026-07-10 | edit отсутствующего procedural block создаёт default buffer; edit и dirty flag разнесены | закрыто transactional API, terrain adoption и regression suite (§11.9) |
+| GRAPH-1 | ✅ закрыто 2026-07-10 | `SdfSmoothSubtract` меняет местами operands | закрыто C++ parity-вектором и исправлением порядка operands (§11.9) |
+| GRAPH-2 | **P1** | Distance/Normalize/Remap/Divide не совпадают с одноимёнными C++ nodes | graph assets нельзя считать parity-compatible |
+| MESH-1 | **P1** | dependency проверяется только до build; cancelled task может не дать output | stale mesh применяется или remesh теряется |
+| GATHER-1 | **P1** | missing halo генерируется целыми blocks без bounds clipping | boundary seams и до ~38,5× лишних samples |
+| BLOCKY-1 | **P1** | AO strength не делится на 3 и не clamp-ится | отрицательные vertex colors при default 0,8 |
+| CUBES-1 | **P1** | Rust adapter всегда palette-mode, C++ default — raw RGBA | иные цвета, alpha и material routing |
+| VOX-1 | **P1** | known chunks игнорируют declared framing; global model budget отсутствует | parser desync и гигабайты из малого файла |
+| META-1 | **P1** | block metadata skip превращается wrapper-ом в `Ok(())` | тихая потеря metadata при load→save |
+| TASK-1 | **P1** | terrain load получает max priority, mesh — minimum; старые loads не cancel-ятся | starvation mesh/save и retry storm |
+| TASK-2 | **P1** | panic обходит in-flight cleanup runner | зависший wait/shutdown или потерянный worker |
+| GRAPH-PERF-1 | **P2** | один `Mutex<GraphScratch>` сериализует shared graph generator | pool workers генерирует graph blocks по одному |
+| DATA-PERF-1 | **P2** | один whole-map `RwLock` на LOD | disjoint edits/view/unview блокируют все gathers LOD |
+| MESH-PERF-1 | **P2** | per-sample dyn/depth dispatch и geometry allocations остаются | H2 core-бенч не описывает end-to-end throughput |
+| POOL-1 | **P2** | memory-pool accounting смешивает bucket capacity и resized len | неверная статистика/underflow после `clear` с live blocks |
+| INFRA-1 | **P2** | stress не пересекает ключевые paths; CI manual/default/unlocked | зелёный gate не доказывает production invariants |
+
+### 11.4 P0/P1: сохранность данных, safe API и бинарные форматы
+
+#### SAVE-1/SAVE-2 — persistence не имеет commit ownership
+
+`SharedVoxelData::unview_area` удаляет modified block и передаёт единственный `VoxelBuffer`
+в `BlockToSave` (`storage/voxel_data.rs:335-363`). Terrain enqueue-ит save как `serial=false`
+(`terrain/voxel_terrain_core.rs:340-385`). `SaveBlockDataTask` делает `self.voxels.take()`,
+а при ошибке возвращает `Saved { dropped: true, voxels: None }`
+(`streams/save_block_data_task.rs:83-131`, `streams/block_data_output.rs:96-119`). Terrain
+игнорирует все `Saved`, включая `dropped=true` (`voxel_terrain_core.rs:525-568`).
+
+Дополнительно `ThreadedTaskRunner::Drop` сразу выставляет `stopping`; worker выходит до drain
+staged/queued tasks (`tasks/threaded_task_runner.rs:151-178,265-273`), а у
+`VoxelTerrainCore` нет обязательного shutdown/flush API. Два save одного block могут идти
+параллельно и завершиться в обратном порядке.
+
+Варианты решения:
+
+1. **Рекомендуется:** pending-save journal владеет payload до подтверждённого commit; per-block
+   monotonic generation; error возвращает payload в очередь с bounded retry/backoff; terrain
+   имеет `shutdown_and_flush() -> Result` и Godot lifecycle обязан его вызвать.
+2. Общий serial I/O scheduler (как путь `VoxelEngine`) + сохранение failed payload до retry.
+   Проще, но сериализует независимые регионы.
+3. Синхронный save-on-unload. Корректный аварийный вариант, но блокирует main tick.
+4. Durable WAL/write-behind service. Лучшее долгосрочное решение для crash recovery и batch,
+   но это отдельная подсистема, а не локальный фикс.
+
+#### SAFE-1 — UB доступен через safe Rust
+
+`math/vector3.rs:57-76` и `math/vector4.rs:45-66` проверяют индекс только через
+`debug_assert!`, затем для неверного значения вызывают `unsafe { unreachable_unchecked() }`.
+В release `get(3)`/`set(4, ...)` — undefined behavior, хотя соседние `Index/IndexMut` корректно
+panic-ят. Это особенно опасно перед GDExtension/API binding, где индекс может прийти извне.
+
+Варианты решения:
+
+1. **Рекомендуется:** обычный exhaustively checked `match` с `panic!`, как в `Index`.
+2. Для динамического ввода — `try_get/try_set -> Option/Result`; checked `get/set` оставить.
+3. Если профиль докажет необходимость, вынести отдельные `unsafe fn get_unchecked/set_unchecked`
+   с `# Safety`; safe wrapper всегда проверяет bounds. Добавить `#![deny(unsafe_code)]` в core
+   и точечно разрешать только обоснованные модули.
+
+#### DECODE-1 — размеры входа не ограничивают аллокации
+
+- LZ4/Zstd доверяют `u32 decompressed_size`; LZ4 сразу `resize`, Zstd сначала создаёт dst,
+  затем ещё один `Vec` через `decode_all` (`streams/compressed_data.rs:128-170`). Проверка
+  `< 0` мёртвая, потому что исходное значение `u32`.
+- V4 block читает dimensions как `u16³`, вызывает `buffer.create` и materialize channel до
+  проверки, что bytes вообще присутствуют (`streams/block_serializer.rs:235-260`).
+- `RegionFile::load_block` доверяет 4-byte payload length и аллоцирует до сверки с
+  `sector_count * sector_size` (`streams/region/region_file.rs:443-465`).
+- `.vox` создаёт dense `SIZE` model до чтения voxel count; повторные `XYZI` не имеют общего
+  model/voxel budget (`format/vox/parser.rs:273-322`).
+
+Варианты решения:
+
+1. **Рекомендуется:** единый `DecodeLimits`/budget (max bytes, voxels, models, nodes, strings)
+   передаётся всем nested readers; каждый allocation делает checked arithmetic и
+   `try_reserve_exact`, а parent format задаёт более строгий expected maximum.
+2. Локальные API `decompress_limited(src, max_output)` + block preflight header/volume/required
+   bytes. Быстрее внедрить, но легко оставить новый parser без общего budget.
+3. Streaming decode с hard cap (`max + 1`) для Zstd/LZ4 и sparse `.vox` до финализации model.
+4. Изолировать импорт в отдельный process с memory/time limits. Полезная defense-in-depth,
+   но не заменяет bounds внутри библиотеки.
+
+#### REGION-1/2/3 — integrity, durability и coherency `.vxr`
+
+`load_header` не вызывает `RegionFormat::validate`; invalid channel depth молча превращается
+в Bit8, LUT не проверяется на overlap/range/file length, а reverse sector map строится по всем
+заявленным counts (`region_file.rs:227-335,614-624`). Даже текущий `validate()` допускает zero
+axis, не ограничивает `sector_size` его wire-типом `u16` и не включает serializer envelope.
+`RegionBlockInfo::new/set` в release маскирует oversized count/index после одного `debug_assert`
+(`streams/region/format.rs:70-103,151-183`).
+
+При compaction tail физически сдвигается/truncate-ится до записи нового LUT; header остаётся
+dirty до `flush/close/Drop` (`region_file.rs:352-410,507-600`). Crash между этими шагами оставит
+старый LUT поверх уже изменённых payload offsets. Наконец, документация разрешает handle на
+каждый thread (`region_file.rs:77-90`), но handles имеют независимые LUT/sector cache и целиком
+перезаписывают header; существующий `FileLocker` сюда не подключён.
+
+Варианты решения:
+
+1. **Рекомендуемый ближайший:** fallible `RegionFormat::try_new` + полная проверка header/LUT,
+   payload `<= sectors - prefix`, interval map вместо vector-per-sector; один canonical-path
+   writer `Arc<Mutex<RegionFile>>`, readers получают immutable snapshot.
+2. Интегрировать `FileLocker`/OS lock, но под write-lock обязательно reload + generation check;
+   lock без cache coherency проблему lost update не решает.
+3. **Рекомендуемый durable target:** WAL или dual generation-stamped/checksummed headers:
+   append data → sync → atomically commit generation → reclaim old sectors.
+4. Copy-on-write whole region + `fsync` + atomic rename. Проще рассуждать о crash recovery,
+   дороже по write amplification.
+
+#### VOX-1/META-1 и вторичные serializer-paths
+
+Known `.vox` handlers читают payload напрямую из общего reader, игнорируя `chunk_size` и
+`children_size`; declared end используется только для unknown chunks
+(`format/vox/parser.rs:273-279,281-517`). Malformed known chunk может прочитать следующий chunk,
+а padding — стать новым tag. Scene validation проверяет ссылки/root, но не гарантирует, что
+весь graph достижим и ацикличен.
+
+`block_serializer::deserialize` умеет вернуть `MetadataSkipped`, но wrapper превращает это в
+`Ok(())`, а `RegionFile` вызывает именно wrapper (`block_serializer.rs:205-327`,
+`region_file.rs:465`). C++ metadata поэтому тихо исчезает после Rust load→save.
+
+Варианты решения:
+
+1. **`.vox`:** bounded sub-reader ровно на `chunk_size`, отдельная MAIN children boundary,
+   exact consumption/explicit skip; DFS tri-color + reachability либо Kahn validation.
+2. **Metadata:** structured outcome с обязательным propagation; default — reject lossy load,
+   explicit `allow_metadata_loss` только по решению caller.
+3. До порта Variant codec хранить metadata как opaque bytes и round-trip без интерпретации.
+4. Secondary hardening: `stream_cache::try_flush(F -> Result)` удаляет entry только после
+   success; instance serializer preflight-ит `u8/u16` counts и пишет atomically во временный Vec
+   (`stream_cache.rs:115-128`, `instance_data.rs:162-300`).
+
+### 11.5 P1: correctness и C++ parity
+
+#### EDIT-1 — shared edit не является атомарной транзакцией
+
+`SharedVoxelData::try_set_voxel` для отсутствующего/empty block создаёт formatted default buffer,
+не материализуя установленный generator (`storage/voxel_data.rs:373-400`). В procedural world
+изменение одного voxel тем самым заменяет остальные voxels block на defaults. Затем caller
+отдельно вызывает `mark_area_modified` (`:403-421`); unview между этими вызовами может удалить
+ещё «чистый» block без save. C++ сначала генерирует base block вне map lock, оставаясь под
+spatial write guard (`storage/voxel_data.cpp:258-290`).
+
+Варианты решения:
+
+1. **Рекомендуется:** единая `edit_voxel/edit_region` transaction охватывает materialization,
+   mutation и dirty/edited flags одним spatial guard; generator работает вне map lock, затем
+   insert делает повторную проверку версии.
+2. `EditSession`/guard выдаёт writable block и гарантированно marks dirty на Drop/commit.
+3. Минимум: `try_set_voxel` сам marks modified/edited; procedural materialization остаётся
+   отдельным обязательным исправлением.
+
+#### GRAPH-1/2 — одноимённые nodes имеют другую математику
+
+- `SdfSmoothSubtract` вызывает `sdf_smooth_subtract(b, a, s)`, тогда как hard fallback и C++
+  используют `(a, b)` (`generators/graph/runtime.rs:659-668`, C++ `nodes/sdf.h:317-340`). Для
+  `a=-0.2, b=0.4, s=1` C++ даёт `-0.04`, Rust `+0.56` — меняется знак SDF.
+- `GraphPort` хранит только node id, multi-output port отсутствует (`runtime.rs:17-28`).
+- Rust Distance2D/3D считает length от origin по 2/3 inputs; C++ — расстояние двух points по
+  4/6 inputs. Rust Normalize3D возвращает один `1/len`; C++ — `nx,ny,nz,len`
+  (`runtime.rs:110-126,504-537`, C++ `nodes/math_vectors.h:10-132`).
+- Rust Remap clamp-ит extrapolation; C++ оставляет linear. Divide использует epsilon и default 0,
+  C++ — exact zero и denominator default 1 (`runtime.rs:435-489`).
+
+Варианты решения:
+
+1. **Рекомендуется:** port schema `{ node, output_index }`, defaults из C++ node DB,
+   exact formulas и golden vectors для каждого node, включая discontinuities/zero cases.
+2. Lower multi-output C++ nodes в несколько scalar internal nodes при compile/import; публичная
+   asset schema остаётся C++-совместимой.
+3. Если parity пока не цель — переименовать текущие операции (`Length3D`, `InvLength`,
+   `ClampedRemap`) и явно reject unsupported C++ graph assets. Тихо сохранять те же имена нельзя.
+
+#### MESH-1 — stale/cancelled output lifecycle
+
+`MeshBlockTask` проверяет dependency только до gather/build, после `mesher.build` всегда ставит
+`dropped=false` (`meshers/mesh_block_task.rs:108-178`). Terrain принимает любой такой output
+без dependency/request version (`terrain/voxel_terrain_core.rs:572-585`). Если runner отменяет
+задачу до `run`, output остаётся `None`; drain молча её выбрасывает и не requeue-ит block
+(`tasks/threaded_task_runner.rs:309-318`, `voxel_terrain_core.rs:483-495,806-809`). Unload/reload
+того же position тоже не различается epoch-ом.
+
+Варианты решения:
+
+1. **Рекомендуется:** monotonic dependency generation + per-block request sequence в output;
+   apply принимает только текущую generation и последнюю sequence. `set_mesher/set_generator`
+   заменяет dependency и помечает видимые blocks на remesh.
+2. Generic `on_cancel`/typed cancelled outcome синтезирует `dropped` output; если block ещё viewed,
+   terrain обязательно requeue-ит.
+3. Минимум: повторная dependency check после build и при apply. Это уменьшает окно, но без
+   request sequence не закрывает out-of-order старого и нового task.
+
+#### GATHER-1 — bounds и точный halo не портированы
+
+Rust queue-ит для каждого отсутствующего соседа полный `data_block_size³` scratch и не использует
+`SharedVoxelData::bounds` (`mesh_block_task.rs:299-340,404-469`). C++ клипует padded mesh box
+по bounds, вычитает resident boxes и генерирует только остаток (`mesh_block_task.cpp:100-226`).
+Для resident central 16³ Transvoxel block Rust может запросить `26 × 16³ = 106 496` samples,
+тогда как точный halo `19³ - 16³ = 2 763`: около **38,5×** лишней генерации. За fixed bounds
+Rust также заполняет halo generator-данными вместо format default, меняя boundary semantics.
+
+Варианты решения:
+
+1. **Рекомендуется:** портировать C++ clip + box-difference plan, генерировать только точные
+   remainder boxes одним pooled scratch.
+2. Один generator query на clipped padded buffer, затем overlay resident blocks и явное
+   заполнение outside-bounds defaults.
+3. Минимум: reuse одного scratch и skip empty intersections. Allocation улучшится, но full-block
+   overgeneration/семантика границ останутся частично.
+
+#### BLOCKY-1/CUBES-1 и capability defaults
+
+Blocky public darkness default `0.8` идёт прямо в core, где умножается на `shaded_corner 0..3`;
+полностью закрытый corner получает shade `2.4` и RGB `-1.4`
+(`meshers/builtin.rs:294-373`, `blocky/mesher.rs:547-575`). C++ clamp-ит public value и перед
+core делит на 3 (`voxel_mesher_blocky.cpp:516-519,589-592`).
+
+`CubesMesher` всегда трактует raw value как palette index (`builtin.rs:167-253`), тогда как
+C++ default — `COLOR_RAW` и dispatch зависит от mode/depth (`voxel_mesher_cubes.h:123-127`,
+`.cpp:802-878`). Текущие тесты используют значения, на которых raw/palette визуально совпадают.
+
+Дополнительно `VoxelMesher::supports_lod()` default `true`, а `TransvoxelMesher` его не override-ит,
+несмотря на отсутствие transition cells (`voxel_mesher.rs:241-244`, `builtin.rs:114-165`).
+Edge clamp hardcoded `0.0`, C++ production default `0.02`; public gather origin при LOD>0 не
+shift-ится обратно в LOD0 coordinates (`builtin.rs:124-128`, `mesh_block_task.rs:232-295`).
+
+Варианты решения:
+
+1. **Blocky:** clamp `[0,1]` и нормализовать `/3` внутри core (защищает и direct callers) либо
+   буквально в adapter для минимальной C++-парити; добавить assert colors ∈ `[0,1]`.
+2. **Cubes:** `CubesColorMode::{Raw, Palette}`, default `Raw`, depth dispatch до loop; либо
+   честно переименовать текущий adapter в palette-only и не заявлять C++ parity.
+3. **LOD:** немедленно override `supports_lod=false` до transition port; долгосрочно разделить
+   capabilities на regular scaled cells и transitions. Edge clamp сделать параметром с default
+   `0.02`; origin API типизировать (`Lod0VoxelOrigin`/`LodVoxelOrigin`) или исправить shift.
+
+### 11.6 P1/P2: конкурентность, liveness и performance
+
+#### TASK-1 — priority/cancellation terrain не подключены к готовой инфраструктуре
+
+Default `ThreadedTask::priority()` — `TaskPriority::max`; `LoadBlockForTerrainTask` его не
+override-ит и не имеет cancellation token (`tasks/threaded_task.rs:55-63`,
+`terrain/voxel_terrain_core.rs:731-790`). `MeshBlockTask` возвращает `0`, save имеет обычный band.
+Старые dispatched loads после unview не отменяются; постоянная stream error requeue-ится без
+backoff. При движении viewer load backlog может вытеснять mesh/save.
+
+Варианты решения:
+
+1. **Рекомендуется:** использовать существующий `LoadBlockDataTask` с `PriorityDependency` и
+   `TaskCancellationToken`; token хранить в block entry и cancel-ить при unview/revision change.
+2. Task generation/tombstone map + distance/band priority и aging/fairness в общем runner.
+3. Отдельные bounded IO/mesh pools с квотами; cancellation и save ordering всё равно нужны.
+
+#### TASK-2 — panic нарушает runner invariants
+
+`running_count` и `serial_running` изменяются до `task.run`, а cleanup стоит только после
+нормального возврата (`threaded_task_runner.rs:287-295,372-405`). Panic в user stream/generator/
+mesher убивает worker и оставляет wait/shutdown зависшим; panic в `priority/is_cancelled` идёт
+под state lock. `Default` runner с 0 workers и бесконечный `Postponed` — дополнительные liveness
+holes.
+
+Варианты решения:
+
+1. **Рекомендуется для unwind builds:** `catch_unwind` вокруг callbacks + RAII in-flight guard,
+   который всегда decrement/reset/notify; task завершается как typed `Panicked`.
+2. Poison pool и возвращать `Result` из wait/shutdown, отменяя остаток queue.
+3. Если release policy остаётся `panic=abort`, всё равно сохранить guard для tests/dev и явно
+   запретить zero-worker enqueue; postponed tasks должны иметь backoff/notification source.
+
+#### GRAPH-PERF-1 / DATA-PERF-1
+
+`GraphGenerator` держит `Mutex<GraphScratch>` на весь `generate_block_with_graph`
+(`generator_graph.rs:21-29,63-70`). Внутри каждый block/slice заново строит topology/Vec/HashMap,
+перезаполняет X/Z и sampler (`generator_graph.rs:94-153`, `runtime.rs:225-264,346-417,556-579,
+681-777`). Shared graph generator поэтому не масштабируется по workers.
+
+Каждый LOD хранит один `RwLock<VoxelDataMap>`; view/unview/edit/load берут whole-map write,
+mesh gather — whole-map read (`storage/voxel_data.rs:65-67,185-205,244-421`,
+`mesh_block_task.rs:404-421`). `SpatialLock3D` не даёт параллелизма disjoint mutations, пока
+глобальный map write удерживается. Публичные raw map closures плюс отдельные region guards также
+позволяют ABBA map→spatial против internal spatial→map. Pending writer не учитывается, поэтому
+его могут обходить новые readers. `BoxBounds3i` документирован half-open, но conservative
+`<`/`>` intersection считает соседние boxes пересекающимися (`math/box_bounds.rs:72-120`).
+
+Варианты решения:
+
+1. **Graph:** immutable `CompiledGraph` + dense SSA/multi-output ports; per-worker/TLS retained
+   `GraphScratch`; bulk channel writer. Более локальный вариант — scratch pool с lock только
+   checkout/return.
+2. **Data:** map хранит `Arc` block snapshots/per-block locks; map write только insert/remove,
+   voxel mutation под spatial guard и block-level COW/version. Альтернатива — coordinate shards.
+3. Закрыть raw map API composite transaction-методами, всегда spatial→map; debug lock ranks;
+   writer-intent/FIFO в `SpatialLock3D`. Отдельно решить, сохраняется ли conservative C++
+   intersection или API действительно следует half-open документации.
+
+#### MESH-PERF-1 / POOL-1
+
+Transvoxel adapter раскладывает flat index div/mod, затем `get_voxel_f` снова считает index и
+dispatch-ит compression/depth за sample (`meshers/builtin.rs:40-80`). Cubes/Blocky копируют весь
+channel в свежий typed Vec; geometry arrays/masks создаются заново. `MesherOutput::clear()`
+дропает enum Vec capacities, а не сохраняет их. Поэтому direct f32 `build_regular_mesh` benchmark
+не измеряет реальный adapter/gather/allocator path.
+
+`VoxelMemoryPool::allocate` считает bucket-sized `len`, но `VoxelBuffer::alloc` уменьшает `len`
+до requested bytes; recycle вычитает уже уменьшенный `len` (`storage/voxel_memory_pool.rs:85-155`,
+`storage/voxel_buffer.rs:835-844`). Для non-power-of-two sizes `used_memory` дрейфует. `clear()`
+обнуляет counters даже при live blocks (`voxel_memory_pool.rs:189-200`), после recycle возможен
+atomic underflow.
+
+Варианты решения:
+
+1. **Adapter:** generic typed/byte-decoding sampler с depth dispatch один раз; direct byte
+   fallback безопаснее бездоказательного cast. Долгосрочно — typed `ChannelData`.
+2. Per-worker scratch для всех meshers + output free-list; end-to-end H2-MT benchmark на
+   `MeshBlockTask`/moving viewer, не только algorithm core.
+3. Pool возвращает wrapper с charged bucket bytes либо всегда считает capacity; `clear` разрешён
+   только без live blocks или очищает лишь idle buckets. Добавить non-POT/live-clear tests.
+
+### 11.7 Доказательная база тестов и CI
+
+Текущий `threaded_edit_load_mesh_stress` полезен как smoke lock-release, но не как доказательство
+полной модели:
+
+- использует `generator=None`, поэтому не видит `GraphGenerator` mutex;
+- load inserts находятся далеко от mesh/edit regions;
+- dummy mesher не читает voxel values и проверяет только размер/count;
+- нет `VoxelTerrainCore`, viewer movement, cancel, unload/save, mid-run invalidation или
+  out-of-order completion;
+- assertions — counts, наличие output и нулевое число оставшихся locks.
+
+Golden Transvoxel spheres вызывают direct f32 core и обходят `VoxelBufferTransvoxelInput`,
+8/16-bit depths и compression. Graph tests частично закрепляют текущую Rust-only семантику Remap/
+Distance вместо сравнения с C++. Поэтому зелёные 655/657 unit не опровергают §11.4–11.6.
+
+CI `.github/workflows/rust.yml` manual-only, запускает default features без `--locked` и без
+clippy `-D warnings`. `rust/Cargo.lock` есть локально, но игнорируется правилом `rust/.gitignore:4`;
+находящиеся ниже negations написаны как `!rust/...` внутри `rust/.gitignore` и lockfile не
+разблокируют. Rust byte parsers не имеют fuzz targets. Есть и локальный documentation drift:
+`meshers/builtin.rs:9-12` всё ещё говорит, что Cubes/Blocky adapters — TODO, хотя оба реализованы.
+
+Рекомендуемые проверки:
+
+1. Детерминированные barrier/hook tests: save error retains payload; two-save ordering; shutdown
+   drains; mid-build invalidation; cancelled-before-run requeue; edit-vs-unview transaction;
+   same-position unload/reload epoch.
+2. C++ node/mesher golden matrix: every graph node/default/output port, Blocky AO 0/1/2/3,
+   Cubes raw/palette/depth, fixed-bounds gather, Transvoxel adapter 8/16/32-bit.
+3. Property/fuzz tests with explicit budgets для compression, block v4, region, `.vox`, metadata;
+   corpus включает truncation, oversized prefix, overlap LUT и crash-reopen sequences.
+4. Linux nightly TSan для реальных concurrent paths; `loom` для небольших primitives;
+   Miri для unsafe/soundness-sensitive tests. TSan — дополнительный gate, не замена логическим тестам.
+5. Track workspace `Cargo.lock`; CI: `fmt`, `test --workspace --all-features --locked`, clippy
+   `--all-targets --all-features --locked -- -D warnings`, build и advisory/license gate.
+
+### 11.8 Рекомендуемый порядок и verdict на 2026-07-10
+
+**Волна 0 — data safety (блокирующая):** SAVE-1/2 → SAFE-1 → DecodeLimits → strict region
+format/LUT validation → explicit shutdown/flush. DoD: fault-injection не теряет payload,
+invalid input всегда даёт bounded `Err`, safe API не содержит reachable unchecked UB.
+
+**Волна 1 — correctness/parity:** EDIT-1 → GRAPH-1/2 → MESH-1 → GATHER-1 → Blocky/Cubes
+parity → metadata/framing. DoD: C++ golden matrix и deterministic race tests зелёные; unsupported
+features явно rejected, а не маскируются одноимённым API.
+
+**Волна 2 — lifecycle/concurrency:** terrain priority/cancellation, per-block generations,
+runner panic handling, region single-writer/durable transaction, stronger stress + TSan.
+
+**Волна 3 — performance:** compiled graph/per-worker scratch, map/block sharding/COW, typed
+mesher inputs и retained arrays. DoD: H2-MT измеряет gather→build→apply и moving-viewer throughput;
+direct core benchmark остаётся microbenchmark, а не production claim.
+
+**Verdict на 2026-07-10:**
+
+- **GO** для продолжения headless R&D на `rust/pilot`: код собирается, текущая suite стабильна,
+  и закрытые A/B/C/D-пункты не являются фиктивными.
+- **NO-GO** для production persistence и импорта недоверенных `.vxr`/block/`.vox` данных как
+  минимум до завершения Волны 0; для `.vox` дополнительно нужен framing из VOX-1 Волны 1.
+- **NO-GO** для заявления полной C++ parity: graph nodes, Blocky/Cubes и gather имеют доказанные
+  расхождения.
+- **NO-GO** для начала Godot-facing Фазы 5 поверх текущего lifecycle: сначала нужны safe API,
+  save/shutdown contract и typed cancellation/versioning.
+- Multi-LOD нельзя подключать к текущему `supports_lod=true` без transition cells; минимум —
+  честно вернуть `false` до соответствующего порта.
+
+В рамках повторного аудита production/test код **не изменялся**; обновлён только этот документ
+с результатами проверки и вариантами решений.
+
+### 11.9 Закрытые после повторного аудита пункты
+
+| ID | Статус и реализация | Проверка |
+|---|---|---|
+| SAFE-1 | ✅ `9e90ee7f`: safe vector accessors проверяют границы до unchecked-доступа | focused regressions + полная all-features suite |
+| DECODE-1 | ✅ `b6d3fd69`: `DecodeLimits` ограничивает байты/voxels/models, при этом сохранён fuzz-found hard ceiling 256 MiB | oversized LZ4/None regressions + parser/serializer tests |
+| REGION validation | ✅ `d870c396`: строгая проверка header, channel depth, LUT bounds/overlap и payload sectors | malformed-header/LUT/payload regressions |
+| SAVE-1/2 | ✅ `484134b2`: save journal сохраняет payload, различает поколения и LOD, повторяет dropped saves и поддерживает `shutdown_and_flush` | fault/retry/shutdown tests + LOD-distinct key regression из `070a3fc6` |
+| EDIT-1 | ✅ `d379d1b8`, `166511e0`, `cd4c229a`: `SharedVoxelData::try_edit_voxel` держит spatial write-lock до map access, materialизует procedural block вне map lock, выставляет voxel + `modified` + `edited` одной map-транзакцией; terrain использует этот путь | 8 transaction/lock regressions, terrain unload persistence; GDExt routing дополнительно закрыт в `070a3fc6` |
+| GRAPH-1 | ✅ `d3569f34`: lazy и compiled evaluators передают `(a, b, smoothness)` в `sdf_smooth_subtract`, как C++ | оба evaluator path: `a=-0.2`, `b=0.4`, `s=1.0` → `-0.04`; zero-smooth fallback |
+
+`GRAPH-2` и остальные незакрытые пункты таблицы §11.3 сохраняют исходный приоритет и остаются
+очередью дальнейшей работы.
+
+### 11.10 Актуализация после сведения веток — 2026-07-24
+
+Локальные 12 коммитов повторного аудита были созданы 2026-07-10, но не отправлены в origin.
+Параллельно другая рабочая копия развила `origin/rust/pilot` на 35 коммитов до `e56895ae`
+(M1 performance/TSan/fuzz, M2 multi-LOD/transition cells, M3 Godot binding MVP). Истории
+сведены rebase-ом локальной safety-линии поверх `e56895ae`, затем добавлен интеграционный
+коммит `070a3fc6`.
+
+При сведении отдельно проверены семантические пересечения:
+
+- save journal сохранён поверх per-LOD terrain и ключуется `(position, lod_index)`;
+- configurable `DecodeLimits` не ослабляет fuzz-found 256 MiB hard ceiling;
+- `SdfSmoothSubtract` исправлен и в legacy, и в новом compiled evaluator;
+- Godot `set_voxel_sdf` проходит через атомарный `VoxelTerrainCore::try_edit_voxel`,
+  сохраняя dirty-mesh re-upload.
+
+Проверка объединённой линии: `cargo test --workspace --all-features` — **750 core tests passed,
+3 ignored**, все integration/doc tests и обычные concurrency tests зелёные; `cargo fmt --check`,
+workspace clippy `--all-targets --all-features -- -D warnings` и `cargo build -p voxel-gdext`
+прошли. Независимое review не нашло code blockers.
+
+Следующий продуктовый срез M3 — **stream binding save/load** (`VoxelStreamRegionFiles` /
+memory stream как Godot Resource). Он должен опираться на объединённый save journal.
+После него: editor plugins, instancing и modifiers. До заявления полной C++ parity остаются
+как минимум GRAPH-2, MESH-1, GATHER-1, Blocky/Cubes parity и lifecycle/cancellation пункты §11.
