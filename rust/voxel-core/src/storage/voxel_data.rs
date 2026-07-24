@@ -183,9 +183,9 @@ impl SharedVoxelData {
 
     /// Registers a test-only edit lifecycle observer.
     ///
-    /// This has no production build surface. `try_edit_voxel` deliberately
-    /// does not exist yet; Task 2 must call [`Self::notify_test_edit_phase`]
-    /// at the ordered checkpoints documented on [`SharedVoxelDataEditPhase`].
+    /// This has no production build surface. [`Self::try_edit_voxel`] calls
+    /// [`Self::notify_test_edit_phase`] at the ordered checkpoints documented
+    /// on [`SharedVoxelDataEditPhase`].
     #[cfg(test)]
     pub fn set_test_edit_phase_hook(&self, hook: SharedVoxelDataEditPhaseHook) {
         *self

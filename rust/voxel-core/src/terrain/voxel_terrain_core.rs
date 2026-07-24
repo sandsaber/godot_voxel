@@ -1604,6 +1604,24 @@ mod tests {
     }
 
     #[test]
+    fn save_journal_keeps_same_position_separate_across_lods() {
+        let mut core = build_core();
+        let position = Vector3i::new(2, 3, 4);
+
+        for lod_index in [0, 1] {
+            core.enqueue_data_save(BlockToSave {
+                voxels: Some(VoxelBuffer::with_size(Vector3i::splat(2))),
+                position,
+                lod_index,
+            });
+        }
+
+        assert_eq!(core.save_journal.len(), 2);
+        assert!(core.save_journal.contains_key(&SaveKey::new(position, 0)));
+        assert!(core.save_journal.contains_key(&SaveKey::new(position, 1)));
+    }
+
+    #[test]
     fn older_in_flight_completion_dispatches_queued_newer_save() {
         let mut core = build_core();
         let key = SaveKey::new(Vector3i::zero(), 0);
