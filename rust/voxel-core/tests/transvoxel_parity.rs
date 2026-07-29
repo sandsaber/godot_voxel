@@ -1,0 +1,407 @@
+//! Parity framework for the transvoxel regular mesher.
+//!
+//! Phase 0 step 0.7 — the H1 (equivalence) hypothesis. A golden mesh is
+//! serialized to a versioned JSON file; a comparator checks that the current
+//! mesher output matches it. Structural fields (counts, indices, integer LOD
+//! masks) must match exactly; float fields (positions, normals) match within a
+//! tolerance to absorb legitimate FMA / float-reassociation differences.
+//!
+//! The committed golden files are generated from the **C++ reference**
+//! (`"generator": "godot_voxel-cpp"`) by the C++ baseline harness, so these
+//! tests are true H1 parity checks (structural byte equivalence modulo float
+//! tolerance).
+//!
+//! To regenerate the golden files after an intentional algorithm change:
+//!     cd ../cpp-baseline && CXX=clang++ ./build_mesh.sh --regenerate
+//! then inspect the diff and commit the updated JSON.
+
+use serde::{Deserialize, Serialize};
+use voxel_core::math::Vector3i;
+use voxel_core::meshers::transvoxel::{
+    build_regular_mesh, BuildRegularMeshParams, Cache, MeshArrays, RegularMesherInput,
+};
+use voxel_core::storage::{ChannelDepth, DenseVoxelBuffer, VoxelBufferRead};
+
+// ---------------------------------------------------------------------------
+// Input: a padded SDF sphere. Mirrors `tests/transvoxel_sphere.rs`; kept
+// inline so each test file is self-contained.
+// ---------------------------------------------------------------------------
+
+const MIN_PADDING: i32 = 1;
+const MAX_PADDING: i32 = 2;
+
+struct SphereInput {
+    buf: DenseVoxelBuffer,
+    inner: i32,
+    radius: f32,
+    sample_sign: f32,
+}
+
+impl SphereInput {
+    fn new(inner: i32, radius: f32) -> Self {
+        let size = Vector3i::new(
+            inner + MIN_PADDING + MAX_PADDING,
+            inner + MIN_PADDING + MAX_PADDING,
+            inner + MIN_PADDING + MAX_PADDING,
+        );
+        let mut buf = DenseVoxelBuffer::new(size, ChannelDepth::Bit32);
+        let cx = inner as f32 * 0.5;
+        let cy = inner as f32 * 0.5;
+        let cz = inner as f32 * 0.5;
+        let sy = size.y as usize;
+        let sx = size.x as usize;
+        for z in 0..size.z as usize {
+            for y in 0..size.y as usize {
+                for x in 0..size.x as usize {
+                    let ix = x as f32 - MIN_PADDING as f32;
+                    let iy = y as f32 - MIN_PADDING as f32;
+                    let iz = z as f32 - MIN_PADDING as f32;
+                    let d =
+                        ((ix - cx).powi(2) + (iy - cy).powi(2) + (iz - cz).powi(2)).sqrt() - radius;
+                    // POSITIVE = inside solid (engine SDF convention).
+                    let stored = -d;
+                    let i = y + sy * (x + sx * z);
+                    buf.data_mut()[i * 4..i * 4 + 4].copy_from_slice(&stored.to_le_bytes());
+                }
+            }
+        }
+        Self {
+            buf,
+            inner,
+            radius,
+            sample_sign: -1.0,
+        }
+    }
+
+    fn with_raw_sample_sign(mut self) -> Self {
+        self.sample_sign = 1.0;
+        self
+    }
+}
+
+impl RegularMesherInput for SphereInput {
+    fn len(&self) -> usize {
+        let s = self.buf.size();
+        (s.x as usize) * (s.y as usize) * (s.z as usize)
+    }
+    fn block_size(&self) -> Vector3i {
+        self.buf.size()
+    }
+    fn sample_f32(&self, data_index: usize) -> f32 {
+        let b = self.buf.data();
+        let off = data_index * 4;
+        // C++ `build_regular_mesh<float>` stores the engine SDF in the input
+        // span and converts it with `sdf_as_float(float) { return -v; }`.
+        self.sample_sign * f32::from_le_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]])
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Golden schema (versioned). Both the Rust port and the C++ reference harness
+// emit this exact shape so they can be diffed on equal footing.
+// ---------------------------------------------------------------------------
+
+/// Bump when the on-disk layout changes. The reader rejects mismatches.
+const SCHEMA_VERSION: u32 = 1;
+
+#[derive(Serialize, Deserialize)]
+struct GoldenInput {
+    kind: String, // "sphere"
+    inner: i32,
+    radius: f32,
+    min_padding: i32,
+    max_padding: i32,
+}
+
+#[derive(Serialize, Deserialize)]
+struct GoldenParams {
+    lod_index: u32,
+    edge_clamp_margin: f32,
+}
+
+#[derive(Serialize, Deserialize)]
+struct GoldenMesh {
+    schema_version: u32,
+    generator: String,
+    algorithm: String,
+    input: GoldenInput,
+    params: GoldenParams,
+    vertex_count: usize,
+    index_count: usize,
+    // Flat float arrays; length = vertex_count * 3.
+    vertices: Vec<f32>,
+    normals: Vec<f32>,
+    secondary_positions: Vec<f32>,
+    indices: Vec<i32>,
+    // Per-vertex integer LOD attributes; length = vertex_count.
+    cell_border_masks: Vec<u8>,
+    vertex_border_masks: Vec<u8>,
+    transitions: Vec<u8>,
+}
+
+impl GoldenMesh {
+    /// Capture the current Rust mesher output for the given input/params.
+    fn from_rust(input: &SphereInput, params: &BuildRegularMeshParams) -> Self {
+        let mut cache = Cache::default();
+        let mut output = MeshArrays::default();
+        build_regular_mesh(input, params, &mut cache, &mut output);
+
+        let mut vertices = Vec::with_capacity(output.vertices.len() * 3);
+        let mut normals = Vec::with_capacity(output.normals.len() * 3);
+        let mut secondary_positions = Vec::with_capacity(output.lod_data.len() * 3);
+        let mut cell_border_masks = Vec::with_capacity(output.lod_data.len());
+        let mut vertex_border_masks = Vec::with_capacity(output.lod_data.len());
+        let mut transitions = Vec::with_capacity(output.lod_data.len());
+
+        for v in &output.vertices {
+            vertices.extend_from_slice(&[v.x, v.y, v.z]);
+        }
+        for n in &output.normals {
+            normals.extend_from_slice(&[n.x, n.y, n.z]);
+        }
+        for ld in &output.lod_data {
+            secondary_positions.extend_from_slice(&[
+                ld.secondary_position.x,
+                ld.secondary_position.y,
+                ld.secondary_position.z,
+            ]);
+            cell_border_masks.push(ld.cell_border_mask);
+            vertex_border_masks.push(ld.vertex_border_mask);
+            transitions.push(ld.transition);
+        }
+
+        GoldenMesh {
+            schema_version: SCHEMA_VERSION,
+            generator: format!("voxel-core-rust@{}", voxel_core::VERSION),
+            algorithm: "transvoxel/regular".to_string(),
+            input: GoldenInput {
+                kind: "sphere".to_string(),
+                inner: input.inner,
+                radius: input.radius,
+                min_padding: MIN_PADDING,
+                max_padding: MAX_PADDING,
+            },
+            params: GoldenParams {
+                lod_index: params.lod_index,
+                edge_clamp_margin: params.edge_clamp_margin,
+            },
+            vertex_count: output.vertices.len(),
+            index_count: output.indices.len(),
+            vertices,
+            normals,
+            secondary_positions,
+            indices: output.indices.clone(),
+            cell_border_masks,
+            vertex_border_masks,
+            transitions,
+        }
+    }
+
+    /// Compare against a freshly-produced mesh. Structural fields are exact;
+    /// float arrays allow a per-component absolute + relative tolerance.
+    fn compare(&self, actual: &GoldenMesh, abs_tol: f32, rel_tol: f32) -> Result<(), String> {
+        if self.schema_version != actual.schema_version {
+            return Err(format!(
+                "schema_version mismatch: golden={} actual={}",
+                self.schema_version, actual.schema_version
+            ));
+        }
+        if self.vertex_count != actual.vertex_count {
+            return Err(format!(
+                "vertex_count mismatch: golden={} actual={}",
+                self.vertex_count, actual.vertex_count
+            ));
+        }
+        if self.index_count != actual.index_count {
+            return Err(format!(
+                "index_count mismatch: golden={} actual={}",
+                self.index_count, actual.index_count
+            ));
+        }
+        // Indices and integer LOD attributes must be bit-exact: a faithful port
+        // must produce the same triangulation and the same border masks.
+        if self.indices != actual.indices {
+            let first = self
+                .indices
+                .iter()
+                .zip(&actual.indices)
+                .position(|(a, b)| a != b);
+            return Err(format!(
+                "indices differ (first differing entry: {:?})",
+                first
+            ));
+        }
+        if self.cell_border_masks != actual.cell_border_masks {
+            return Err("cell_border_masks differ".to_string());
+        }
+        if self.vertex_border_masks != actual.vertex_border_masks {
+            return Err("vertex_border_masks differ".to_string());
+        }
+        if self.transitions != actual.transitions {
+            return Err("transitions differ".to_string());
+        }
+        // Float arrays: report the worst component so regressions are debuggable.
+        for (label, (g, a)) in [
+            ("vertices", (&self.vertices, &actual.vertices)),
+            ("normals", (&self.normals, &actual.normals)),
+            (
+                "secondary_positions",
+                (&self.secondary_positions, &actual.secondary_positions),
+            ),
+        ] {
+            if g.len() != a.len() {
+                return Err(format!(
+                    "{} length mismatch: golden={} actual={}",
+                    label,
+                    g.len(),
+                    a.len()
+                ));
+            }
+            let mut worst = 0.0f32;
+            let mut worst_i = 0;
+            for (i, (gv, av)) in g.iter().zip(a.iter()).enumerate() {
+                let diff = (gv - av).abs();
+                let scale = rel_tol * gv.abs().max(av.abs());
+                if diff > abs_tol.max(scale) && diff > worst {
+                    worst = diff;
+                    worst_i = i;
+                }
+            }
+            if worst > 0.0 {
+                return Err(format!(
+                    "{} differ beyond tolerance: worst abs diff {} at flat index {} \
+                     (golden={}, actual={}, abs_tol={}, rel_tol={})",
+                    label, worst, worst_i, g[worst_i], a[worst_i], abs_tol, rel_tol
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn position_stats(mesh: &GoldenMesh) -> (usize, usize, usize) {
+    let mut keys: Vec<[u32; 3]> = mesh
+        .vertices
+        .chunks_exact(3)
+        .map(|v| [v[0].to_bits(), v[1].to_bits(), v[2].to_bits()])
+        .collect();
+    keys.sort_unstable();
+
+    let mut unique = 0usize;
+    let mut max_multiplicity = 0usize;
+    let mut i = 0usize;
+    while i < keys.len() {
+        unique += 1;
+        let mut j = i + 1;
+        while j < keys.len() && keys[j] == keys[i] {
+            j += 1;
+        }
+        max_multiplicity = max_multiplicity.max(j - i);
+        i = j;
+    }
+
+    let duplicate_extra = mesh.vertex_count - unique;
+    (unique, duplicate_extra, max_multiplicity)
+}
+
+fn print_mesh_summary(label: &str, mesh: &GoldenMesh) {
+    let (unique, duplicate_extra, max_multiplicity) = position_stats(mesh);
+    eprintln!(
+        "{label}: generator={} vertices={} indices={} triangles={} unique_positions={} duplicate_extra={} max_duplicate_multiplicity={}",
+        mesh.generator,
+        mesh.vertex_count,
+        mesh.index_count,
+        mesh.index_count / 3,
+        unique,
+        duplicate_extra,
+        max_multiplicity
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+/// Absolute path to the crate's `tests/` dir (compile-time, robust to cwd).
+fn tests_dir() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests")
+}
+
+/// Read a committed golden file at runtime (avoids the `include_str!`
+/// bootstrapping problem: the generator must be able to run before the files
+/// it regenerates exist).
+fn load_golden(name: &str) -> String {
+    let path = tests_dir().join("golden").join(name);
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}"))
+}
+
+/// Load a committed golden and verify the mesher still reproduces it.
+fn check_against_golden(golden_json: &str, inner: i32, radius: f32) {
+    let golden: GoldenMesh = serde_json::from_str(golden_json).expect("golden JSON must parse");
+    assert_eq!(
+        golden.schema_version, SCHEMA_VERSION,
+        "committed golden has stale schema"
+    );
+    assert_eq!(golden.input.kind, "sphere");
+    assert_eq!(golden.input.inner, inner, "golden inner size mismatch");
+    assert_eq!(golden.input.radius, radius, "golden radius mismatch");
+
+    let input = SphereInput::new(inner, radius);
+    let params = BuildRegularMeshParams {
+        lod_index: golden.params.lod_index,
+        edge_clamp_margin: golden.params.edge_clamp_margin,
+    };
+    let actual = GoldenMesh::from_rust(&input, &params);
+
+    if std::env::var_os("TRANSVOXEL_PARITY_DIAG").is_some() {
+        let raw_sign_input = SphereInput::new(inner, radius).with_raw_sample_sign();
+        let raw_sign_actual = GoldenMesh::from_rust(&raw_sign_input, &params);
+        print_mesh_summary("golden", &golden);
+        print_mesh_summary("rust/cpp-sdf-as-float", &actual);
+        print_mesh_summary("rust/raw-stored-sample", &raw_sign_actual);
+    }
+
+    // C++ goldens are emitted with `%.8g` and can differ from Rust by a few
+    // float ulps due to formatting and codegen, while structural mesh data
+    // above remains exact.
+    golden
+        .compare(&actual, /*abs_tol*/ 1.0e-5, /*rel_tol*/ 1.0e-6)
+        .unwrap_or_else(|e| panic!("parity check failed: {e}"));
+}
+
+#[test]
+fn matches_golden_sphere_16() {
+    check_against_golden(&load_golden("transvoxel_sphere_16.json"), 16, 6.0);
+}
+
+#[test]
+fn matches_golden_sphere_32() {
+    check_against_golden(&load_golden("transvoxel_sphere_32.json"), 32, 13.0);
+}
+
+/// Dump Rust-produced snapshots for diagnostics. C++ goldens must be refreshed
+/// with `cpp-baseline/build_mesh.sh --regenerate`, not by this test.
+#[test]
+#[ignore = "diagnostic only: dumps Rust snapshots under TRANSVOXEL_RUST_SNAPSHOT_DIR or /tmp"]
+fn dump_rust_snapshot() {
+    let params = BuildRegularMeshParams {
+        lod_index: 0,
+        edge_clamp_margin: 0.0,
+    };
+    let cases: &[(i32, f32, &str)] = &[
+        (16, 6.0, "transvoxel_sphere_16.json"),
+        (32, 13.0, "transvoxel_sphere_32.json"),
+    ];
+    let dir = std::env::var_os("TRANSVOXEL_RUST_SNAPSHOT_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("voxel-core-rust-transvoxel-snapshots"));
+    std::fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("create_dir_all {dir:?}: {e}"));
+    for &(inner, radius, name) in cases {
+        let input = SphereInput::new(inner, radius);
+        let golden = GoldenMesh::from_rust(&input, &params);
+        let json = serde_json::to_string_pretty(&golden).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, json).unwrap_or_else(|e| panic!("write {path:?}: {e}"));
+        eprintln!("wrote Rust diagnostic snapshot {path:?}");
+    }
+}

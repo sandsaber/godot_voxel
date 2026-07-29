@@ -1,0 +1,573 @@
+//! Transvoxel regular-cell mesh extraction.
+//!
+//! Faithful port of `build_regular_mesh` from `meshers/transvoxel/transvoxel.cpp`
+//! (lines ~186-610). Produces a smooth surface mesh from an SDF voxel volume
+//! using the regular-cell portion of Eric Lengyel's Transvoxel algorithm.
+//!
+//! Phase 0 implements `TEXTURES_NONE` mode only (no mixel4 / single_s4 material
+//! blending). The dispatch by SDF width (8/16/32-bit) is done via an enum rather
+//! than C++ templates, since Rust monomorphizes through the `RegularMesherInput`
+//! implementations.
+
+// `RegularMesherInput::len` mirrors `Span::len` and intentionally has no
+// `is_empty`; the indexing loop in `cell_samples` is clearer than an iterator.
+#![allow(clippy::len_without_is_empty, clippy::needless_range_loop)]
+
+use super::regular_tables;
+use super::structures::{Cache, MeshArrays};
+use crate::math::funcs;
+use crate::math::{Vector3f, Vector3i};
+
+/// Padding required around the voxel block for normal computation
+/// (matches `MIN_PADDING` / `MAX_PADDING` in transvoxel.h).
+pub const MIN_PADDING: i32 = 1;
+pub const MAX_PADDING: i32 = 2;
+
+/// Input contract: provides typed SDF samples for a padded voxel block.
+///
+/// In C++ this is `Span<const TSdf>` plus template specializations for
+/// `int8_t` / `int16_t` / `float`. Here we use a trait so the same
+/// `build_regular_mesh` body works for any channel depth.
+pub trait RegularMesherInput {
+    /// Number of samples == `size.x * size.y * size.z`.
+    fn len(&self) -> usize;
+    /// Padded block size (including MIN_PADDING/MAX_PADDING on each axis).
+    fn block_size(&self) -> Vector3i;
+    /// SDF sample as `f32`, after the same conversion C++ applies with
+    /// `sdf_as_float`. The isolevel is always 0.
+    fn sample_f32(&self, data_index: usize) -> f32;
+}
+
+impl dyn RegularMesherInput {
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// Parameters for [`build_regular_mesh`].
+#[derive(Debug, Clone)]
+pub struct BuildRegularMeshParams {
+    /// LOD index (0 = highest detail). Scales vertex positions by `1 << lod`.
+    pub lod_index: u32,
+    /// How far from the edge endpoints a vertex may be placed before being
+    /// clamped. Matches C++ `edge_clamp_margin`. Typical value: a small epsilon.
+    pub edge_clamp_margin: f32,
+}
+
+impl Default for BuildRegularMeshParams {
+    fn default() -> Self {
+        Self {
+            lod_index: 0,
+            edge_clamp_margin: 0.0,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers (ported from transvoxel.cpp lines 22-184)
+// ---------------------------------------------------------------------------
+
+/// SDF sign bit: 1 if the sample is negative (inside solid).
+/// Matches C++ `sign_f(float v) { return v < 0.f; }`.
+#[inline]
+fn sign_f(v: f32) -> u8 {
+    (v < 0.0) as u8
+}
+
+/// Direction to the preceding cell, given a 3-bit reuse direction code.
+/// Matches `dir_to_prev_vec(uint8_t dir)`.
+#[inline]
+fn dir_to_prev_vec(dir: u8) -> Vector3i {
+    Vector3i::new(
+        -((dir & 1) as i32),
+        -(((dir >> 1) & 1) as i32),
+        -(((dir >> 2) & 1) as i32),
+    )
+}
+
+/// Normalize, returning (0,1,0) for a zero-length input. Matches `normalized_not_null`.
+#[inline]
+fn normalized_not_null(n: Vector3f) -> Vector3f {
+    let lsq = vector3_length_squared(n);
+    if lsq == 0.0 {
+        Vector3f::new(0.0, 1.0, 0.0)
+    } else {
+        let l = funcs::sqrt_f32(lsq);
+        Vector3f::new(n.x / l, n.y / l, n.z / l)
+    }
+}
+
+#[inline]
+fn vector3_length_squared(v: Vector3f) -> f32 {
+    v.x * v.x + v.y * v.y + v.z * v.z
+}
+
+/// Compute a 6-bit border mask for a position within a block.
+/// Bits: 1=-X 2=+X 4=-Y 8=+Y 16=-Z 32=+Z. Matches `get_border_mask`.
+#[inline]
+fn get_border_mask(pos: Vector3i, block_size: Vector3i) -> u8 {
+    let mut mask = 0u8;
+    for (axis, (p, s)) in [pos.x, pos.y, pos.z]
+        .iter()
+        .zip([block_size.x, block_size.y, block_size.z].iter())
+        .enumerate()
+    {
+        if *p == 0 {
+            mask |= 1 << (axis * 2);
+        }
+        if *p == *s {
+            mask |= 1 << (axis * 2 + 1);
+        }
+    }
+    mask
+}
+
+/// Convert a `Vector3i` to `Vector3f`. Matches `to_vec3f(Vector3i)`.
+#[inline]
+fn to_vec3f(v: Vector3i) -> Vector3f {
+    Vector3f::new(v.x as f32, v.y as f32, v.z as f32)
+}
+
+/// Multiply each component by `1 << lod`. Matches C++ `Vector3i << lod_index`.
+#[inline]
+fn scale_for_lod(v: Vector3i, lod_index: u32) -> Vector3i {
+    let s = (1i32) << lod_index;
+    Vector3i::new(v.x * s, v.y * s, v.z * s)
+}
+
+// ---------------------------------------------------------------------------
+// Core algorithm
+// ---------------------------------------------------------------------------
+
+/// Extract a regular-cell surface mesh from an SDF voxel block.
+///
+/// Port of `build_regular_mesh` (transvoxel.cpp:186). Writes vertices, normals,
+/// LOD data and triangle indices into `output`. The vertex-reuse cache `cache`
+/// is reset and used internally; pass a thread-local `Cache` for reuse across
+/// calls.
+pub fn build_regular_mesh(
+    input: &dyn RegularMesherInput,
+    params: &BuildRegularMeshParams,
+    cache: &mut Cache,
+    output: &mut MeshArrays,
+) {
+    let lod_index = params.lod_index;
+    let edge_clamp_margin = params.edge_clamp_margin;
+    let edge_clamp_margin_max = 1.0 - edge_clamp_margin;
+
+    let block_size_with_padding = input.block_size();
+    // The actual block (without padding). Matches:
+    //   block_size = block_size_with_padding - (MIN_PADDING + MAX_PADDING)
+    let block_size = Vector3i::new(
+        block_size_with_padding.x - (MIN_PADDING + MAX_PADDING),
+        block_size_with_padding.y - (MIN_PADDING + MAX_PADDING),
+        block_size_with_padding.z - (MIN_PADDING + MAX_PADDING),
+    );
+    let block_size_scaled = scale_for_lod(block_size, lod_index);
+
+    cache.reset_reuse_cells(block_size_with_padding);
+
+    // Iteration range: covers all cells with one extra voxel of reach for normals.
+    let min_pos = Vector3i::splat(MIN_PADDING);
+    let max_pos = Vector3i::new(
+        block_size_with_padding.x - MAX_PADDING,
+        block_size_with_padding.y - MAX_PADDING,
+        block_size_with_padding.z - MAX_PADDING,
+    );
+
+    // Neighbor offsets in the flat data array. The C++ VoxelBuffer uses a ZXY
+    // memory layout: index = y + size.y * (x + size.x * z). So Y is the
+    // innermost axis, which makes the Y+1 neighbor one element away.
+    let sy = block_size_with_padding.y as usize;
+    let sx = block_size_with_padding.x as usize;
+    let n010 = 1usize; // Y+1 (Y innermost)
+    let n100 = sy; // X+1
+    let n001 = sy * sx; // Z+1
+    let n110 = n010 + n100;
+    let n101 = n100 + n001;
+    let n011 = n010 + n001;
+    let n111 = n100 + n010 + n001;
+
+    let isolevel: f32 = 0.0;
+
+    let mut pos = Vector3i::zero();
+    pos.z = min_pos.z;
+    while pos.z < max_pos.z {
+        pos.y = min_pos.y;
+        while pos.y < max_pos.y {
+            // Starting flat index for (min_pos.x, pos.y, pos.z) in ZXY layout.
+            let mut data_index =
+                (pos.y as usize) + sy * ((min_pos.x as usize) + sx * (pos.z as usize));
+
+            pos.x = min_pos.x;
+            while pos.x < max_pos.x {
+                // ---- Early-out: skip cells that don't cross the isolevel ----
+                // C++ performs this fast path on the raw SDF (`sdf_data >
+                // isolevel`) before converting through `sdf_as_float`, which
+                // negates float samples. Because `sample_f32()` is the converted
+                // value, the faithful equivalent is `< isolevel` here.
+                let s = input.sample_f32(data_index) < isolevel;
+                let all_same = (input.sample_f32(data_index + n010) < isolevel) == s
+                    && (input.sample_f32(data_index + n100) < isolevel) == s
+                    && (input.sample_f32(data_index + n110) < isolevel) == s
+                    && (input.sample_f32(data_index + n001) < isolevel) == s
+                    && (input.sample_f32(data_index + n011) < isolevel) == s
+                    && (input.sample_f32(data_index + n101) < isolevel) == s
+                    && (input.sample_f32(data_index + n111) < isolevel) == s;
+                if all_same {
+                    data_index += sy;
+                    pos.x += 1;
+                    continue;
+                }
+
+                // Corner data indices (matches the C++ corner diagram):
+                //    6-------7
+                //   /|      /|
+                //  4-------5 |
+                //  | 2-----|-3
+                //  |/      |/   z y
+                //  0-------1    |/  o--x
+                let corner_data_indices = [
+                    data_index,        // 0
+                    data_index + n100, // 1
+                    data_index + n010, // 2
+                    data_index + n110, // 3
+                    data_index + n001, // 4
+                    data_index + n101, // 5
+                    data_index + n011, // 6
+                    data_index + n111, // 7
+                ];
+
+                let mut cell_samples = [0.0f32; 8];
+                for i in 0..8 {
+                    cell_samples[i] = input.sample_f32(corner_data_indices[i]);
+                }
+
+                // Concatenate sign bits → case code (bit 0 = corner 0 ... bit 7 = corner 7).
+                let mut case_code: u8 = 0;
+                for i in 0..8 {
+                    case_code |= sign_f(cell_samples[i]) << i;
+                }
+
+                if case_code == 0 || case_code == 255 {
+                    data_index += sy;
+                    pos.x += 1;
+                    continue;
+                }
+
+                // ---- Per-cell geometry lookup ----
+                let direction_validity_mask: u8 = {
+                    let mut m = 0u8;
+                    if pos.x > min_pos.x {
+                        m |= 1;
+                    }
+                    if pos.y > min_pos.y {
+                        m |= 2;
+                    }
+                    if pos.z > min_pos.z {
+                        m |= 4;
+                    }
+                    m
+                };
+
+                let regular_cell_class_index = regular_tables::get_regular_cell_class(case_code);
+                let regular_cell_data =
+                    regular_tables::get_regular_cell_data(regular_cell_class_index);
+                let triangle_count = regular_cell_data.triangle_count();
+                let vertex_count = regular_cell_data.vertex_count();
+
+                let mut cell_vertex_indices = [-1i32; 12];
+
+                let cell_border_mask = get_border_mask(
+                    Vector3i::new(pos.x - min_pos.x, pos.y - min_pos.y, pos.z - min_pos.z),
+                    Vector3i::new(block_size.x - 1, block_size.y - 1, block_size.z - 1),
+                );
+
+                // Corner positions (un-padded, scaled by LOD).
+                let corner_positions = {
+                    let mut cps = [Vector3i::zero(); 8];
+                    let px = [
+                        pos.x,
+                        pos.x + 1,
+                        pos.x,
+                        pos.x + 1,
+                        pos.x,
+                        pos.x + 1,
+                        pos.x,
+                        pos.x + 1,
+                    ];
+                    let py = [
+                        pos.y,
+                        pos.y,
+                        pos.y + 1,
+                        pos.y + 1,
+                        pos.y,
+                        pos.y,
+                        pos.y + 1,
+                        pos.y + 1,
+                    ];
+                    let pz = [
+                        pos.z,
+                        pos.z,
+                        pos.z,
+                        pos.z,
+                        pos.z + 1,
+                        pos.z + 1,
+                        pos.z + 1,
+                        pos.z + 1,
+                    ];
+                    for i in 0..8 {
+                        cps[i] = Vector3i::new(
+                            (px[i] - min_pos.x) << lod_index,
+                            (py[i] - min_pos.y) << lod_index,
+                            (pz[i] - min_pos.z) << lod_index,
+                        );
+                    }
+                    cps
+                };
+
+                // ---- For each vertex produced by this cell ----
+                for vertex_index in 0..vertex_count {
+                    let rvd = regular_tables::get_regular_vertex_data(case_code, vertex_index);
+                    let edge_code_low = (rvd & 0xff) as u8;
+                    let edge_code_high = ((rvd >> 8) & 0xff) as u8;
+
+                    let v0 = ((edge_code_low >> 4) & 0x0f) as usize;
+                    let v1 = (edge_code_low & 0x0f) as usize;
+                    debug_assert!(v1 > v0, "transvoxel: v1 must be > v0");
+
+                    let sample0 = cell_samples[v0];
+                    let sample1 = cell_samples[v1];
+
+                    let p0 = corner_positions[v0];
+                    let p1 = corner_positions[v1];
+
+                    // Interpolation parameter t along the edge.
+                    let t = funcs::clampf(
+                        sample1 / (sample1 - sample0),
+                        edge_clamp_margin,
+                        edge_clamp_margin_max,
+                    );
+
+                    if t > 0.0 && t < 1.0 {
+                        // Vertex is interior to the edge — try reuse, else create.
+                        let reuse_dir = (edge_code_high >> 4) & 0x0f;
+                        let reuse_vertex_index = (edge_code_high & 0x0f) as usize;
+
+                        let present = (reuse_dir & direction_validity_mask) == reuse_dir;
+
+                        if present {
+                            let cache_pos = pos + dir_to_prev_vec(reuse_dir);
+                            let prev_cell = cache.get_reuse_cell(cache_pos);
+                            if prev_cell.packed_texture_indices
+                                == cache.get_reuse_cell(pos).packed_texture_indices
+                            {
+                                cell_vertex_indices[vertex_index as usize] =
+                                    prev_cell.vertices[reuse_vertex_index];
+                            }
+                        }
+
+                        let need_create =
+                            !present || cell_vertex_indices[vertex_index as usize] == -1;
+
+                        if need_create {
+                            let t0 = t;
+                            let t1 = 1.0 - t;
+
+                            let primaryf = to_vec3f(p0) * t0 + to_vec3f(p1) * t1;
+                            let cg0 = get_corner_gradient(input, corner_data_indices[v0]);
+                            let cg1 = get_corner_gradient(input, corner_data_indices[v1]);
+                            let normal = normalized_not_null(cg0 * t0 + cg1 * t1);
+
+                            let (secondary, vertex_border_mask) = if cell_border_mask > 0 {
+                                let sec =
+                                    get_secondary_position(primaryf, normal, lod_index, block_size);
+                                let vbm = get_border_mask(p0, block_size_scaled)
+                                    & get_border_mask(p1, block_size_scaled);
+                                (sec, vbm)
+                            } else {
+                                (Vector3f::zero(), 0u8)
+                            };
+
+                            let vi = output.add_vertex(
+                                primaryf,
+                                normal,
+                                cell_border_mask,
+                                vertex_border_mask,
+                                0,
+                                secondary,
+                            );
+                            cell_vertex_indices[vertex_index as usize] = vi;
+
+                            if (reuse_dir & 8) != 0 {
+                                let cell = cache.get_reuse_cell_mut(pos);
+                                cell.vertices[reuse_vertex_index] = vi;
+                            }
+                        }
+                    } else if t == 0.0 && v1 == 7 {
+                        // Vertex sits on corner 7 of the cell; this cell owns it.
+                        let primaryf = to_vec3f(p1);
+                        let cg1 = get_corner_gradient(input, corner_data_indices[v1]);
+                        let normal = normalized_not_null(cg1);
+
+                        let (secondary, vertex_border_mask) = if cell_border_mask > 0 {
+                            let sec =
+                                get_secondary_position(primaryf, normal, lod_index, block_size);
+                            (sec, get_border_mask(p1, block_size_scaled))
+                        } else {
+                            (Vector3f::zero(), 0u8)
+                        };
+
+                        let vi = output.add_vertex(
+                            primaryf,
+                            normal,
+                            cell_border_mask,
+                            vertex_border_mask,
+                            0,
+                            secondary,
+                        );
+                        cell_vertex_indices[vertex_index as usize] = vi;
+                        let cell = cache.get_reuse_cell_mut(pos);
+                        cell.vertices[0] = vi;
+                    } else {
+                        // Vertex is on p0 or p1 but reuse is disabled in the default
+                        // build (VOXEL_TRANSVOXEL_REUSE_VERTEX_ON_COINCIDENT_CASES off).
+                        let vi_index = if t == 0.0 { v1 } else { v0 };
+                        let primary = if t == 0.0 { p1 } else { p0 };
+                        let primaryf = to_vec3f(primary);
+                        let cg = get_corner_gradient(input, corner_data_indices[vi_index]);
+                        let normal = normalized_not_null(cg);
+
+                        let (secondary, vertex_border_mask) = if cell_border_mask > 0 {
+                            let sec =
+                                get_secondary_position(primaryf, normal, lod_index, block_size);
+                            (sec, get_border_mask(primary, block_size_scaled))
+                        } else {
+                            (Vector3f::zero(), 0u8)
+                        };
+
+                        let vi = output.add_vertex(
+                            primaryf,
+                            normal,
+                            cell_border_mask,
+                            vertex_border_mask,
+                            0,
+                            secondary,
+                        );
+                        cell_vertex_indices[vertex_index as usize] = vi;
+                    }
+                } // for each cell vertex
+
+                // ---- Emit triangles ----
+                for t in 0..triangle_count {
+                    let t0 = (t as usize) * 3;
+                    let i0 = cell_vertex_indices[regular_cell_data.get_vertex_index(t0) as usize];
+                    let i1 =
+                        cell_vertex_indices[regular_cell_data.get_vertex_index(t0 + 1) as usize];
+                    let i2 =
+                        cell_vertex_indices[regular_cell_data.get_vertex_index(t0 + 2) as usize];
+                    output.indices.push(i0);
+                    output.indices.push(i1);
+                    output.indices.push(i2);
+                }
+
+                data_index += sy;
+                pos.x += 1;
+            } // x
+            pos.y += 1;
+        } // y
+        pos.z += 1;
+    } // z
+}
+
+// ---------------------------------------------------------------------------
+// Gradient / secondary position helpers
+// ---------------------------------------------------------------------------
+
+/// Central-difference gradient at a corner. Matches `get_corner_gradient`.
+fn get_corner_gradient(input: &dyn RegularMesherInput, data_index: usize) -> Vector3f {
+    // We need the block strides; pull them from the input's block size.
+    let bs = input.block_size();
+    let n010 = 1usize;
+    let n100 = bs.y as usize;
+    let n001 = (bs.y as usize) * (bs.x as usize);
+
+    let nx = input.sample_f32(data_index - n100);
+    let px = input.sample_f32(data_index + n100);
+    let ny = input.sample_f32(data_index - n010);
+    let py = input.sample_f32(data_index + n010);
+    let nz = input.sample_f32(data_index - n001);
+    let pz = input.sample_f32(data_index + n001);
+
+    // Note: C++ applies sdf_as_float (sign flip) inside the sdf_data indexing,
+    // but sample_f32() already returns the signed-distance convention used by
+    // the algorithm, so no extra negation here.
+    Vector3f::new(nx - px, ny - py, nz - pz)
+}
+
+/// Secondary position for LOD transitions. Matches `get_secondary_position`.
+fn get_secondary_position(
+    primary: Vector3f,
+    normal: Vector3f,
+    lod_index: u32,
+    block_size_non_scaled: Vector3i,
+) -> Vector3f {
+    let mut delta = get_border_offset(primary, lod_index, block_size_non_scaled);
+    delta = project_border_offset(delta, normal);
+
+    // Clamp to ±2^lod to avoid shooting far at very high LOD.
+    let p2k = (1u32 << lod_index) as f32;
+    delta = Vector3f::new(
+        funcs::clampf(delta.x, -p2k, p2k),
+        funcs::clampf(delta.y, -p2k, p2k),
+        funcs::clampf(delta.z, -p2k, p2k),
+    );
+
+    primary + delta
+}
+
+const TRANSITION_CELL_SCALE: f32 = 0.25;
+
+/// Matches `get_border_offset`.
+fn get_border_offset(
+    pos_scaled: Vector3f,
+    lod_index: u32,
+    block_size_non_scaled: Vector3i,
+) -> Vector3f {
+    let mut delta = [0.0f32; 3];
+    let p2k = (1u32 << lod_index) as f32;
+    let p2mk = 1.0 / p2k;
+    let wk = TRANSITION_CELL_SCALE * p2k;
+
+    let p_arr = [pos_scaled.x, pos_scaled.y, pos_scaled.z];
+    let s_arr = [
+        block_size_non_scaled.x as f32,
+        block_size_non_scaled.y as f32,
+        block_size_non_scaled.z as f32,
+    ];
+
+    for i in 0..3 {
+        let p = p_arr[i];
+        let s = s_arr[i];
+        if p < p2k {
+            delta[i] = (1.0 - p2mk * p) * wk;
+        } else if p > p2k * (s - 1.0) {
+            delta[i] = (s - 1.0 - p2mk * p) * wk;
+        }
+    }
+    Vector3f::new(delta[0], delta[1], delta[2])
+}
+
+/// Matches `project_border_offset`.
+fn project_border_offset(delta: Vector3f, normal: Vector3f) -> Vector3f {
+    Vector3f::new(
+        (1.0 - normal.x * normal.x) * delta.x
+            - normal.y * normal.x * delta.y
+            - normal.z * normal.x * delta.z,
+        -normal.x * normal.y * delta.x + (1.0 - normal.y * normal.y) * delta.y
+            - normal.z * normal.y * delta.z,
+        -normal.x * normal.z * delta.x - normal.y * normal.z * delta.y
+            + (1.0 - normal.z * normal.z) * delta.z,
+    )
+}

@@ -1,0 +1,96 @@
+name: Rust
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: rust
+
+env:
+  CARGO_TERM_COLOR: always
+  ANDROID_NDK_VERSION: 29.0.14206865
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/git
+            ~/.cargo/registry
+            rust/target
+          key: ${{ runner.os }}-rust-${{ hashFiles('rust/rust-toolchain.toml', 'rust/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-rust-
+
+      - name: Install pinned Rust toolchain
+        run: rustup show
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run tests
+        run: cargo test --workspace
+
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets
+
+      - name: Build workspace
+        run: cargo build --workspace
+
+  android-smoke:
+    runs-on: ubuntu-latest
+    needs: verify
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/git
+            ~/.cargo/registry
+            rust/target
+          key: ${{ runner.os }}-rust-android-${{ hashFiles('rust/rust-toolchain.toml', 'rust/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-rust-android-
+            ${{ runner.os }}-rust-
+
+      - name: Install pinned Rust toolchain
+        run: rustup show
+
+      - name: Install Android NDK
+        run: |
+          ANDROID_SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          if [[ -z "$ANDROID_SDK" ]]; then
+            echo "Neither ANDROID_HOME nor ANDROID_SDK_ROOT is set by the runner" >&2
+            exit 1
+          fi
+          SDKMANAGER="${ANDROID_SDK}/cmdline-tools/latest/bin/sdkmanager"
+          if [[ ! -x "$SDKMANAGER" ]]; then
+            SDKMANAGER="${ANDROID_SDK}/cmdline-tools/bin/sdkmanager"
+          fi
+          if [[ ! -x "$SDKMANAGER" ]]; then
+            echo "sdkmanager not found under ${ANDROID_SDK}" >&2
+            find "$ANDROID_SDK" -maxdepth 4 -name sdkmanager -type f >&2 || true
+            exit 1
+          fi
+          yes | "$SDKMANAGER" --licenses >/dev/null
+          "$SDKMANAGER" --install "ndk;${ANDROID_NDK_VERSION}"
+          echo "ANDROID_NDK_HOME=${ANDROID_SDK}/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Build Android aarch64 GDExtension
+        run: ./scripts/android-build.sh

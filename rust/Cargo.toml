@@ -1,0 +1,28 @@
+[workspace]
+resolver = "2"
+members = [
+    "voxel-core",
+    "voxel-gdext",
+    "tsan",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["godot_voxel Rust migration"]
+repository = "https://github.com/sandsaber/godot_voxel"
+description = "Rust port of godot_voxel core (engine-agnostic voxel engine)"
+
+[profile.release]
+# Aggressive optimizations matching voxel engine hot-paths
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+
+[profile.bench]
+inherits = "release"
+
+[profile.dev]
+opt-level = 1  # slightly faster dev builds for compute code
