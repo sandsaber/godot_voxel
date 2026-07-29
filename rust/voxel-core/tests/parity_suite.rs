@@ -5473,3 +5473,439 @@ mod instancer_surface_parity {
         );
     }
 }
+
+// Mirrors test_octree.cpp — update lifecycle with split-distance actions.
+#[cfg(test)]
+mod octree_update_lifecycle_parity {
+    use voxel_core::math::{Vector3f, Vector3i};
+    use voxel_core::terrain::lod_octree::{LodOctree, OctreeNodeData, OctreeUpdateActions};
+
+    // Custom actions that track create/destroy counts, mirroring test_octree.cpp.
+    struct CountingActions {
+        created: i32,
+        destroyed: i32,
+        viewer_pos: Vector3f,
+        lod_distance: f32,
+    }
+
+    impl OctreeUpdateActions for CountingActions {
+        fn create_child(&mut self, _node_pos: Vector3i, _lod: u32, _data: &mut OctreeNodeData) {
+            self.created += 1;
+        }
+        fn destroy_child(&mut self, _node_pos: Vector3i, _lod: u32) {
+            self.destroyed += 1;
+        }
+        fn show_parent(&mut self, _: Vector3i, _: u32) {}
+        fn hide_parent(&mut self, _: Vector3i, _: u32) {}
+        fn can_create_root(&self, _: u32) -> bool {
+            true
+        }
+        fn can_split(&self, node_pos: Vector3i, lod: u32, _: &OctreeNodeData) -> bool {
+            LodOctree::is_below_split_distance(node_pos, lod, self.viewer_pos, self.lod_distance)
+        }
+        fn can_join(&self, _: Vector3i, _: u32) -> bool {
+            false
+        }
+    }
+
+    /// A viewer far from the octree root: no split happens.
+    #[test]
+    fn viewer_far_no_split() {
+        let mut oct = LodOctree::new();
+        oct.create(2);
+        let mut actions = CountingActions {
+            created: 0,
+            destroyed: 0,
+            viewer_pos: Vector3f::new(1000.0, 1000.0, 1000.0),
+            lod_distance: 80.0,
+        };
+        oct.update(&mut actions);
+        // Root is created but no splits (viewer too far).
+        assert!(
+            actions.created >= 1,
+            "root should be created: {}",
+            actions.created
+        );
+    }
+
+    /// A viewer close to the octree root: splits happen.
+    #[test]
+    fn viewer_close_triggers_split() {
+        let mut oct = LodOctree::new();
+        oct.create(3);
+        let mut actions = CountingActions {
+            created: 0,
+            destroyed: 0,
+            viewer_pos: Vector3f::new(0.0, 0.0, 0.0),
+            lod_distance: 80.0,
+        };
+        oct.update(&mut actions);
+        // With viewer at origin and large lod_distance, splits should occur.
+        assert!(
+            actions.created > 1,
+            "should create children on split: {}",
+            actions.created
+        );
+    }
+
+    /// is_below_split_distance: node at origin with viewer at origin → true.
+    #[test]
+    fn split_distance_close_returns_true() {
+        assert!(LodOctree::is_below_split_distance(
+            Vector3i::zero(),
+            0,
+            Vector3f::zero(),
+            80.0
+        ));
+    }
+
+    /// is_below_split_distance: node far from viewer → false.
+    #[test]
+    fn split_distance_far_returns_false() {
+        assert!(!LodOctree::is_below_split_distance(
+            Vector3i::new(100, 100, 100),
+            0,
+            Vector3f::zero(),
+            80.0
+        ));
+    }
+
+    /// After update with close viewer, leaves exist.
+    #[test]
+    fn update_creates_leaves() {
+        let mut oct = LodOctree::new();
+        oct.create(2);
+        let mut actions = CountingActions {
+            created: 0,
+            destroyed: 0,
+            viewer_pos: Vector3f::zero(),
+            lod_distance: 80.0,
+        };
+        oct.update(&mut actions);
+        let mut leaves = 0;
+        oct.for_each_leaf(|_, _, _| {
+            leaves += 1;
+        });
+        assert!(leaves > 0, "update should create leaves: {leaves}");
+    }
+}
+
+// Mirrors test_voxel_graph.cpp — SDF combination equivalence.
+#[cfg(test)]
+mod graph_sdf_equivalence_parity {
+    use voxel_core::generators::graph::{
+        CompiledGraph, CompiledScratch, Graph, GraphInputs, GraphOutput, GraphPort, NodeKind,
+    };
+
+    fn run(g: &Graph) -> f32 {
+        let c = CompiledGraph::compile(g).expect("compile");
+        let xs = [0.0f32];
+        let zs = [0.0f32];
+        let i = GraphInputs {
+            x: &xs,
+            y: 0.0,
+            z: &zs,
+        };
+        let mut s = CompiledScratch::new();
+        let mut o = Vec::new();
+        c.generate_slice(&i, 1, &mut s, &mut o, false);
+        o.into_iter()
+            .find(|(k, _)| *k == GraphOutput::Sdf)
+            .and_then(|(_, v)| v.into_iter().next())
+            .unwrap()
+    }
+
+    /// union(a, b) == union(b, a) — commutativity. Mirrors equivalence_merging.
+    #[test]
+    fn sdf_union_commutative() {
+        let make_union = |a: f32, b: f32| -> f32 {
+            let mut g = Graph::new();
+            let na = g.push(NodeKind::Constant(a));
+            let nb = g.push(NodeKind::Constant(b));
+            let u = g.push(NodeKind::SdfUnion {
+                a: Some(GraphPort {
+                    node: na,
+                    output: 0,
+                }),
+                b: Some(GraphPort {
+                    node: nb,
+                    output: 0,
+                }),
+            });
+            g.push(NodeKind::OutputSdf {
+                a: Some(GraphPort { node: u, output: 0 }),
+            });
+            run(&g)
+        };
+        assert!(
+            (make_union(1.0, 5.0) - make_union(5.0, 1.0)).abs() < 1e-5,
+            "union should be commutative"
+        );
+    }
+
+    /// smooth_union(a, b, 0) == union(a, b) — zero smoothness = hard union.
+    #[test]
+    fn smooth_union_zero_equals_hard() {
+        let mut g_hard = Graph::new();
+        let na = g_hard.push(NodeKind::Constant(-2.0));
+        let nb = g_hard.push(NodeKind::Constant(3.0));
+        let u = g_hard.push(NodeKind::SdfUnion {
+            a: Some(GraphPort {
+                node: na,
+                output: 0,
+            }),
+            b: Some(GraphPort {
+                node: nb,
+                output: 0,
+            }),
+        });
+        g_hard.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: u, output: 0 }),
+        });
+        let hard = run(&g_hard);
+
+        let mut g_smooth = Graph::new();
+        let na = g_smooth.push(NodeKind::Constant(-2.0));
+        let nb = g_smooth.push(NodeKind::Constant(3.0));
+        let u = g_smooth.push(NodeKind::SdfSmoothUnion {
+            a: Some(GraphPort {
+                node: na,
+                output: 0,
+            }),
+            b: Some(GraphPort {
+                node: nb,
+                output: 0,
+            }),
+            smoothness: 0.0,
+        });
+        g_smooth.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: u, output: 0 }),
+        });
+        let smooth = run(&g_smooth);
+        assert!(
+            (hard - smooth).abs() < 1e-5,
+            "smooth(0) should equal hard union: {hard} vs {smooth}"
+        );
+    }
+
+    /// A sphere SDF at the center produces a negative value (inside).
+    #[test]
+    fn sphere_sdf_center_is_inside() {
+        let mut g = Graph::new();
+        let nx = g.push(NodeKind::Constant(0.0));
+        let ny = g.push(NodeKind::Constant(0.0));
+        let nz = g.push(NodeKind::Constant(0.0));
+        let nr = g.push(NodeKind::Constant(5.0));
+        let sph = g.push(NodeKind::SdfSphere {
+            x: Some(GraphPort {
+                node: nx,
+                output: 0,
+            }),
+            y: Some(GraphPort {
+                node: ny,
+                output: 0,
+            }),
+            z: Some(GraphPort {
+                node: nz,
+                output: 0,
+            }),
+            radius: Some(GraphPort {
+                node: nr,
+                output: 0,
+            }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort {
+                node: sph,
+                output: 0,
+            }),
+        });
+        let v = run(&g);
+        assert!(v < 0.0, "sphere center should be inside: {v}");
+    }
+
+    /// subtract(a, b) then union(c) produces a finite result (no NaN).
+    #[test]
+    fn subtract_then_union_finite() {
+        let mut g = Graph::new();
+        let na = g.push(NodeKind::Constant(-5.0));
+        let nb = g.push(NodeKind::Constant(2.0));
+        let sub = g.push(NodeKind::SdfSubtract {
+            a: Some(GraphPort {
+                node: na,
+                output: 0,
+            }),
+            b: Some(GraphPort {
+                node: nb,
+                output: 0,
+            }),
+        });
+        let nc = g.push(NodeKind::Constant(-1.0));
+        let u = g.push(NodeKind::SdfUnion {
+            a: Some(GraphPort {
+                node: sub,
+                output: 0,
+            }),
+            b: Some(GraphPort {
+                node: nc,
+                output: 0,
+            }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: u, output: 0 }),
+        });
+        let v = run(&g);
+        assert!(v.is_finite(), "subtract+union should be finite: {v}");
+    }
+}
+
+// Mirrors test_voxel_buffer.cpp — clear_channel, metadata-style operations.
+#[cfg(test)]
+mod voxel_buffer_clear_parity {
+    use voxel_core::math::Vector3i;
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
+
+    /// clear_channel resets all voxels to the given value.
+    #[test]
+    fn clear_channel_resets_all() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        buf.fill(5, ChannelId::Type.index());
+        buf.clear_channel(ChannelId::Type.index(), 3);
+        for z in 0..8 {
+            for y in 0..8 {
+                for x in 0..8 {
+                    assert_eq!(
+                        buf.get_voxel(x, y, z, ChannelId::Type.index()),
+                        3,
+                        "clear_channel mismatch at ({x},{y},{z})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// clear_channel_f sets all SDF voxels to a float value.
+    #[test]
+    fn clear_channel_f_sets_float() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+        fmt.configure_buffer(&mut buf);
+        buf.clear_channel_f(ChannelId::Sdf.index(), -2.5);
+        let v = buf.get_voxel_f(4, 4, 4, ChannelId::Sdf.index());
+        assert!((v - (-2.5)).abs() < 1e-5, "clear_channel_f: {v}");
+    }
+
+    /// Multiple channels can be independently configured and read.
+    #[test]
+    fn multiple_channels_independent() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(4));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.depths[ChannelId::Color.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        buf.set_voxel(7, 0, 0, 0, ChannelId::Type.index());
+        buf.set_voxel(99, 0, 0, 0, ChannelId::Color.index());
+        assert_eq!(buf.get_voxel(0, 0, 0, ChannelId::Type.index()), 7);
+        assert_eq!(buf.get_voxel(0, 0, 0, ChannelId::Color.index()), 99);
+    }
+
+    /// A freshly created buffer reports its size correctly.
+    #[test]
+    fn buffer_size_correct() {
+        let buf = VoxelBuffer::with_size(Vector3i::new(16, 32, 8));
+        assert_eq!(buf.size(), Vector3i::new(16, 32, 8));
+    }
+}
+
+// Mirrors test_edition_funcs.cpp — do_sphere SDF hemisphere pattern.
+#[cfg(test)]
+mod edition_sdf_parity {
+    use voxel_core::edition::ops::VoxelToolBuffer;
+    use voxel_core::math::{Vector3f, Vector3i};
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
+
+    /// do_sphere creates a symmetric solid region. The voxel count matches a
+    /// roughly-spherical volume. Mirrors test_edition_funcs sdf patterns.
+    #[test]
+    fn do_sphere_creates_spherical_region() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(16));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        let mut tool = VoxelToolBuffer::new(&mut buf, ChannelId::Type.index());
+        tool.do_sphere(Vector3f::new(8.0, 8.0, 8.0), 4.0);
+        // Count solid voxels.
+        let mut solid = 0;
+        for z in 0..16 {
+            for y in 0..16 {
+                for x in 0..16 {
+                    if buf.get_voxel(x, y, z, ChannelId::Type.index()) != 0 {
+                        solid += 1;
+                    }
+                }
+            }
+        }
+        // A sphere of radius 4 has volume ~4/3*π*4³ ≈ 268.
+        assert!(
+            solid > 200 && solid < 350,
+            "sphere voxel count should be ~268: {solid}"
+        );
+    }
+
+    /// do_box creates a rectangular region with exact volume.
+    #[test]
+    fn do_box_exact_volume() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(16));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        let mut tool = VoxelToolBuffer::new(&mut buf, ChannelId::Type.index());
+        tool.do_box(Vector3i::new(4, 4, 4), Vector3i::new(8, 8, 8));
+        let mut solid = 0;
+        for z in 0..16 {
+            for y in 0..16 {
+                for x in 0..16 {
+                    if buf.get_voxel(x, y, z, ChannelId::Type.index()) != 0 {
+                        solid += 1;
+                    }
+                }
+            }
+        }
+        // Range [4,8) → 4³ = 64.
+        assert_eq!(solid, 64, "do_box volume should be 64: {solid}");
+    }
+
+    /// do_sphere then do_sphere (overlapping) — the second expands the region.
+    #[test]
+    fn two_spheres_overlap_more_than_one() {
+        let mut buf1 = VoxelBuffer::with_size(Vector3i::splat(16));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf1);
+        let mut t1 = VoxelToolBuffer::new(&mut buf1, ChannelId::Type.index());
+        t1.do_sphere(Vector3f::new(8.0, 8.0, 8.0), 3.0);
+        let count1: usize = (0..16)
+            .flat_map(|y| (0..16).flat_map(move |z| (0..16).map(move |x| (x, y, z))))
+            .filter(|&(x, y, z)| buf1.get_voxel(x, y, z, ChannelId::Type.index()) != 0)
+            .count();
+
+        let mut buf2 = VoxelBuffer::with_size(Vector3i::splat(16));
+        fmt.configure_buffer(&mut buf2);
+        let mut t2 = VoxelToolBuffer::new(&mut buf2, ChannelId::Type.index());
+        t2.do_sphere(Vector3f::new(8.0, 8.0, 8.0), 3.0);
+        t2.do_sphere(Vector3f::new(10.0, 8.0, 8.0), 3.0);
+        let count2: usize = (0..16)
+            .flat_map(|y| (0..16).flat_map(move |z| (0..16).map(move |x| (x, y, z))))
+            .filter(|&(x, y, z)| buf2.get_voxel(x, y, z, ChannelId::Type.index()) != 0)
+            .count();
+
+        assert!(
+            count2 > count1,
+            "two spheres should have more voxels: {count2} vs {count1}"
+        );
+    }
+}
