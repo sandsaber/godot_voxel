@@ -370,16 +370,38 @@ fn pick_prioritized_task(state: &mut RunnerState) -> Option<TaskItem> {
 }
 
 fn run_task_item(shared: &Shared, thread_index: u8, mut item: TaskItem) {
-    let outcome = if item.task.is_cancelled() {
-        TaskRunOutcome::Complete(item.task)
-    } else {
-        item.task
-            .run(ThreadedTaskContext::new(thread_index, item.cached_priority))
+    let debug_name = item.task.debug_name();
+    let is_serial = item.is_serial;
+    let cached_priority = item.cached_priority;
+
+    // TASK-2 parity: wrap user callbacks in catch_unwind so a panicking
+    // task.run() / is_cancelled() does not leave running_count bumped forever
+    // (which would stall wait_for_all_tasks and shutdown).
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if item.task.is_cancelled() {
+            TaskRunOutcome::Complete(item.task)
+        } else {
+            item.task
+                .run(ThreadedTaskContext::new(thread_index, cached_priority))
+        }
+    }));
+
+    let outcome = match outcome {
+        Ok(o) => o,
+        Err(_payload) => {
+            // The task Box was consumed by the panicked closure and dropped
+            // during unwind. Convert to TakenOut so drain still proceeds.
+            eprintln!(
+                "ThreadedTaskRunner: task {debug_name:?} panicked on thread {thread_index}; \
+                 task was dropped during unwind"
+            );
+            TaskRunOutcome::TakenOut
+        }
     };
 
     let mut state = shared.lock_state();
-    state.running_count -= 1;
-    if item.is_serial {
+    state.running_count = state.running_count.saturating_sub(1);
+    if is_serial {
         debug_assert!(state.serial_running);
         state.serial_running = false;
     }
@@ -392,15 +414,15 @@ fn run_task_item(shared: &Shared, thread_index: u8, mut item: TaskItem) {
         TaskRunOutcome::Postponed(task) => {
             state.spinning_tasks.push_back(TaskItem {
                 task,
-                cached_priority: item.cached_priority,
-                is_serial: item.is_serial,
+                cached_priority,
+                is_serial,
             });
             should_post_work = true;
         }
         TaskRunOutcome::TakenOut => {}
     }
 
-    should_post_work |= item.is_serial && state.has_queued_tasks();
+    should_post_work |= is_serial && state.has_queued_tasks();
     shared.cvar.notify_all();
     drop(state);
 
