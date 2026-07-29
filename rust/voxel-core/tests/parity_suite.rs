@@ -14354,3 +14354,102 @@ mod texturing_single_s4_parity {
         assert!(cell.packed_indices != 0, "should select some materials");
     }
 }
+
+// Mirrors test_voxel_graph.cpp — image generation (NODE_IMAGE_2D output).
+#[cfg(test)]
+mod graph_image_output_parity {
+    use voxel_core::generators::graph::image::Image2D;
+
+    /// A uniform image (all pixels same value) samples to that constant.
+    /// Mirrors the C++ test_voxel_graph_image uniform fill=0.5 pattern.
+    #[test]
+    fn uniform_image_samples_constant() {
+        let img = Image2D::new_filled(64, 64, 0.5);
+        // Sample at various coordinates.
+        for &(fx, fy) in &[(0.0, 0.0), (32.0, 32.0), (63.5, 63.5), (10.7, 20.3)] {
+            let v = img.sample_bilinear(fx, fy);
+            assert!((v - 0.5).abs() < 0.01, "uniform image at ({fx},{fy}): {v}");
+        }
+    }
+
+    /// An image with a single different pixel produces a different sample
+    /// near that pixel. Mirrors the C++ test with set_pixel(8, 8, 0.7).
+    #[test]
+    fn single_pixel_difference() {
+        let mut img = Image2D::new_filled(64, 64, 0.5);
+        img.set_pixel(8, 8, 0.7);
+        // At the exact pixel.
+        let v_exact = img.sample_bilinear(8.0, 8.0);
+        assert!((v_exact - 0.7).abs() < 0.01, "at pixel (8,8): {v_exact}");
+        // Far away, should still be ~0.5.
+        let v_far = img.sample_bilinear(50.0, 50.0);
+        assert!((v_far - 0.5).abs() < 0.01, "far from pixel: {v_far}");
+    }
+
+    /// Bilinear interpolation between two adjacent pixels.
+    #[test]
+    fn bilinear_interpolation_midpoint() {
+        let img = Image2D::from_data(2, 1, vec![0.0, 1.0]);
+        // At x=0.5, should be exactly 0.5.
+        let v = img.sample_bilinear(0.5, 0.0);
+        assert!((v - 0.5).abs() < 1e-5, "bilinear midpoint: {v}");
+    }
+
+    /// Bilinear in 2D.
+    #[test]
+    fn bilinear_2d_center() {
+        let img = Image2D::from_data(2, 2, vec![0.0, 1.0, 2.0, 3.0]);
+        // At center (0.5, 0.5):
+        // a = (0+1)/2 = 0.5, b = (2+3)/2 = 2.5
+        // result = 0.5*0.5 + 2.5*0.5 = 1.5
+        let v = img.sample_bilinear(0.5, 0.5);
+        assert!((v - 1.5).abs() < 1e-5, "2D bilinear center: {v}");
+    }
+
+    /// Out-of-bounds coordinates clamp to edge.
+    #[test]
+    fn oob_clamps_to_edge() {
+        let img = Image2D::from_data(
+            4,
+            4,
+            vec![
+                0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0,
+                15.0,
+            ],
+        );
+        assert!((img.sample_bilinear(-10.0, 0.0) - 0.0).abs() < 1e-5);
+        assert!((img.sample_bilinear(100.0, 100.0) - 15.0).abs() < 1e-5);
+    }
+
+    /// Value range of a uniform image is that value.
+    #[test]
+    fn value_range_uniform() {
+        let img = Image2D::new_filled(32, 32, 0.5);
+        let (min, max) = img.value_range();
+        assert!((min - 0.5).abs() < 1e-5);
+        assert!((max - 0.5).abs() < 1e-5);
+    }
+
+    /// Value range of a gradient image spans min to max.
+    #[test]
+    fn value_range_gradient() {
+        let img = Image2D::from_data(4, 1, vec![0.0, 0.3, 0.7, 1.0]);
+        let (min, max) = img.value_range();
+        assert!((min - 0.0).abs() < 1e-5);
+        assert!((max - 1.0).abs() < 1e-5);
+    }
+
+    /// Image can be used as a heightmap: sample at (x*0.25, z*0.25) like
+    /// the C++ NODE_IMAGE_2D with Multiply(x, 0.25) inputs.
+    #[test]
+    fn image_as_heightmap_lookup() {
+        let img = Image2D::new_filled(64, 64, 0.5);
+        // Sample at scaled coordinates (x*0.25, z*0.25).
+        for x in 0..16 {
+            for z in 0..16 {
+                let v = img.sample_bilinear(x as f32 * 0.25, z as f32 * 0.25);
+                assert!((v - 0.5).abs() < 0.01, "heightmap at ({},{})", x, z);
+            }
+        }
+    }
+}

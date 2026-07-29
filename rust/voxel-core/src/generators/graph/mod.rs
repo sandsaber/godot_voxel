@@ -24,6 +24,7 @@
 //! nodes, FastNoise2 integration, and the `Expression` node are deferred.
 
 pub mod generator_graph;
+pub mod image;
 pub mod runtime;
 
 pub use generator_graph::GraphGenerator;
