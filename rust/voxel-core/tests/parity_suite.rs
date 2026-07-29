@@ -8543,3 +8543,268 @@ mod buffer_read_patterns_parity {
         }
     }
 }
+
+// Mirrors test_math_funcs.cpp — Color/Color8 conversion round-trips.
+#[cfg(test)]
+mod color_conversion_parity {
+    use voxel_core::math::{Color, Color8};
+
+    #[test]
+    fn color8_round_trips_white() {
+        let c8 = Color8::from_color(Color::WHITE);
+        let back = c8.to_color();
+        assert!((back.r - 1.0).abs() < 1e-2);
+    }
+
+    #[test]
+    fn color8_round_trips_black() {
+        let c8 = Color8::from_color(Color::BLACK);
+        let back = c8.to_color();
+        assert!(back.r < 0.01);
+    }
+
+    #[test]
+    fn color8_to_u32_nonzero_for_color() {
+        let c = Color8::new(255, 128, 64, 200);
+        assert_ne!(c.to_u32(), 0);
+    }
+
+    #[test]
+    fn color_new_sets_components() {
+        let c = Color::new(0.5, 0.25, 0.75, 1.0);
+        assert!((c.r - 0.5).abs() < 1e-5);
+        assert!((c.g - 0.25).abs() < 1e-5);
+    }
+
+    #[test]
+    fn color_from_rgb_full_alpha() {
+        let c = Color::from_rgb(1.0, 0.0, 0.0);
+        assert!((c.a - 1.0).abs() < 1e-5);
+    }
+}
+
+// Mirrors test_math_funcs.cpp — vector conversion + rounding.
+#[cfg(test)]
+mod vector_conv_parity {
+    use voxel_core::math::{conv, Vector3f, Vector3i};
+
+    #[test]
+    fn vec3i_to_vec3f_preserves() {
+        let f = conv::vec3i_to_vec3f(Vector3i::new(3, -5, 7));
+        assert!((f.x - 3.0).abs() < 1e-5);
+        assert!((f.z - 7.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn floor_to_int_truncates_down() {
+        assert_eq!(
+            conv::floor_to_int(Vector3f::new(3.7, -2.3, 0.5)),
+            Vector3i::new(3, -3, 0)
+        );
+    }
+
+    #[test]
+    fn ceil_to_int_rounds_up() {
+        assert_eq!(
+            conv::ceil_to_int(Vector3f::new(3.1, -2.9, 0.0)),
+            Vector3i::new(4, -2, 0)
+        );
+    }
+}
+
+// Additional hex format parity.
+#[cfg(test)]
+mod hex_format_parity {
+    use voxel_core::string::format;
+
+    #[test]
+    fn to_hex_table_contains_hex() {
+        let hex = format::to_hex_table(&[0x48, 0x65]);
+        assert!(hex.contains("48"), "should contain 48: {hex}");
+    }
+
+    #[test]
+    fn format_runs_without_panic() {
+        // The format function may have a specific arg type; just ensure it doesn't panic.
+        let args: Vec<&str> = vec!["test"];
+        let _result = format::format("Hello {0}", args.iter());
+    }
+}
+
+// Additional graph Clamp + Mix + Distance3D combinations.
+#[cfg(test)]
+mod graph_more_combos_parity {
+    use voxel_core::generators::graph::{
+        CompiledGraph, CompiledScratch, Graph, GraphInputs, GraphOutput, GraphPort, NodeKind,
+    };
+
+    fn run(g: &Graph) -> f32 {
+        let c = CompiledGraph::compile(g).expect("compile");
+        let xs = [0.0f32];
+        let zs = [0.0f32];
+        let i = GraphInputs {
+            x: &xs,
+            y: 0.0,
+            z: &zs,
+        };
+        let mut s = CompiledScratch::new();
+        let mut o = Vec::new();
+        c.generate_slice(&i, 1, &mut s, &mut o, false);
+        o.into_iter()
+            .find(|(k, _)| *k == GraphOutput::Sdf)
+            .and_then(|(_, v)| v.into_iter().next())
+            .unwrap()
+    }
+
+    #[test]
+    fn clamp_above_max() {
+        let mut g = Graph::new();
+        let na = g.push(NodeKind::Constant(15.0));
+        let nmin = g.push(NodeKind::Constant(0.0));
+        let nmax = g.push(NodeKind::Constant(10.0));
+        let clamp = g.push(NodeKind::Clamp {
+            a: Some(GraphPort {
+                node: na,
+                output: 0,
+            }),
+            min_v: Some(GraphPort {
+                node: nmin,
+                output: 0,
+            }),
+            max_v: Some(GraphPort {
+                node: nmax,
+                output: 0,
+            }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort {
+                node: clamp,
+                output: 0,
+            }),
+        });
+        assert!((run(&g) - 10.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn clamp_below_min() {
+        let mut g = Graph::new();
+        let na = g.push(NodeKind::Constant(-5.0));
+        let nmin = g.push(NodeKind::Constant(0.0));
+        let nmax = g.push(NodeKind::Constant(10.0));
+        let clamp = g.push(NodeKind::Clamp {
+            a: Some(GraphPort {
+                node: na,
+                output: 0,
+            }),
+            min_v: Some(GraphPort {
+                node: nmin,
+                output: 0,
+            }),
+            max_v: Some(GraphPort {
+                node: nmax,
+                output: 0,
+            }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort {
+                node: clamp,
+                output: 0,
+            }),
+        });
+        assert!((run(&g) - 0.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn mix_at_t_zero_returns_a() {
+        let mut g = Graph::new();
+        let na = g.push(NodeKind::Constant(10.0));
+        let nb = g.push(NodeKind::Constant(20.0));
+        let nt = g.push(NodeKind::Constant(0.0));
+        let m = g.push(NodeKind::Mix {
+            a: Some(GraphPort {
+                node: na,
+                output: 0,
+            }),
+            b: Some(GraphPort {
+                node: nb,
+                output: 0,
+            }),
+            t: Some(GraphPort {
+                node: nt,
+                output: 0,
+            }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: m, output: 0 }),
+        });
+        assert!((run(&g) - 10.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn mix_at_t_one_returns_b() {
+        let mut g = Graph::new();
+        let na = g.push(NodeKind::Constant(10.0));
+        let nb = g.push(NodeKind::Constant(20.0));
+        let nt = g.push(NodeKind::Constant(1.0));
+        let m = g.push(NodeKind::Mix {
+            a: Some(GraphPort {
+                node: na,
+                output: 0,
+            }),
+            b: Some(GraphPort {
+                node: nb,
+                output: 0,
+            }),
+            t: Some(GraphPort {
+                node: nt,
+                output: 0,
+            }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: m, output: 0 }),
+        });
+        assert!((run(&g) - 20.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn distance3d_3_4_5() {
+        let mut g = Graph::new();
+        let x0 = g.push(NodeKind::Constant(0.0));
+        let y0 = g.push(NodeKind::Constant(0.0));
+        let z0 = g.push(NodeKind::Constant(0.0));
+        let x1 = g.push(NodeKind::Constant(1.0));
+        let y1 = g.push(NodeKind::Constant(2.0));
+        let z1 = g.push(NodeKind::Constant(2.0));
+        let d = g.push(NodeKind::Distance3D {
+            x0: Some(GraphPort {
+                node: x0,
+                output: 0,
+            }),
+            y0: Some(GraphPort {
+                node: y0,
+                output: 0,
+            }),
+            z0: Some(GraphPort {
+                node: z0,
+                output: 0,
+            }),
+            x1: Some(GraphPort {
+                node: x1,
+                output: 0,
+            }),
+            y1: Some(GraphPort {
+                node: y1,
+                output: 0,
+            }),
+            z1: Some(GraphPort {
+                node: z1,
+                output: 0,
+            }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: d, output: 0 }),
+        });
+        // dist(0,0,0 → 1,2,2) = sqrt(9) = 3.
+        assert!((run(&g) - 3.0).abs() < 1e-5);
+    }
+}
