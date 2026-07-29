@@ -75,8 +75,14 @@ struct Header {
 
 /// A region file handle. Owns the underlying file and the in-memory LUT.
 ///
-/// Ported from `RegionFile`. Not `Clone` (it owns a file handle); open one per
-/// thread when concurrent access is needed.
+/// Ported from `RegionFile`. Not `Clone` (it owns a file handle).
+///
+/// **REGION-3:** Concurrent access to the same file from multiple
+/// `RegionFile` handles is **not safe** — each handle maintains its own
+/// in-memory LUT and sector map, so simultaneous saves will cause lost
+/// updates and sector overlap corruption. Use a single handle per file
+/// (wrap in `Arc<Mutex<RegionFile>>` for thread-shared access), or
+/// implement a `FileLocker`-based coordination layer.
 pub struct RegionFile<F: VoxelFile = StdVoxelFile> {
     file: Option<F>,
     header: Header,
@@ -670,8 +676,14 @@ impl<F: VoxelFile> RegionFile<F> {
             }
         }
 
-        // Persist the updated LUT lazily in flush()/close()/Drop.
-        self.header_dirty = true;
+        // REGION-2 parity: write the header immediately after data mutation
+        // (not deferred to flush). This ensures the on-disk LUT is consistent
+        // with the sector layout at all times — a crash between save_block
+        // and flush no longer leaves a stale LUT pointing at truncated sectors.
+        self.save_header()?;
+        if let Some(f) = &mut self.file {
+            f.flush().map_err(io)?;
+        }
         Ok(())
     }
 
@@ -722,7 +734,10 @@ impl RegionFile<StdVoxelFile> {
 
 impl<F: VoxelFile> Drop for RegionFile<F> {
     fn drop(&mut self) {
-        let _ = self.close();
+        // REGION-2 parity: surface close errors instead of silently ignoring.
+        if let Err(e) = self.close() {
+            eprintln!("RegionFile Drop: close() failed: {e:?}");
+        }
     }
 }
 
@@ -911,7 +926,9 @@ mod tests {
     }
 
     #[test]
-    fn save_block_defers_header_rewrite_until_flush() {
+    fn save_block_persists_header_immediately() {
+        // REGION-2 parity: save_block now writes the header immediately (not
+        // deferred to flush) for crash consistency.
         let format = small_format();
         let header_len = format.header_size_v3() as u64;
         let mut rf = RegionFile::<HeaderWriteCountingFile>::with_format(format);
@@ -928,15 +945,16 @@ mod tests {
         .unwrap();
         assert_eq!(
             rf.file.as_ref().unwrap().header_write_count(),
-            header_writes_after_create,
-            "save_block should only mark the header dirty"
+            header_writes_after_create + 1,
+            "save_block should persist the header immediately (REGION-2 crash consistency)"
         );
 
+        // flush should be a no-op for header (already clean).
         rf.flush().unwrap();
         assert_eq!(
             rf.file.as_ref().unwrap().header_write_count(),
             header_writes_after_create + 1,
-            "flush should persist the pending header once"
+            "flush should not re-write a clean header"
         );
     }
 
