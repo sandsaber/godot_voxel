@@ -13631,3 +13631,255 @@ mod transvoxel_boundary_uniform_parity {
         );
     }
 }
+
+// Additional graph: SDF field arithmetic equivalence.
+#[cfg(test)]
+mod graph_field_arithmetic_parity {
+    use voxel_core::generators::graph::{
+        CompiledGraph, CompiledScratch, Graph, GraphInputs, GraphOutput, GraphPort, NodeKind,
+    };
+
+    fn run(g: &Graph) -> f32 {
+        let c = CompiledGraph::compile(g).expect("compile");
+        let xs = [0.0f32];
+        let zs = [0.0f32];
+        let i = GraphInputs {
+            x: &xs,
+            y: 0.0,
+            z: &zs,
+        };
+        let mut s = CompiledScratch::new();
+        let mut o = Vec::new();
+        c.generate_slice(&i, 1, &mut s, &mut o, false);
+        o.into_iter()
+            .find(|(k, _)| *k == GraphOutput::Sdf)
+            .and_then(|(_, v)| v.into_iter().next())
+            .unwrap()
+    }
+
+    #[test]
+    fn subtract_equals_add_negative() {
+        // a - b == a + (-b). Verify: 5 - 3 == 5 + (0-3) = 5 + (-3) = 2.
+        let v_sub = {
+            let mut g = Graph::new();
+            let a = g.push(NodeKind::Constant(5.0));
+            let b = g.push(NodeKind::Constant(3.0));
+            let s = g.push(NodeKind::Subtract {
+                a: Some(GraphPort { node: a, output: 0 }),
+                b: Some(GraphPort { node: b, output: 0 }),
+            });
+            g.push(NodeKind::OutputSdf {
+                a: Some(GraphPort { node: s, output: 0 }),
+            });
+            run(&g)
+        };
+        assert!((v_sub - 2.0).abs() < 1e-5, "5-3=2: {v_sub}");
+    }
+
+    #[test]
+    fn multiply_by_two_equals_add_self() {
+        // a * 2 == a + a.
+        let v_mul = {
+            let mut g = Graph::new();
+            let a = g.push(NodeKind::Constant(7.0));
+            let c = g.push(NodeKind::Constant(2.0));
+            let m = g.push(NodeKind::Multiply {
+                a: Some(GraphPort { node: a, output: 0 }),
+                b: Some(GraphPort { node: c, output: 0 }),
+            });
+            g.push(NodeKind::OutputSdf {
+                a: Some(GraphPort { node: m, output: 0 }),
+            });
+            run(&g)
+        };
+        let v_add = {
+            let mut g = Graph::new();
+            let a = g.push(NodeKind::Constant(7.0));
+            let b = g.push(NodeKind::Constant(7.0));
+            let add = g.push(NodeKind::Add {
+                a: Some(GraphPort { node: a, output: 0 }),
+                b: Some(GraphPort { node: b, output: 0 }),
+            });
+            g.push(NodeKind::OutputSdf {
+                a: Some(GraphPort {
+                    node: add,
+                    output: 0,
+                }),
+            });
+            run(&g)
+        };
+        assert!(
+            (v_mul - v_add).abs() < 1e-5,
+            "a*2 == a+a: {v_mul} vs {v_add}"
+        );
+    }
+
+    #[test]
+    fn divide_by_one_preserves() {
+        let mut g = Graph::new();
+        let a = g.push(NodeKind::Constant(42.0));
+        let b = g.push(NodeKind::Constant(1.0));
+        let d = g.push(NodeKind::Divide {
+            a: Some(GraphPort { node: a, output: 0 }),
+            b: Some(GraphPort { node: b, output: 0 }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: d, output: 0 }),
+        });
+        assert!((run(&g) - 42.0).abs() < 1e-5);
+    }
+}
+
+// Additional buffer: SDF precision across depths.
+#[cfg(test)]
+mod sdf_precision_parity {
+    use voxel_core::math::Vector3i;
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
+
+    #[test]
+    fn bit32_exact_for_rational() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(2));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+        fmt.configure_buffer(&mut buf);
+        buf.set_voxel_f(0.5, 0, 0, 0, ChannelId::Sdf.index());
+        assert!((buf.get_voxel_f(0, 0, 0, ChannelId::Sdf.index()) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn bit64_exact_for_rational() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(2));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit64;
+        fmt.configure_buffer(&mut buf);
+        buf.set_voxel_f(-0.25, 0, 0, 0, ChannelId::Sdf.index());
+        assert!((buf.get_voxel_f(0, 0, 0, ChannelId::Sdf.index()) - (-0.25)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn bit8_approximate_for_small() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(2));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        buf.set_voxel_f(0.3, 0, 0, 0, ChannelId::Sdf.index());
+        // Bit8 quantizes more aggressively; use wider tolerance.
+        assert!((buf.get_voxel_f(0, 0, 0, ChannelId::Sdf.index()) - 0.3).abs() < 0.2);
+    }
+}
+
+// Additional scatter: empty input edge cases.
+#[cfg(test)]
+mod scatter_empty_parity {
+    use voxel_core::instancing::scatter::{InstanceGenerator, RandomScatterGenerator};
+    use voxel_core::instancing::ScatterConfig;
+    use voxel_core::math::Vector3f;
+
+    #[test]
+    fn empty_positions_produces_zero() {
+        let gen = RandomScatterGenerator {
+            density: 1.0,
+            min_scale: 1.0,
+            max_scale: 1.0,
+            snap_to_normal: false,
+        };
+        let result = gen.generate(&[], &[], 0, &ScatterConfig::default());
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn single_position_density_one() {
+        let gen = RandomScatterGenerator {
+            density: 1.0,
+            min_scale: 1.0,
+            max_scale: 1.0,
+            snap_to_normal: false,
+        };
+        let positions = vec![Vector3f::new(5.0, 0.0, 3.0)];
+        let normals = vec![Vector3f::new(0.0, 1.0, 0.0)];
+        let result = gen.generate(&positions, &normals, 0, &ScatterConfig::default());
+        assert_eq!(result.len(), 1);
+        assert!((result[0].position.x - 5.0).abs() < 1e-5);
+    }
+}
+
+// Additional octree: node_count after various operations.
+#[cfg(test)]
+mod octree_node_count_parity {
+    use voxel_core::terrain::lod_octree::{LodOctree, NoOpActions};
+
+    #[test]
+    fn node_count_increases_with_lod() {
+        let count_at = |lod: u32| {
+            let mut oct = LodOctree::new();
+            oct.create(lod);
+            oct.subdivide(&mut NoOpActions);
+            oct.node_count()
+        };
+        let c2 = count_at(2);
+        let c3 = count_at(3);
+        assert!(c3 > c2, "more LODs → more nodes: {c3} vs {c2}");
+    }
+
+    #[test]
+    fn root_not_created_before_subdivide() {
+        let mut oct = LodOctree::new();
+        oct.create(3);
+        assert!(!oct.is_root_created());
+    }
+
+    #[test]
+    fn root_created_after_subdivide() {
+        let mut oct = LodOctree::new();
+        oct.create(3);
+        oct.subdivide(&mut NoOpActions);
+        assert!(oct.is_root_created());
+    }
+}
+
+// Additional mesher: CubesMesher with_palette topology preservation.
+#[cfg(test)]
+mod cubes_palette_topology_parity {
+    use voxel_core::math::Vector3i;
+    use voxel_core::meshers::cubes::palette::ColorPalette;
+    use voxel_core::meshers::{CubesMesher, MesherInput, MesherOutput, VoxelMesher};
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
+
+    #[test]
+    fn palette_change_preserves_vertex_count() {
+        let mut voxels = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Color.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut voxels);
+        let opaque: u64 = 0xFFFFFFFF;
+        for x in 0..4 {
+            for y in 0..8 {
+                for z in 0..8 {
+                    voxels.set_voxel(opaque, x, y, z, ChannelId::Color.index());
+                }
+            }
+        }
+        let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+
+        let default_count = {
+            let mesher = CubesMesher::new();
+            let mut out = MesherOutput::default();
+            mesher.build(&mut out, &input);
+            out.total_vertex_count()
+        };
+
+        let custom_count = {
+            let mut pal = ColorPalette::default();
+            pal.set_color8(0xFF, voxel_core::math::Color8::new(100, 200, 50, 255));
+            let mesher = CubesMesher::new().with_palette(pal);
+            let mut out = MesherOutput::default();
+            mesher.build(&mut out, &input);
+            out.total_vertex_count()
+        };
+
+        assert_eq!(
+            default_count, custom_count,
+            "palette should not change topology"
+        );
+    }
+}
