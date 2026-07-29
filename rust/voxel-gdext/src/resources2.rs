@@ -147,6 +147,9 @@ impl INode3D for VoxelLodTerrainGD {
 // VoxelTerrainStatsGD — RefCounted stats container
 // ---------------------------------------------------------------------------
 /// Terrain statistics container. Emitted by VoxelTerrain for debug display.
+/// Wraps [`voxel_core::terrain::VoxelTerrainStats`] — real cumulative counters
+/// pulled from the paging orchestrator (blocks loaded/unloaded, meshes
+/// built/dropped).
 #[derive(GodotClass)]
 #[class(base = RefCounted, tool)]
 pub struct VoxelTerrainStatsGD {
@@ -170,6 +173,22 @@ impl IRefCounted for VoxelTerrainStatsGD {
             meshes_built: 0,
             meshes_dropped: 0,
         }
+    }
+}
+
+impl VoxelTerrainStatsGD {
+    /// Build a stats snapshot from the engine-agnostic
+    /// [`voxel_core::terrain::VoxelTerrainStats`]. Called by
+    /// `VoxelTerrain::get_statistics` to expose the real paging counters to
+    /// GDScript/inspector.
+    pub fn from_core_stats(stats: &voxel_core::terrain::VoxelTerrainStats) -> Gd<Self> {
+        Gd::from_init_fn(|base| Self {
+            base,
+            blocks_loaded: stats.blocks_loaded as i64,
+            blocks_unloaded: stats.blocks_unloaded as i64,
+            meshes_built: stats.meshes_built as i64,
+            meshes_dropped: stats.meshes_dropped as i64,
+        })
     }
 }
 

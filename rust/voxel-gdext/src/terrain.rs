@@ -243,6 +243,18 @@ impl VoxelTerrain {
         voxel_core::VERSION.to_godot()
     }
 
+    /// Returns a snapshot of the paging orchestrator's cumulative statistics
+    /// (blocks loaded/unloaded, meshes built/dropped). Returns `null` if the
+    /// terrain core has not been initialised yet (e.g. before `_ready`).
+    #[func]
+    fn get_statistics(&self) -> Variant {
+        let Some(core) = self.core.as_ref() else {
+            return Variant::nil();
+        };
+        let stats = crate::resources2::VoxelTerrainStatsGD::from_core_stats(core.stats());
+        stats.to_variant()
+    }
+
     /// The generator resource (VoxelGeneratorWaves or VoxelGeneratorFlat).
     /// Set this in the inspector to choose the terrain shape.
     #[func]

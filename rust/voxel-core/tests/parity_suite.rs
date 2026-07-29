@@ -701,6 +701,69 @@ mod terrain_parity {
         assert!(lod0 > 0, "LOD 0 should have blocks: {lod0}");
         assert!(lod1 > 0, "LOD 1 should have blocks: {lod1}");
     }
+
+    /// Golden test: after convergence with a Flat generator and a 48-voxel
+    /// view distance, the terrain produces a fixed number of mesh blocks and
+    /// a fixed total vertex count. Pinned against the current paging +
+    /// transvoxel implementation; a regression in either will flip the count.
+    #[test]
+    fn single_lod_terrain_vertex_count_golden_after_convergence() {
+        let mut data = VoxelData::new();
+        data.set_bounds(Box3i::new(Vector3i::splat(-512), Vector3i::splat(2048)));
+        data.set_streaming_enabled(false);
+        data.set_full_load_completed(true);
+        let gen: voxel_core::storage::SharedVoxelGenerator = Arc::new(Flat::default());
+        data.set_generator(Some(gen));
+        let mesher = Arc::new(TransvoxelMesher::new());
+        let dep = MeshingDependency::new(mesher, None);
+        let mut core = VoxelTerrainCore::new_generator_only(data, dep);
+
+        let viewers = vec![ViewerUpdate {
+            id: 0,
+            world_position_voxels: Vector3i::zero(),
+            horizontal_view_distance_voxels: 48,
+            vertical_view_distance_voxels: 48,
+            requires_meshes: true,
+        }];
+        // Drive paging to full convergence: tick, wait for background tasks,
+        // then re-tick to apply any drained mesh outputs, until no tasks and
+        // no pending work remain. This makes the post-convergence mesh output
+        // deterministic regardless of thread timing.
+        for _ in 0..100 {
+            core.process(&viewers);
+            core.wait_for_pending_tasks();
+            core.process(&viewers);
+            if core.pending_task_count() == 0 {
+                break;
+            }
+        }
+
+        let block_count = core.mesh_blocks().len();
+        let total_verts: usize = core
+            .mesh_blocks()
+            .values()
+            .filter_map(|e| e.output.as_ref())
+            .map(|o| o.total_vertex_count())
+            .sum();
+
+        // Pinned golden values for a 48-voxel view distance around origin,
+        // measured after full convergence (no pending tasks). 216 mesh blocks,
+        // each with a single transvoxel surface, totalling 36864 vertices.
+        assert_eq!(
+            block_count, 216,
+            "mesh block count regressed: {block_count}"
+        );
+        assert_eq!(
+            total_verts, 36864,
+            "total vertex count regressed after convergence: {total_verts}"
+        );
+        // The stats snapshot should reflect the work done.
+        assert!(
+            core.stats().blocks_loaded > 0 && core.stats().meshes_built > 0,
+            "stats should be non-zero: {:?}",
+            core.stats()
+        );
+    }
 }
 
 #[cfg(test)]
@@ -751,6 +814,57 @@ mod lod_transition_parity {
         assert!(
             verts_lod > verts_no_lod,
             "lod_hint should produce more vertices (transition geometry): {verts_lod} vs {verts_no_lod}"
+        );
+    }
+
+    /// Golden test: a flat half-space ground plane (y < 8 solid) produces a
+    /// fixed, reproducible vertex count, and `lod_hint=true` adds a fixed
+    /// number of transition-cell vertices on the +X/+Z seam faces. These
+    /// golden values are pinned against the current transvoxel + transition
+    /// table implementation; a regression in either will flip the count.
+    #[test]
+    fn lod_transition_vertex_count_golden() {
+        let mesher = TransvoxelMesher::new();
+        let mut voxels = VoxelBuffer::with_size(Vector3i::splat(16));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+        fmt.configure_buffer(&mut voxels);
+        // Half-space: solid below y=8 (sdf = y - 8).
+        for z in 0..16 {
+            for y in 0..16 {
+                for x in 0..16 {
+                    voxels.set_voxel_f(y as f32 - 8.0, x, y, z, ChannelId::Sdf.index());
+                }
+            }
+        }
+
+        let mut input_no_lod = MesherInput::new(&voxels, Vector3i::zero(), 0);
+        input_no_lod.lod_hint = false;
+        let mut out_no_lod = MesherOutput::default();
+        mesher.build(&mut out_no_lod, &input_no_lod);
+        let verts_no_lod = out_no_lod.total_vertex_count();
+
+        let mut input_lod = MesherInput::new(&voxels, Vector3i::zero(), 0);
+        input_lod.lod_hint = true;
+        let mut out_lod = MesherOutput::default();
+        mesher.build(&mut out_lod, &input_lod);
+        let verts_lod = out_lod.total_vertex_count();
+
+        // Pinned golden values (regular cells + transition cells).
+        assert_eq!(
+            verts_no_lod, 676,
+            "regular-cell vertex count regressed: {verts_no_lod}"
+        );
+        assert_eq!(
+            verts_lod, 796,
+            "lod_hint vertex count regressed: {verts_lod}"
+        );
+        // Transition cells contribute exactly 120 extra vertices on the seam.
+        assert_eq!(
+            verts_lod - verts_no_lod,
+            120,
+            "transition-cell vertex delta regressed: {}",
+            verts_lod - verts_no_lod
         );
     }
 }
@@ -807,5 +921,57 @@ mod instancing_parity {
         let config = ScatterConfig::default();
         let result = gen.generate(&positions, &normals, 0, &config);
         assert_eq!(result.len(), 0, "density=0 should produce no instances");
+    }
+
+    /// Golden test: scatter output count is deterministic for a fixed seed
+    /// and scales linearly with density. With the default `ScatterConfig`
+    /// (seed 0) and 100 surface points, density=1.0 yields exactly 100
+    /// instances and density=0.5 yields exactly 50. Pinned against the
+    /// current xorshift acceptance-sampling implementation.
+    #[test]
+    fn scatter_output_count_golden() {
+        let positions: Vec<_> = (0..100)
+            .map(|i| Vector3f::new(i as f32 * 2.0, 10.0, 0.0))
+            .collect();
+        let normals = vec![Vector3f::new(0.0, 1.0, 0.0); 100];
+        let config = ScatterConfig::default();
+
+        // density = 1.0 → every point accepted.
+        let gen_full = RandomScatterGenerator {
+            density: 1.0,
+            min_scale: 0.5,
+            max_scale: 1.5,
+            snap_to_normal: true,
+        };
+        let result_full = gen_full.generate(&positions, &normals, 0, &config);
+        assert_eq!(
+            result_full.len(),
+            100,
+            "density=1.0 instance count regressed: {}",
+            result_full.len()
+        );
+
+        // density = 0.5 → exactly half accepted (deterministic PRNG).
+        let gen_half = RandomScatterGenerator {
+            density: 0.5,
+            min_scale: 0.5,
+            max_scale: 1.5,
+            snap_to_normal: true,
+        };
+        let result_half = gen_half.generate(&positions, &normals, 0, &config);
+        assert_eq!(
+            result_half.len(),
+            50,
+            "density=0.5 instance count regressed: {}",
+            result_half.len()
+        );
+
+        // The count must be stable across repeated calls (deterministic).
+        let result_half2 = gen_half.generate(&positions, &normals, 0, &config);
+        assert_eq!(
+            result_half.len(),
+            result_half2.len(),
+            "scatter count is not deterministic"
+        );
     }
 }

@@ -270,6 +270,27 @@ impl VoxelTerrainCore {
         self.lod_count
     }
 
+    /// Cumulative terrain statistics (blocks loaded/unloaded, meshes built/dropped).
+    /// Mirrors the C++ `_stats` snapshot exposed via `VoxelTerrain::get_statistics`.
+    pub fn stats(&self) -> &VoxelTerrainStats {
+        &self.stats
+    }
+
+    /// Number of background tasks still queued or running. Returns 0 once all
+    /// pending load/mesh work has completed. Tests and the Godot binding use
+    /// this to wait for paging convergence before asserting on mesh output.
+    pub fn pending_task_count(&self) -> usize {
+        self.task_runner.remaining_task_count()
+    }
+
+    /// Block until every queued background task has finished, then return. Use
+    /// after a batch of [`process`](Self::process) ticks to reach a stable,
+    /// deterministic state (all mesh outputs applied) before asserting on
+    /// vertex counts or block contents.
+    pub fn wait_for_pending_tasks(&self) {
+        self.task_runner.wait_for_all_tasks();
+    }
+
     /// Per-frame entry point: pump viewer updates, enqueue pending work, and
     /// drain any task outputs that have completed so far. Returns the events
     /// emitted this tick.
