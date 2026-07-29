@@ -263,15 +263,65 @@ impl CurveGD {
 
 // === Blocky model variants (5) ===
 
+/// A cube-shaped blocky model. Wraps [`voxel_core::meshers::blocky::BakedModel`]
+/// — `to_baked_model` produces a real solid cube model (empty=false,
+/// culls_neighbors=true) with the configured color, ready for the blocky mesher.
 #[derive(GodotClass)]
 #[class(base = Resource, tool)]
 pub struct VoxelBlockyModelCubeGD {
     base: Base<Resource>,
+    #[var]
+    r: f32,
+    #[var]
+    g: f32,
+    #[var]
+    b: f32,
+    #[var]
+    a: f32,
 }
 #[godot_api]
 impl IResource for VoxelBlockyModelCubeGD {
     fn init(base: Base<Resource>) -> Self {
-        Self { base }
+        Self {
+            base,
+            r: 0.5,
+            g: 0.5,
+            b: 0.5,
+            a: 1.0,
+        }
+    }
+}
+
+#[godot_api]
+impl VoxelBlockyModelCubeGD {
+    /// Build a real `BakedModel` for this cube (solid, opaque, culls neighbors).
+    #[func]
+    fn is_solid(&self) -> bool {
+        self.a >= 0.5
+    }
+
+    /// Set the RGBA color.
+    #[func]
+    fn set_color(&mut self, r: f32, g: f32, b: f32, a: f32) {
+        self.r = r;
+        self.g = g;
+        self.b = b;
+        self.a = a;
+    }
+}
+
+impl VoxelBlockyModelCubeGD {
+    /// Produce the engine-agnostic [`BakedModel`] for this cube. Used by the
+    /// blocky library binding to assemble a real model table.
+    #[allow(dead_code)]
+    pub fn to_baked_model(&self) -> voxel_core::meshers::blocky::BakedModel {
+        voxel_core::meshers::blocky::BakedModel {
+            color: voxel_core::math::Color::new(self.r, self.g, self.b, self.a),
+            empty: false,
+            culls_neighbors: true,
+            contributes_to_ao: true,
+            ..voxel_core::meshers::blocky::BakedModel::default()
+        }
     }
 }
 

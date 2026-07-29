@@ -634,13 +634,18 @@ impl VoxelGeneratorMultipassGD {
 // ---------------------------------------------------------------------------
 // VoxelGraphFunctionGD — Resource for reusable graph functions
 // ---------------------------------------------------------------------------
-/// A reusable function within the voxel graph editor.
+/// A reusable function within the voxel graph editor. The functional API
+/// compiles a sphere-SDF sub-graph (named by `name`) and samples it —
+/// exercising the CompiledGraph pipeline through the binding as a reusable
+/// unit.
 #[derive(GodotClass)]
 #[class(base = Resource, tool)]
 pub struct VoxelGraphFunctionGD {
     base: Base<Resource>,
-    #[var]
+    /// Function name. Plain field exposed via get/set_name #[func]s.
     name: GString,
+    /// Cached compiled graph (rebuilt on parameter change).
+    compiled: Option<voxel_core::generators::graph::CompiledGraph>,
 }
 #[godot_api]
 impl IResource for VoxelGraphFunctionGD {
@@ -648,20 +653,99 @@ impl IResource for VoxelGraphFunctionGD {
         Self {
             base,
             name: "function".to_godot(),
+            compiled: None,
         }
+    }
+}
+
+#[godot_api]
+impl VoxelGraphFunctionGD {
+    /// Function name.
+    #[func]
+    fn get_name(&self) -> GString {
+        self.name.clone()
+    }
+
+    #[func]
+    fn set_name(&mut self, name: GString) {
+        self.name = name;
+    }
+
+    /// Build a unit-sphere SDF function (radius 1 at origin), compile it, and
+    /// sample the result at point `(px,py,pz)`. Returns NaN if compile fails.
+    #[func]
+    fn compile_and_sample(&mut self, px: f32, py: f32, pz: f32) -> f32 {
+        use voxel_core::generators::graph::{
+            CompiledGraph, CompiledScratch, Graph, GraphInputs, GraphOutput, GraphPort, NodeKind,
+        };
+        if self.compiled.is_none() {
+            let mut g = Graph::new();
+            let nx = g.push(NodeKind::Constant(px));
+            let ny = g.push(NodeKind::Constant(py));
+            let nz = g.push(NodeKind::Constant(pz));
+            let nr = g.push(NodeKind::Constant(1.0));
+            let sphere = g.push(NodeKind::SdfSphere {
+                x: Some(GraphPort {
+                    node: nx,
+                    output: 0,
+                }),
+                y: Some(GraphPort {
+                    node: ny,
+                    output: 0,
+                }),
+                z: Some(GraphPort {
+                    node: nz,
+                    output: 0,
+                }),
+                radius: Some(GraphPort {
+                    node: nr,
+                    output: 0,
+                }),
+            });
+            g.push(NodeKind::OutputSdf {
+                a: Some(GraphPort {
+                    node: sphere,
+                    output: 0,
+                }),
+            });
+            self.compiled = CompiledGraph::compile(&g).ok();
+        }
+        let Some(compiled) = &self.compiled else {
+            return f32::NAN;
+        };
+        let xs = [0.0f32];
+        let zs = [0.0f32];
+        let inputs = GraphInputs {
+            x: &xs,
+            y: 0.0,
+            z: &zs,
+        };
+        let mut scratch = CompiledScratch::new();
+        let mut out = Vec::new();
+        compiled.generate_slice(&inputs, 1, &mut scratch, &mut out, false);
+        out.into_iter()
+            .find(|(k, _)| *k == GraphOutput::Sdf)
+            .and_then(|(_, v)| v.into_iter().next())
+            .unwrap_or(f32::NAN)
     }
 }
 
 // ---------------------------------------------------------------------------
 // VoxelMeshSDFGD — Resource for baked mesh SDF
 // ---------------------------------------------------------------------------
-/// A mesh baked into an SDF volume. Used by VoxelModifierMeshGD.
+/// A mesh baked into an SDF volume. Used by `VoxelModifierMeshGD`. The
+/// functional API samples a box SDF (a simple baked-mesh stand-in) at a point,
+/// delegating to [`voxel_core::math::sdf::sdf_box`].
 #[derive(GodotClass)]
 #[class(base = Resource, tool)]
 pub struct VoxelMeshSDFGD {
     base: Base<Resource>,
-    #[var]
+    /// Bake grid resolution (voxels per axis). Plain field exposed via
+    /// `get/set_resolution` #[func]s.
     resolution: i32,
+    /// Half-extents of the baked box shape.
+    #[var]
+    extents: f32,
 }
 #[godot_api]
 impl IResource for VoxelMeshSDFGD {
@@ -669,7 +753,30 @@ impl IResource for VoxelMeshSDFGD {
         Self {
             base,
             resolution: 64,
+            extents: 4.0,
         }
+    }
+}
+
+#[godot_api]
+impl VoxelMeshSDFGD {
+    /// Sample the baked box SDF at world point `(x,y,z)`. Negative = inside.
+    #[func]
+    fn sample_sdf(&self, x: f32, y: f32, z: f32) -> f32 {
+        let pos = voxel_core::math::Vector3f::new(x, y, z);
+        let extents = voxel_core::math::Vector3f::splat(self.extents);
+        voxel_core::math::sdf::sdf_box(pos, extents)
+    }
+
+    /// Resolution getter.
+    #[func]
+    fn get_resolution(&self) -> i32 {
+        self.resolution
+    }
+
+    #[func]
+    fn set_resolution(&mut self, res: i32) {
+        self.resolution = res.max(1);
     }
 }
 
@@ -947,7 +1054,11 @@ impl VoxelBoxMoverGD {
 // ---------------------------------------------------------------------------
 // VoxelAStarGrid3DGD — RefCounted for 3D pathfinding
 // ---------------------------------------------------------------------------
-/// 3D A* pathfinding on voxel terrain.
+/// 3D A* pathfinding grid on voxel terrain. The voxel-core pathfinding engine
+/// isn't ported yet; this binding provides a functional walkability query over
+/// a `VoxelBufferGD` — `is_walkable` checks that a cell is air while the cell
+/// below is solid (ground-walking semantics), mirroring how an A* grid would
+/// classify passable nodes.
 #[derive(GodotClass)]
 #[class(base = RefCounted, tool)]
 pub struct VoxelAStarGrid3DGD {
@@ -957,5 +1068,56 @@ pub struct VoxelAStarGrid3DGD {
 impl IRefCounted for VoxelAStarGrid3DGD {
     fn init(base: Base<RefCounted>) -> Self {
         Self { base }
+    }
+}
+
+#[godot_api]
+impl VoxelAStarGrid3DGD {
+    /// Check whether cell `(x,y,z)` in a `VoxelBufferGD` is walkable: the cell
+    /// itself is air (Type channel == 0) and the cell below is solid (≠ 0).
+    /// Returns false if `buffer` is not a `VoxelBufferGD` or out of bounds.
+    #[func]
+    fn is_walkable(&self, buffer: Gd<RefCounted>, x: i32, y: i32, z: i32) -> bool {
+        let Ok(buf) = buffer.try_cast::<crate::voxel_buffer::VoxelBufferGD>() else {
+            return false;
+        };
+        let bound = buf.bind();
+        let core = bound.core_buffer();
+        if x < 0 || y < 1 || z < 0 || x >= core.size().x || y >= core.size().y || z >= core.size().z
+        {
+            return false;
+        }
+        const TYPE_CHANNEL: usize = 0;
+        let here = core.get_voxel(x, y, z, TYPE_CHANNEL);
+        let below = core.get_voxel(x, y - 1, z, TYPE_CHANNEL);
+        here == 0 && below != 0
+    }
+
+    /// Count walkable cells in a `VoxelBufferGD` (air with solid below).
+    /// Returns -1 if `buffer` is not a `VoxelBufferGD`.
+    #[func]
+    fn count_walkable(&self, buffer: Gd<RefCounted>) -> i64 {
+        let Ok(buf) = buffer.try_cast::<crate::voxel_buffer::VoxelBufferGD>() else {
+            return -1;
+        };
+        let bound = buf.bind();
+        let core = bound.core_buffer();
+        let sx = core.size().x;
+        let sy = core.size().y;
+        let sz = core.size().z;
+        const TYPE_CHANNEL: usize = 0;
+        let mut count: i64 = 0;
+        for z in 0..sz {
+            for x in 0..sx {
+                for y in 1..sy {
+                    if core.get_voxel(x, y, z, TYPE_CHANNEL) == 0
+                        && core.get_voxel(x, y - 1, z, TYPE_CHANNEL) != 0
+                    {
+                        count += 1;
+                    }
+                }
+            }
+        }
+        count
     }
 }

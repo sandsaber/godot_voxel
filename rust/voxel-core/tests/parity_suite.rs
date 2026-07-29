@@ -2859,3 +2859,415 @@ mod multi_item_scatter_parity {
         );
     }
 }
+
+#[cfg(test)]
+mod raycast_multiaxis_parity {
+    use voxel_core::edition::raycast::{voxel_raycast, VoxelRaycastState};
+    use voxel_core::math::{Vector3f, Vector3i};
+
+    #[test]
+    fn raycast_minus_x_hits_wall() {
+        let hit = voxel_raycast(
+            Vector3f::new(10.5, 0.5, 0.5),
+            Vector3f::new(-1.0, 0.0, 0.0),
+            100.0,
+            |s: &VoxelRaycastState| s.position.x == 3,
+        )
+        .expect("should hit");
+        assert_eq!(hit.position, Vector3i::new(3, 0, 0));
+        assert_eq!(
+            hit.normal,
+            Vector3i::new(1, 0, 0),
+            "-X ray normal should point +X"
+        );
+    }
+
+    #[test]
+    fn raycast_plus_z_hits_wall() {
+        let hit = voxel_raycast(
+            Vector3f::new(0.5, 0.5, 0.5),
+            Vector3f::new(0.0, 0.0, 1.0),
+            100.0,
+            |s: &VoxelRaycastState| s.position.z == 4,
+        )
+        .expect("should hit");
+        assert_eq!(hit.position, Vector3i::new(0, 0, 4));
+        assert_eq!(hit.normal, Vector3i::new(0, 0, -1));
+    }
+
+    #[test]
+    fn raycast_minus_z_hits_wall() {
+        let hit = voxel_raycast(
+            Vector3f::new(0.5, 0.5, 10.5),
+            Vector3f::new(0.0, 0.0, -1.0),
+            100.0,
+            |s: &VoxelRaycastState| s.position.z == 3,
+        )
+        .expect("should hit");
+        assert_eq!(hit.position, Vector3i::new(0, 0, 3));
+        assert_eq!(hit.normal, Vector3i::new(0, 0, 1));
+    }
+
+    #[test]
+    fn raycast_diagonal_traverses() {
+        let mut visited = Vec::new();
+        let inv = 1.0 / 3.0f32.sqrt();
+        let _ = voxel_raycast(
+            Vector3f::new(0.5, 0.5, 0.5),
+            Vector3f::new(inv, inv, inv),
+            10.0,
+            |s: &VoxelRaycastState| {
+                visited.push(s.position);
+                false
+            },
+        );
+        assert!(!visited.is_empty(), "diagonal ray should traverse voxels");
+        // The first visited voxel should be at or adjacent to the origin.
+        let first = visited[0];
+        assert!(
+            first.x.abs() <= 1 && first.y.abs() <= 1 && first.z.abs() <= 1,
+            "first visited voxel should be near origin: {first:?}"
+        );
+    }
+
+    #[test]
+    fn raycast_minus_y_hits_floor() {
+        let hit = voxel_raycast(
+            Vector3f::new(0.5, 10.5, 0.5),
+            Vector3f::new(0.0, -1.0, 0.0),
+            100.0,
+            |s: &VoxelRaycastState| s.position.y == 2,
+        )
+        .expect("should hit");
+        assert_eq!(hit.position, Vector3i::new(0, 2, 0));
+        assert_eq!(hit.normal, Vector3i::new(0, 1, 0));
+    }
+}
+
+#[cfg(test)]
+mod lod_octree_join_parity {
+    use voxel_core::terrain::lod_octree::{LodOctree, NoOpActions};
+
+    #[test]
+    fn octree_update_does_not_increase_node_count() {
+        let mut oct = LodOctree::new();
+        oct.create(3);
+        let mut sub = NoOpActions;
+        oct.subdivide(&mut sub);
+        let count_after_sub = oct.node_count();
+        let mut upd = NoOpActions;
+        oct.update(&mut upd);
+        let count_after_upd = oct.node_count();
+        assert!(
+            count_after_upd <= count_after_sub,
+            "update should not increase nodes: {count_after_upd} vs {count_after_sub}"
+        );
+    }
+
+    #[test]
+    fn octree_fresh_node_count_is_one() {
+        let mut oct = LodOctree::new();
+        oct.create(2);
+        assert_eq!(oct.node_count(), 1, "fresh octree node_count");
+        assert!(!oct.is_root_created());
+    }
+
+    #[test]
+    fn octree_max_depth_is_lod_count_minus_one() {
+        let mut oct = LodOctree::new();
+        oct.create(5);
+        assert_eq!(oct.max_depth(), 4);
+        assert_eq!(oct.lod_count(), 5);
+    }
+}
+
+#[cfg(test)]
+mod graph_remaining_nodes_parity {
+    use voxel_core::generators::graph::{
+        CompiledGraph, CompiledScratch, Graph, GraphInputs, GraphOutput, GraphPort, NodeKind,
+    };
+
+    fn run(g: &Graph) -> f32 {
+        let c = CompiledGraph::compile(g).expect("compile");
+        let xs = [0.0f32];
+        let zs = [0.0f32];
+        let i = GraphInputs {
+            x: &xs,
+            y: 0.0,
+            z: &zs,
+        };
+        let mut s = CompiledScratch::new();
+        let mut o = Vec::new();
+        c.generate_slice(&i, 1, &mut s, &mut o, false);
+        o.into_iter()
+            .find(|(k, _)| *k == GraphOutput::Sdf)
+            .and_then(|(_, v)| v.into_iter().next())
+            .unwrap()
+    }
+
+    #[test]
+    fn graph_sdf_torus_golden() {
+        let mut g = Graph::new();
+        let nx = g.push(NodeKind::Constant(0.0));
+        let ny = g.push(NodeKind::Constant(0.0));
+        let nz = g.push(NodeKind::Constant(0.0));
+        let t = g.push(NodeKind::SdfTorus {
+            x: Some(GraphPort {
+                node: nx,
+                output: 0,
+            }),
+            y: Some(GraphPort {
+                node: ny,
+                output: 0,
+            }),
+            z: Some(GraphPort {
+                node: nz,
+                output: 0,
+            }),
+            r1: 3.0,
+            r2: 1.0,
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: t, output: 0 }),
+        });
+        assert!((run(&g) - 2.0).abs() < 1e-5, "sdf_torus");
+    }
+
+    #[test]
+    fn graph_sdf_smooth_subtract_golden() {
+        let mut g = Graph::new();
+        let na = g.push(NodeKind::Constant(-1.0));
+        let nb = g.push(NodeKind::Constant(3.0));
+        let s = g.push(NodeKind::SdfSmoothSubtract {
+            a: Some(GraphPort {
+                node: na,
+                output: 0,
+            }),
+            b: Some(GraphPort {
+                node: nb,
+                output: 0,
+            }),
+            smoothness: 0.0,
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: s, output: 0 }),
+        });
+        assert!((run(&g) - (-1.0)).abs() < 1e-5, "sdf_smooth_subtract");
+    }
+
+    #[test]
+    fn graph_normalize3d_x_output_golden() {
+        let mut g = Graph::new();
+        let nx = g.push(NodeKind::Constant(3.0));
+        let ny = g.push(NodeKind::Constant(0.0));
+        let nz = g.push(NodeKind::Constant(0.0));
+        let n = g.push(NodeKind::Normalize3D {
+            x: Some(GraphPort {
+                node: nx,
+                output: 0,
+            }),
+            y: Some(GraphPort {
+                node: ny,
+                output: 0,
+            }),
+            z: Some(GraphPort {
+                node: nz,
+                output: 0,
+            }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: n, output: 0 }),
+        });
+        assert!((run(&g) - 1.0).abs() < 1e-5, "normalize3d x output");
+    }
+
+    #[test]
+    fn graph_noise2d_at_origin_golden() {
+        let mut g = Graph::new();
+        let nx = g.push(NodeKind::Constant(0.0));
+        let ny = g.push(NodeKind::Constant(0.0));
+        let nn = g.push(NodeKind::Noise2D {
+            x: Some(GraphPort {
+                node: nx,
+                output: 0,
+            }),
+            y: Some(GraphPort {
+                node: ny,
+                output: 0,
+            }),
+            noise: Default::default(),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort {
+                node: nn,
+                output: 0,
+            }),
+        });
+        assert!(run(&g).abs() < 1e-5, "noise2d at origin should be ~0");
+    }
+
+    #[test]
+    fn graph_noise3d_at_origin_golden() {
+        let mut g = Graph::new();
+        let nx = g.push(NodeKind::Constant(0.0));
+        let ny = g.push(NodeKind::Constant(0.0));
+        let nz = g.push(NodeKind::Constant(0.0));
+        let nn = g.push(NodeKind::Noise3D {
+            x: Some(GraphPort {
+                node: nx,
+                output: 0,
+            }),
+            y: Some(GraphPort {
+                node: ny,
+                output: 0,
+            }),
+            z: Some(GraphPort {
+                node: nz,
+                output: 0,
+            }),
+            noise: Default::default(),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort {
+                node: nn,
+                output: 0,
+            }),
+        });
+        assert!(run(&g).abs() < 1e-5, "noise3d at origin should be ~0");
+    }
+}
+
+#[cfg(test)]
+mod region_multiblock_parity {
+    use std::path::PathBuf;
+    use voxel_core::math::Vector3i;
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
+    use voxel_core::streams::compressed_data::Compression;
+    use voxel_core::streams::region::RegionFile;
+
+    fn temp_region_path(test_name: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "voxel_parity_{test_name}_{}.vxr",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&p);
+        p
+    }
+
+    fn bit8_format() -> VoxelFormat {
+        let mut fmt = VoxelFormat::new();
+        for d in fmt.depths.iter_mut() {
+            *d = ChannelDepth::Bit8;
+        }
+        fmt
+    }
+
+    #[test]
+    fn region_saves_and_loads_multiple_blocks() {
+        let path = temp_region_path("multiblock");
+        let fmt = bit8_format();
+        let mut region = RegionFile::open(&path, true).expect("create");
+        for (i, pos) in [
+            Vector3i::new(0, 0, 0),
+            Vector3i::new(1, 0, 0),
+            Vector3i::new(0, 1, 0),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let mut buf = VoxelBuffer::with_size(Vector3i::splat(16));
+            fmt.configure_buffer(&mut buf);
+            buf.fill((10 + i) as u64, ChannelId::Type.index());
+            region.save_block(*pos, &buf, Compression::Lz4).unwrap();
+        }
+        drop(region);
+
+        let mut region2 = RegionFile::open(&path, false).expect("open");
+        for (i, pos) in [
+            Vector3i::new(0, 0, 0),
+            Vector3i::new(1, 0, 0),
+            Vector3i::new(0, 1, 0),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let mut buf = VoxelBuffer::with_size(Vector3i::splat(16));
+            fmt.configure_buffer(&mut buf);
+            region2.load_block(*pos, &mut buf).unwrap();
+            let val = buf.get_voxel(0, 0, 0, ChannelId::Type.index());
+            assert_eq!(
+                val,
+                (10 + i) as u64,
+                "block {i} at {pos:?} value mismatch: {val}"
+            );
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn region_handles_many_blocks() {
+        let path = temp_region_path("manyblock");
+        let fmt = bit8_format();
+        let mut region = RegionFile::open(&path, true).expect("create");
+        for i in 0..10 {
+            let mut buf = VoxelBuffer::with_size(Vector3i::splat(16));
+            fmt.configure_buffer(&mut buf);
+            buf.fill(i as u64 + 1, ChannelId::Type.index());
+            let pos = Vector3i::new(i, 0, 0);
+            region.save_block(pos, &buf, Compression::Lz4).unwrap();
+        }
+        drop(region);
+
+        let mut region2 = RegionFile::open(&path, false).expect("open");
+        for i in 0..10 {
+            let mut buf = VoxelBuffer::with_size(Vector3i::splat(16));
+            fmt.configure_buffer(&mut buf);
+            let pos = Vector3i::new(i, 0, 0);
+            region2.load_block(pos, &mut buf).unwrap();
+            assert_eq!(
+                buf.get_voxel(0, 0, 0, ChannelId::Type.index()),
+                i as u64 + 1,
+                "block {i} value"
+            );
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+#[cfg(test)]
+mod storage_compression_parity {
+    use voxel_core::math::Vector3i;
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
+
+    #[test]
+    fn uniform_channel_reads_back_default() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        buf.fill(5, ChannelId::Type.index());
+        assert!(buf.is_uniform(ChannelId::Type.index()));
+        for z in 0..8 {
+            for y in 0..8 {
+                for x in 0..8 {
+                    assert_eq!(buf.get_voxel(x, y, z, ChannelId::Type.index()), 5);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn write_decompresses_uniform_channel() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        buf.fill(5, ChannelId::Type.index());
+        assert!(buf.is_uniform(ChannelId::Type.index()));
+        buf.set_voxel(9, 0, 0, 0, ChannelId::Type.index());
+        assert!(!buf.is_uniform(ChannelId::Type.index()));
+        assert_eq!(buf.get_voxel(1, 1, 1, ChannelId::Type.index()), 5);
+        assert_eq!(buf.get_voxel(0, 0, 0, ChannelId::Type.index()), 9);
+    }
+}

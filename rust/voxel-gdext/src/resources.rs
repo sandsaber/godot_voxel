@@ -318,14 +318,16 @@ impl VoxelEngineGD {
 // ---------------------------------------------------------------------------
 
 /// Tracks completion of save operations. Used by GDScript to await
-/// terrain persistence.
+/// terrain persistence. The functional API maintains a real pending counter:
+/// `mark_pending` increments it, `mark_done` decrements it, and `is_done`
+/// reflects whether all saves have completed.
 #[derive(GodotClass)]
 #[class(base = RefCounted, tool)]
 pub struct VoxelSaveCompletionTrackerGD {
     base: Base<RefCounted>,
-    #[var]
+    /// Number of pending save operations (plain field; exposed via #[func]s).
     pending_count: i32,
-    #[var]
+    /// Whether all saves are done (pending_count == 0).
     is_done: bool,
 }
 
@@ -337,6 +339,40 @@ impl IRefCounted for VoxelSaveCompletionTrackerGD {
             pending_count: 0,
             is_done: true,
         }
+    }
+}
+
+#[godot_api]
+impl VoxelSaveCompletionTrackerGD {
+    /// Mark a save operation as started (increments pending_count).
+    #[func]
+    fn mark_pending(&mut self) {
+        self.pending_count += 1;
+        self.is_done = false;
+    }
+
+    /// Mark a save operation as complete (decrements pending_count). Sets
+    /// `is_done` true when the count reaches 0.
+    #[func]
+    fn mark_done(&mut self) {
+        if self.pending_count > 0 {
+            self.pending_count -= 1;
+        }
+        if self.pending_count == 0 {
+            self.is_done = true;
+        }
+    }
+
+    /// Current pending count.
+    #[func]
+    fn get_pending_count(&self) -> i32 {
+        self.pending_count
+    }
+
+    /// Whether all saves are done.
+    #[func]
+    fn get_is_done(&self) -> bool {
+        self.is_done
     }
 }
 
