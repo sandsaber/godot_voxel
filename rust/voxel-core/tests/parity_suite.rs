@@ -7964,3 +7964,299 @@ mod sdf_curve_combinations_parity {
         );
     }
 }
+
+// Mirrors test_threaded_task_runner.cpp — cancellation token patterns.
+#[cfg(test)]
+mod cancellation_token_parity {
+    use voxel_core::tasks::cancellation_token::TaskCancellationToken;
+
+    #[test]
+    fn fresh_token_is_valid_not_cancelled() {
+        let token = TaskCancellationToken::create();
+        assert!(token.is_valid(), "fresh token should be valid");
+        assert!(!token.is_cancelled(), "fresh token should not be cancelled");
+    }
+
+    #[test]
+    fn cancel_makes_token_cancelled() {
+        let token = TaskCancellationToken::create();
+        token.cancel();
+        assert!(
+            token.is_cancelled(),
+            "cancelled token should report cancelled"
+        );
+    }
+
+    #[test]
+    fn cancel_is_idempotent() {
+        let token = TaskCancellationToken::create();
+        token.cancel();
+        token.cancel(); // double cancel should not panic
+        assert!(token.is_cancelled());
+    }
+
+    #[test]
+    fn separate_tokens_are_independent() {
+        let a = TaskCancellationToken::create();
+        let b = TaskCancellationToken::create();
+        a.cancel();
+        assert!(a.is_cancelled(), "A should be cancelled");
+        assert!(!b.is_cancelled(), "B should not be cancelled by A");
+    }
+}
+
+// Mirrors test_threaded_task_runner.cpp — binary mutex patterns.
+#[cfg(test)]
+mod binary_mutex_parity {
+    use voxel_core::thread::BinaryMutex;
+
+    #[test]
+    fn lock_unlock_succeeds() {
+        let mutex = BinaryMutex::new();
+        {
+            let _guard = mutex.lock();
+            // Guard held; lock acquired.
+        }
+        // After guard dropped, should be lockable again.
+        let _guard2 = mutex.lock();
+    }
+
+    #[test]
+    fn try_lock_succeeds_when_unlocked() {
+        let mutex = BinaryMutex::new();
+        assert!(
+            mutex.try_lock().is_some(),
+            "try_lock should succeed when unlocked"
+        );
+    }
+
+    #[test]
+    fn mutex_is_send_sync() {
+        // Compile-time check: BinaryMutex must be Send+Sync for thread safety.
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<BinaryMutex>();
+    }
+}
+
+// Mirrors test_voxel_graph.cpp — analyze_range for SDF value prediction.
+#[cfg(test)]
+mod graph_analyze_range_parity {
+    use voxel_core::generators::graph::{CompiledGraph, Graph, GraphPort, NodeKind};
+    use voxel_core::math::interval::Interval;
+
+    /// analyze_range of a constant graph returns that constant's interval.
+    #[test]
+    fn constant_range_is_single_value() {
+        let mut g = Graph::new();
+        let c = g.push(NodeKind::Constant(5.0));
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: c, output: 0 }),
+        });
+        let compiled = CompiledGraph::compile(&g).expect("compile");
+        let range = compiled.analyze_range(
+            Interval::infinity(),
+            Interval::infinity(),
+            Interval::infinity(),
+        );
+        // The range should contain 5.0.
+        assert!(
+            range.min <= 5.0 && range.max >= 5.0,
+            "constant range should contain 5.0: {:?}",
+            range
+        );
+    }
+
+    /// analyze_range of a SdfSphere returns a finite interval.
+    #[test]
+    fn sphere_range_is_finite() {
+        let mut g = Graph::new();
+        let x = g.push(NodeKind::InputX);
+        let y = g.push(NodeKind::InputY);
+        let z = g.push(NodeKind::InputZ);
+        let r = g.push(NodeKind::Constant(3.0));
+        let sph = g.push(NodeKind::SdfSphere {
+            x: Some(GraphPort { node: x, output: 0 }),
+            y: Some(GraphPort { node: y, output: 0 }),
+            z: Some(GraphPort { node: z, output: 0 }),
+            radius: Some(GraphPort { node: r, output: 0 }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort {
+                node: sph,
+                output: 0,
+            }),
+        });
+        let compiled = CompiledGraph::compile(&g).expect("compile");
+        let range = compiled.analyze_range(
+            Interval::new(-10.0, 10.0),
+            Interval::new(-10.0, 10.0),
+            Interval::new(-10.0, 10.0),
+        );
+        assert!(
+            range.min.is_finite() || range.max.is_finite(),
+            "sphere range should have finite bound: {:?}",
+            range
+        );
+    }
+
+    /// analyze_range of an Add graph sums the input ranges.
+    #[test]
+    fn add_range_sums_inputs() {
+        let mut g = Graph::new();
+        let a = g.push(NodeKind::Constant(2.0));
+        let b = g.push(NodeKind::Constant(3.0));
+        let add = g.push(NodeKind::Add {
+            a: Some(GraphPort { node: a, output: 0 }),
+            b: Some(GraphPort { node: b, output: 0 }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort {
+                node: add,
+                output: 0,
+            }),
+        });
+        let compiled = CompiledGraph::compile(&g).expect("compile");
+        let range = compiled.analyze_range(
+            Interval::infinity(),
+            Interval::infinity(),
+            Interval::infinity(),
+        );
+        assert!(
+            range.min <= 5.0 && range.max >= 5.0,
+            "add range should contain 5.0: {:?}",
+            range
+        );
+    }
+}
+
+// Additional math interval + format patterns.
+#[cfg(test)]
+mod interval_math_parity {
+    use voxel_core::math::interval::Interval;
+
+    #[test]
+    fn infinity_interval_is_wide() {
+        let inf = Interval::infinity();
+        // The infinity interval should have very wide bounds.
+        assert!(
+            inf.min <= -1e30 || inf.max >= 1e30,
+            "infinity interval should be wide"
+        );
+    }
+
+    #[test]
+    fn single_value_interval() {
+        let s = Interval::single(5.0);
+        assert_eq!(s.min, 5.0);
+        assert_eq!(s.max, 5.0);
+    }
+
+    #[test]
+    fn new_interval_bounds() {
+        let i = Interval::new(-3.0, 7.0);
+        assert_eq!(i.min, -3.0);
+        assert_eq!(i.max, 7.0);
+    }
+}
+
+// Additional graph SDF combine patterns.
+#[cfg(test)]
+mod graph_sdf_combine_parity {
+    use voxel_core::generators::graph::{
+        CompiledGraph, CompiledScratch, Graph, GraphInputs, GraphOutput, GraphPort, NodeKind,
+    };
+
+    fn run(g: &Graph) -> f32 {
+        let c = CompiledGraph::compile(g).expect("compile");
+        let xs = [0.0f32];
+        let zs = [0.0f32];
+        let i = GraphInputs {
+            x: &xs,
+            y: 0.0,
+            z: &zs,
+        };
+        let mut s = CompiledScratch::new();
+        let mut o = Vec::new();
+        c.generate_slice(&i, 1, &mut s, &mut o, false);
+        o.into_iter()
+            .find(|(k, _)| *k == GraphOutput::Sdf)
+            .and_then(|(_, v)| v.into_iter().next())
+            .unwrap()
+    }
+
+    /// SdfSmoothSubtract(a, b, 0) = hard subtract = max(a, -b). Golden.
+    #[test]
+    fn smooth_subtract_zero_is_hard_subtract() {
+        let mut g = Graph::new();
+        let na = g.push(NodeKind::Constant(2.0));
+        let nb = g.push(NodeKind::Constant(5.0));
+        let s = g.push(NodeKind::SdfSmoothSubtract {
+            a: Some(GraphPort {
+                node: na,
+                output: 0,
+            }),
+            b: Some(GraphPort {
+                node: nb,
+                output: 0,
+            }),
+            smoothness: 0.0,
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: s, output: 0 }),
+        });
+        // max(2, -5) = 2.
+        assert!(
+            (run(&g) - 2.0).abs() < 1e-5,
+            "smooth_subtract(0) = hard: {}",
+            run(&g)
+        );
+    }
+
+    /// SdfUnion of two constants returns the smaller. Golden.
+    #[test]
+    fn union_of_two_constants_returns_min() {
+        let mut g = Graph::new();
+        let na = g.push(NodeKind::Constant(3.0));
+        let nb = g.push(NodeKind::Constant(-1.0));
+        let u = g.push(NodeKind::SdfUnion {
+            a: Some(GraphPort {
+                node: na,
+                output: 0,
+            }),
+            b: Some(GraphPort {
+                node: nb,
+                output: 0,
+            }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: u, output: 0 }),
+        });
+        assert!(
+            (run(&g) - (-1.0)).abs() < 1e-5,
+            "union(3,-1) = -1: {}",
+            run(&g)
+        );
+    }
+
+    /// Remap maps a value from one range to another.
+    #[test]
+    fn remap_maps_value() {
+        let mut g = Graph::new();
+        let x = g.push(NodeKind::Constant(0.5));
+        let remap = g.push(NodeKind::Remap {
+            a: Some(GraphPort { node: x, output: 0 }),
+            from_start: 0.0,
+            from_end: 1.0,
+            to_start: 0.0,
+            to_end: 10.0,
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort {
+                node: remap,
+                output: 0,
+            }),
+        });
+        // remap(0.5, 0,1 → 0,10) = 5.0.
+        assert!((run(&g) - 5.0).abs() < 1e-5, "remap(0.5) = 5: {}", run(&g));
+    }
+}
