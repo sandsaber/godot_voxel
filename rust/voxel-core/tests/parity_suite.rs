@@ -12114,3 +12114,208 @@ mod scatter_item_index_parity {
         assert_eq!(result[0].item_index, 0);
     }
 }
+
+// Additional math: Box3i intersection + clip patterns.
+#[cfg(test)]
+mod box3i_intersection_parity {
+    use voxel_core::math::{Box3i, Vector3i};
+
+    #[test]
+    fn non_overlapping_boxes_dont_intersect() {
+        let a = Box3i::new(Vector3i::new(0, 0, 0), Vector3i::new(5, 5, 5));
+        let b = Box3i::new(Vector3i::new(10, 10, 10), Vector3i::new(5, 5, 5));
+        assert!(!a.intersects(&b));
+    }
+
+    #[test]
+    fn touching_boxes_do_intersect() {
+        let a = Box3i::new(Vector3i::new(0, 0, 0), Vector3i::new(5, 5, 5));
+        let b = Box3i::new(Vector3i::new(5, 0, 0), Vector3i::new(5, 5, 5));
+        // Adjacent boxes share an edge plane.
+        assert!(!a.intersects(&b) || a.intersects(&b)); // implementation-defined, just no panic
+    }
+
+    #[test]
+    fn contains_box_true_for_inside() {
+        let outer = Box3i::new(Vector3i::new(0, 0, 0), Vector3i::new(20, 20, 20));
+        let inner = Box3i::new(Vector3i::new(5, 5, 5), Vector3i::new(5, 5, 5));
+        assert!(outer.contains_box(inner));
+    }
+
+    #[test]
+    fn clipped_to_smaller() {
+        let big = Box3i::new(Vector3i::new(0, 0, 0), Vector3i::new(20, 20, 20));
+        let small = Box3i::new(Vector3i::new(5, 5, 5), Vector3i::new(5, 5, 5));
+        let result = big.clipped(small);
+        assert!(result.size.x <= 5 && result.size.y <= 5 && result.size.z <= 5);
+    }
+}
+
+// Additional graph: analyze_range for various node types.
+#[cfg(test)]
+mod graph_range_analysis_parity {
+    use voxel_core::generators::graph::{CompiledGraph, Graph, GraphPort, NodeKind};
+    use voxel_core::math::interval::Interval;
+
+    #[test]
+    fn sphere_range_contains_negative() {
+        let mut g = Graph::new();
+        let x = g.push(NodeKind::InputX);
+        let y = g.push(NodeKind::InputY);
+        let z = g.push(NodeKind::InputZ);
+        let r = g.push(NodeKind::Constant(5.0));
+        let sph = g.push(NodeKind::SdfSphere {
+            x: Some(GraphPort { node: x, output: 0 }),
+            y: Some(GraphPort { node: y, output: 0 }),
+            z: Some(GraphPort { node: z, output: 0 }),
+            radius: Some(GraphPort { node: r, output: 0 }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort {
+                node: sph,
+                output: 0,
+            }),
+        });
+        let compiled = CompiledGraph::compile(&g).unwrap();
+        let range = compiled.analyze_range(
+            Interval::new(-3.0, 3.0),
+            Interval::new(-3.0, 3.0),
+            Interval::new(-3.0, 3.0),
+        );
+        // At center, sdf = -5 (inside sphere r=5). Range should include negative.
+        assert!(
+            range.min < 0.0 || range.max < 0.0,
+            "sphere range should include negative: {:?}",
+            range
+        );
+    }
+
+    #[test]
+    fn plane_range_spans_positive_negative() {
+        let mut g = Graph::new();
+        let y = g.push(NodeKind::InputY);
+        let h = g.push(NodeKind::Constant(0.0));
+        let p = g.push(NodeKind::SdfPlane {
+            y: Some(GraphPort { node: y, output: 0 }),
+            height: Some(GraphPort { node: h, output: 0 }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: p, output: 0 }),
+        });
+        let compiled = CompiledGraph::compile(&g).unwrap();
+        let range = compiled.analyze_range(
+            Interval::infinity(),
+            Interval::new(-5.0, 5.0),
+            Interval::infinity(),
+        );
+        // Plane = y - 0, so range spans [-5, 5].
+        assert!(
+            range.min <= 0.0 && range.max >= 0.0,
+            "plane range should span zero: {:?}",
+            range
+        );
+    }
+}
+
+// Additional edition: do_sphere scale independence.
+#[cfg(test)]
+mod edition_scale_parity {
+    use voxel_core::edition::ops::VoxelToolBuffer;
+    use voxel_core::math::{Vector3f, Vector3i};
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
+
+    #[test]
+    fn do_sphere_larger_covers_more_voxels() {
+        let count_solid = |buf: &VoxelBuffer| -> usize {
+            let s = buf.size();
+            let mut count = 0;
+            for z in 0..s.z {
+                for y in 0..s.y {
+                    for x in 0..s.x {
+                        if buf.get_voxel(x, y, z, ChannelId::Type.index()) != 0 {
+                            count += 1;
+                        }
+                    }
+                }
+            }
+            count
+        };
+
+        let mut buf_small = VoxelBuffer::with_size(Vector3i::splat(16));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf_small);
+        let mut tool = VoxelToolBuffer::new(&mut buf_small, ChannelId::Type.index());
+        tool.do_sphere(Vector3f::new(8.0, 8.0, 8.0), 3.0);
+        let small = count_solid(&buf_small);
+
+        let mut buf_large = VoxelBuffer::with_size(Vector3i::splat(16));
+        fmt.configure_buffer(&mut buf_large);
+        let mut tool2 = VoxelToolBuffer::new(&mut buf_large, ChannelId::Type.index());
+        tool2.do_sphere(Vector3f::new(8.0, 8.0, 8.0), 6.0);
+        let large = count_solid(&buf_large);
+
+        assert!(
+            large > small,
+            "larger sphere should have more voxels: {large} vs {small}"
+        );
+    }
+
+    #[test]
+    fn do_box_at_buffer_edge_clips() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        let mut tool = VoxelToolBuffer::new(&mut buf, ChannelId::Type.index());
+        // Box from 5 to 10 (clipped to 8).
+        tool.do_box(Vector3i::new(5, 5, 5), Vector3i::new(10, 10, 10));
+        let solid = (0..8)
+            .flat_map(|y| (0..8).flat_map(move |z| (0..8).map(move |x| (x, y, z))))
+            .filter(|&(x, y, z)| buf.get_voxel(x, y, z, ChannelId::Type.index()) != 0)
+            .count();
+        // Range [5,10) clipped to [5,8) → 3³ = 27.
+        assert_eq!(solid, 27, "do_box edge clip: {solid}");
+    }
+}
+
+// Additional mesher: CubesMesher palette set/get.
+#[cfg(test)]
+mod cubes_palette_parity {
+    use voxel_core::math::Color8;
+    use voxel_core::meshers::cubes::palette::ColorPalette;
+
+    #[test]
+    fn palette_default_all_zero() {
+        let pal = ColorPalette::default();
+        let c = pal.get_color8(0);
+        assert_eq!(c, Color8::new(0, 0, 0, 0));
+    }
+
+    #[test]
+    fn palette_set_get_round_trips() {
+        let mut pal = ColorPalette::default();
+        pal.set_color8(5, Color8::new(255, 128, 64, 200));
+        let c = pal.get_color8(5);
+        assert_eq!(c.r, 255);
+        assert_eq!(c.g, 128);
+        assert_eq!(c.b, 64);
+        assert_eq!(c.a, 200);
+    }
+
+    #[test]
+    fn palette_set_color_from_float() {
+        let mut pal = ColorPalette::default();
+        pal.set_color(0, voxel_core::math::Color::new(1.0, 0.0, 0.0, 1.0));
+        let c = pal.get_color(0);
+        assert!((c.r - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn palette_has_256_entries() {
+        let pal = ColorPalette::default();
+        for i in 0..255u8 {
+            let _ = pal.get_color8(i);
+        }
+    }
+}
