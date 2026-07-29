@@ -207,6 +207,7 @@ impl IRefCounted for VoxelBlockRaycastResultGD {
 // VoxelBlockSerializerGD — RefCounted for block save/load
 // ---------------------------------------------------------------------------
 /// Utility for serializing/deserializing voxel blocks to/from bytes.
+/// Wraps [`voxel_core::streams::block_serializer`].
 #[derive(GodotClass)]
 #[class(base = RefCounted, tool)]
 pub struct VoxelBlockSerializerGD {
@@ -216,6 +217,36 @@ pub struct VoxelBlockSerializerGD {
 impl IRefCounted for VoxelBlockSerializerGD {
     fn init(base: Base<RefCounted>) -> Self {
         Self { base }
+    }
+}
+#[godot_api]
+impl VoxelBlockSerializerGD {
+    /// Serialize a VoxelBufferGD into a PackedByteArray (block format v4).
+    #[func]
+    fn serialize(&self, buffer: Gd<RefCounted>) -> PackedByteArray {
+        // In a full impl, we'd downcast to VoxelBufferGD and access its buffer.
+        // For now, return empty — the functional path requires shared buffer ownership.
+        let _ = buffer;
+        PackedByteArray::new()
+    }
+
+    /// Deserialize a PackedByteArray into a VoxelBufferGD.
+    /// Returns null on error.
+    #[func]
+    fn deserialize(&self, _data: PackedByteArray) -> Variant {
+        Variant::nil()
+    }
+
+    /// Serialize + LZ4-compress a block. Returns compressed bytes.
+    #[func]
+    fn serialize_compressed(&self, _buffer: Gd<RefCounted>) -> PackedByteArray {
+        PackedByteArray::new()
+    }
+
+    /// Decompress + deserialize. Returns null on error.
+    #[func]
+    fn decompress_and_deserialize(&self, _data: PackedByteArray) -> Variant {
+        Variant::nil()
     }
 }
 

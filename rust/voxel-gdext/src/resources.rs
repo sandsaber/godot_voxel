@@ -95,30 +95,55 @@ impl IResource for VoxelMesherCubesGD {
 // ---------------------------------------------------------------------------
 
 /// A 256-entry color palette used by the cubes mesher. Each entry is an
-/// RGBA color (8 bits per channel).
+/// RGBA color (8 bits per channel). Wraps [`voxel_core::meshers::cubes::palette::ColorPalette`].
 #[derive(GodotClass)]
 #[class(base = Resource, tool)]
 pub struct VoxelColorPaletteGD {
     base: Base<Resource>,
+    palette: voxel_core::meshers::cubes::palette::ColorPalette,
 }
 
 #[godot_api]
 impl IResource for VoxelColorPaletteGD {
     fn init(base: Base<Resource>) -> Self {
-        Self { base }
+        Self {
+            base,
+            palette: voxel_core::meshers::cubes::palette::ColorPalette::default(),
+        }
     }
 }
 
 #[godot_api]
 impl VoxelColorPaletteGD {
+    /// Set the RGBA color for palette entry `index` (0-255).
     #[func]
-    fn set_color(&mut self, _index: i32, _r: i32, _g: i32, _b: i32, _a: i32) {
-        // In a full impl, delegates to voxel_core::ColorPalette.
+    fn set_color(&mut self, index: i32, r: i32, g: i32, b: i32, a: i32) {
+        if index >= 0 && index < 256 {
+            let c = voxel_core::math::Color8::new(
+                r.clamp(0, 255) as u8,
+                g.clamp(0, 255) as u8,
+                b.clamp(0, 255) as u8,
+                a.clamp(0, 255) as u8,
+            );
+            self.palette.set_color8(index as u8, c);
+        }
     }
 
+    /// Get the RGBA color for palette entry `index`. Returns [r, g, b, a].
     #[func]
-    fn get_color(&self, _index: i32) -> PackedInt32Array {
-        PackedInt32Array::from(&[0, 0, 0, 255])
+    fn get_color(&self, index: i32) -> PackedInt32Array {
+        if index >= 0 && index < 256 {
+            let c = self.palette.get_color8(index as u8);
+            PackedInt32Array::from(&[c.r as i32, c.g as i32, c.b as i32, c.a as i32])
+        } else {
+            PackedInt32Array::from(&[0, 0, 0, 255])
+        }
+    }
+
+    /// Clear all entries to transparent black.
+    #[func]
+    fn clear(&mut self) {
+        self.palette.clear();
     }
 }
 
