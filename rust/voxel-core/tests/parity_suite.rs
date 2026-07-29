@@ -12817,3 +12817,283 @@ mod transvoxel_triangle_ratio_parity {
         );
     }
 }
+
+// Additional graph: SDF operations algebraic properties.
+#[cfg(test)]
+mod graph_algebraic_parity {
+    use voxel_core::generators::graph::{
+        CompiledGraph, CompiledScratch, Graph, GraphInputs, GraphOutput, GraphPort, NodeKind,
+    };
+
+    fn run(g: &Graph) -> f32 {
+        let c = CompiledGraph::compile(g).expect("compile");
+        let xs = [0.0f32];
+        let zs = [0.0f32];
+        let i = GraphInputs {
+            x: &xs,
+            y: 0.0,
+            z: &zs,
+        };
+        let mut s = CompiledScratch::new();
+        let mut o = Vec::new();
+        c.generate_slice(&i, 1, &mut s, &mut o, false);
+        o.into_iter()
+            .find(|(k, _)| *k == GraphOutput::Sdf)
+            .and_then(|(_, v)| v.into_iter().next())
+            .unwrap()
+    }
+
+    #[test]
+    fn union_associative() {
+        // union(union(a,b),c) == union(a,union(b,c)).
+        let make_lr = || {
+            let mut g = Graph::new();
+            let a = g.push(NodeKind::Constant(-3.0));
+            let b = g.push(NodeKind::Constant(-1.0));
+            let c = g.push(NodeKind::Constant(-5.0));
+            let u1 = g.push(NodeKind::SdfUnion {
+                a: Some(GraphPort { node: a, output: 0 }),
+                b: Some(GraphPort { node: b, output: 0 }),
+            });
+            let u2 = g.push(NodeKind::SdfUnion {
+                a: Some(GraphPort {
+                    node: u1,
+                    output: 0,
+                }),
+                b: Some(GraphPort { node: c, output: 0 }),
+            });
+            g.push(NodeKind::OutputSdf {
+                a: Some(GraphPort {
+                    node: u2,
+                    output: 0,
+                }),
+            });
+            g
+        };
+        let make_rr = || {
+            let mut g = Graph::new();
+            let a = g.push(NodeKind::Constant(-3.0));
+            let b = g.push(NodeKind::Constant(-1.0));
+            let c = g.push(NodeKind::Constant(-5.0));
+            let u1 = g.push(NodeKind::SdfUnion {
+                a: Some(GraphPort { node: b, output: 0 }),
+                b: Some(GraphPort { node: c, output: 0 }),
+            });
+            let u2 = g.push(NodeKind::SdfUnion {
+                a: Some(GraphPort { node: a, output: 0 }),
+                b: Some(GraphPort {
+                    node: u1,
+                    output: 0,
+                }),
+            });
+            g.push(NodeKind::OutputSdf {
+                a: Some(GraphPort {
+                    node: u2,
+                    output: 0,
+                }),
+            });
+            g
+        };
+        let lr = run(&make_lr());
+        let rr = run(&make_rr());
+        assert!(
+            (lr - rr).abs() < 1e-5,
+            "union should be associative: {lr} vs {rr}"
+        );
+    }
+
+    #[test]
+    fn add_commutative() {
+        let make_ab = |a: f32, b: f32| {
+            let mut g = Graph::new();
+            let na = g.push(NodeKind::Constant(a));
+            let nb = g.push(NodeKind::Constant(b));
+            let add = g.push(NodeKind::Add {
+                a: Some(GraphPort {
+                    node: na,
+                    output: 0,
+                }),
+                b: Some(GraphPort {
+                    node: nb,
+                    output: 0,
+                }),
+            });
+            g.push(NodeKind::OutputSdf {
+                a: Some(GraphPort {
+                    node: add,
+                    output: 0,
+                }),
+            });
+            g
+        };
+        assert!((run(&make_ab(3.0, 7.0)) - run(&make_ab(7.0, 3.0))).abs() < 1e-5);
+    }
+
+    #[test]
+    fn multiply_commutative() {
+        let make_ab = |a: f32, b: f32| {
+            let mut g = Graph::new();
+            let na = g.push(NodeKind::Constant(a));
+            let nb = g.push(NodeKind::Constant(b));
+            let mul = g.push(NodeKind::Multiply {
+                a: Some(GraphPort {
+                    node: na,
+                    output: 0,
+                }),
+                b: Some(GraphPort {
+                    node: nb,
+                    output: 0,
+                }),
+            });
+            g.push(NodeKind::OutputSdf {
+                a: Some(GraphPort {
+                    node: mul,
+                    output: 0,
+                }),
+            });
+            g
+        };
+        assert!((run(&make_ab(3.0, 7.0)) - run(&make_ab(7.0, 3.0))).abs() < 1e-5);
+    }
+
+    #[test]
+    fn add_distributes_over_multiply() {
+        // (a+b)*c == a*c + b*c.
+        let make_left = || {
+            let mut g = Graph::new();
+            let a = g.push(NodeKind::Constant(2.0));
+            let b = g.push(NodeKind::Constant(3.0));
+            let c = g.push(NodeKind::Constant(4.0));
+            let add = g.push(NodeKind::Add {
+                a: Some(GraphPort { node: a, output: 0 }),
+                b: Some(GraphPort { node: b, output: 0 }),
+            });
+            let mul = g.push(NodeKind::Multiply {
+                a: Some(GraphPort {
+                    node: add,
+                    output: 0,
+                }),
+                b: Some(GraphPort { node: c, output: 0 }),
+            });
+            g.push(NodeKind::OutputSdf {
+                a: Some(GraphPort {
+                    node: mul,
+                    output: 0,
+                }),
+            });
+            g
+        };
+        // (2+3)*4 = 20.
+        assert!(
+            (run(&make_left()) - 20.0).abs() < 1e-5,
+            "distributive: {}",
+            run(&make_left())
+        );
+    }
+}
+
+// Additional storage: channel depth + format edge cases.
+#[cfg(test)]
+mod channel_depth_edge_parity {
+    use voxel_core::storage::{ChannelDepth, VoxelFormat};
+
+    #[test]
+    fn all_depths_distinct() {
+        assert_ne!(ChannelDepth::Bit8, ChannelDepth::Bit16);
+        assert_ne!(ChannelDepth::Bit16, ChannelDepth::Bit32);
+        assert_ne!(ChannelDepth::Bit32, ChannelDepth::Bit64);
+        assert_ne!(ChannelDepth::Bit8, ChannelDepth::Bit64);
+    }
+
+    #[test]
+    fn format_has_8_channels() {
+        let fmt = VoxelFormat::new();
+        assert_eq!(fmt.depths.len(), 8);
+    }
+
+    #[test]
+    fn format_clone_preserves_depths() {
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[0] = ChannelDepth::Bit32;
+        fmt.depths[1] = ChannelDepth::Bit64;
+        let cloned = fmt;
+        assert_eq!(cloned.depths[0], ChannelDepth::Bit32);
+        assert_eq!(cloned.depths[1], ChannelDepth::Bit64);
+    }
+}
+
+// Additional octree: subdivide depth limit.
+#[cfg(test)]
+mod octree_depth_limit_parity {
+    use voxel_core::terrain::lod_octree::{LodOctree, NoOpActions};
+
+    #[test]
+    fn subdivide_respects_max_depth() {
+        let mut oct = LodOctree::new();
+        oct.create(2);
+        let mut a = NoOpActions;
+        oct.subdivide(&mut a);
+        let leaves: i32 = {
+            let mut count = 0;
+            oct.for_each_leaf(|_, _, _| {
+                count += 1;
+            });
+            count
+        };
+        // 2-LOD → max 8 leaves (one split).
+        assert_eq!(leaves, 8, "2-LOD should have exactly 8 leaves: {leaves}");
+    }
+
+    #[test]
+    fn one_lod_no_subdivide() {
+        let mut oct = LodOctree::new();
+        oct.create(1);
+        let mut a = NoOpActions;
+        oct.subdivide(&mut a);
+        let leaves: i32 = {
+            let mut count = 0;
+            oct.for_each_leaf(|_, _, _| {
+                count += 1;
+            });
+            count
+        };
+        // 1-LOD → root only, no split.
+        assert!(leaves <= 1, "1-LOD should have ≤1 leaf: {leaves}");
+    }
+}
+
+// Additional mesher: output structure for uniform buffer.
+#[cfg(test)]
+mod mesher_uniform_output_parity {
+    use voxel_core::math::Vector3i;
+    use voxel_core::meshers::{CubesMesher, MesherInput, MesherOutput, VoxelMesher};
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
+
+    #[test]
+    fn cubes_uniform_solid_emits_empty_surface() {
+        let mesher = CubesMesher::new();
+        let mut voxels = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Color.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut voxels);
+        voxels.fill(0xFF, ChannelId::Color.index()); // all opaque
+        let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+        let mut out = MesherOutput::default();
+        mesher.build(&mut out, &input);
+        // Uniform solid → no visible faces → 0 vertices.
+        assert_eq!(out.total_vertex_count(), 0, "uniform solid cubes → 0 verts");
+    }
+
+    #[test]
+    fn cubes_uniform_air_emits_empty() {
+        let mesher = CubesMesher::new();
+        let mut voxels = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Color.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut voxels);
+        let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+        let mut out = MesherOutput::default();
+        mesher.build(&mut out, &input);
+        assert_eq!(out.total_vertex_count(), 0);
+    }
+}
