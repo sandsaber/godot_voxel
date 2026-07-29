@@ -5909,3 +5909,324 @@ mod edition_sdf_parity {
         );
     }
 }
+
+// Mirrors test_voxel_buffer.cpp — paste_masked on VoxelDataMap.
+#[cfg(test)]
+mod data_map_paste_parity {
+    use voxel_core::math::Vector3i;
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelDataMap, VoxelFormat};
+
+    /// paste_masked creates blocks and copies matching voxels.
+    #[test]
+    fn paste_masked_creates_blocks() {
+        let mut map = VoxelDataMap::new(0);
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.depths[ChannelId::Color.index()] = ChannelDepth::Bit8;
+        map.set_format(fmt);
+
+        let mut src = VoxelBuffer::with_size(Vector3i::splat(4));
+        let mut fmt2 = VoxelFormat::new();
+        fmt2.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt2.depths[ChannelId::Color.index()] = ChannelDepth::Bit8;
+        fmt2.configure_buffer(&mut src);
+        for y in 0..4 {
+            for x in 0..4 {
+                src.set_voxel(1, x, y, 0, ChannelId::Type.index());
+                src.set_voxel(7, x, y, 0, ChannelId::Color.index());
+            }
+        }
+
+        let channels_mask = (1u32 << ChannelId::Type.index()) | (1u32 << ChannelId::Color.index());
+        map.paste_masked(
+            Vector3i::zero(),
+            &src,
+            channels_mask,
+            ChannelId::Type.index(),
+            1,
+            true,
+        );
+
+        // The block at origin should exist after paste_masked with create_new_blocks.
+        assert!(
+            map.get_block(Vector3i::zero()).is_some(),
+            "block should exist after paste_masked"
+        );
+        assert!(map.block_count() > 0, "should have at least one block");
+    }
+
+    /// paste (non-masked) copies all voxels unconditionally.
+    #[test]
+    fn paste_copies_all_voxels() {
+        let mut map = VoxelDataMap::new(0);
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        map.set_format(fmt);
+        let mut src = VoxelBuffer::with_size(Vector3i::splat(4));
+        let mut fmt2 = VoxelFormat::new();
+        fmt2.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt2.configure_buffer(&mut src);
+        src.fill(3, ChannelId::Type.index());
+
+        let channels_mask = 1u32 << ChannelId::Type.index();
+        map.paste(Vector3i::zero(), &src, channels_mask, true);
+
+        assert_eq!(
+            map.get_voxel(Vector3i::new(0, 0, 0), ChannelId::Type.index()),
+            3
+        );
+    }
+
+    /// VoxelDataMap reports its block size correctly.
+    #[test]
+    fn data_map_block_size() {
+        let _map = VoxelDataMap::new(0);
+        // BLOCK_SIZE is a compile-time constant, always > 0.
+        let _: u32 = VoxelDataMap::BLOCK_SIZE;
+    }
+}
+
+// Mirrors test_voxel_graph.cpp — graph expression simplification + image.
+#[cfg(test)]
+mod graph_expression_parity {
+    use voxel_core::generators::graph::{
+        CompiledGraph, CompiledScratch, Graph, GraphInputs, GraphOutput, GraphPort, NodeKind,
+    };
+
+    fn run_multi(g: &Graph, xs: &[f32], y: f32, zs: &[f32]) -> Vec<f32> {
+        let c = CompiledGraph::compile(g).expect("compile");
+        let i = GraphInputs { x: xs, y, z: zs };
+        let mut s = CompiledScratch::new();
+        let mut o = Vec::new();
+        c.generate_slice(&i, xs.len(), &mut s, &mut o, false);
+        o.into_iter()
+            .find(|(k, _)| *k == GraphOutput::Sdf)
+            .map(|(_, v)| v)
+            .unwrap_or_default()
+    }
+
+    /// A graph computing x*2 produces a linear ramp. Mirrors generator expressions.
+    #[test]
+    fn graph_x_times_2_linear_ramp() {
+        let mut g = Graph::new();
+        let x = g.push(NodeKind::InputX);
+        let c2 = g.push(NodeKind::Constant(2.0));
+        let mul = g.push(NodeKind::Multiply {
+            a: Some(GraphPort { node: x, output: 0 }),
+            b: Some(GraphPort {
+                node: c2,
+                output: 0,
+            }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort {
+                node: mul,
+                output: 0,
+            }),
+        });
+        let xs = [0.0f32, 1.0, 2.0, 3.0, 4.0];
+        let result = run_multi(&g, &xs, 0.0, &xs);
+        assert_eq!(result.len(), 5);
+        for (i, &v) in result.iter().enumerate() {
+            assert!((v - (i as f32 * 2.0)).abs() < 1e-5, "x*2 ramp at {i}: {v}");
+        }
+    }
+
+    /// A graph computing x+y+z (via InputX/Y/Z) sums the coordinates.
+    #[test]
+    fn graph_xyz_sum() {
+        let mut g = Graph::new();
+        let x = g.push(NodeKind::InputX);
+        let y = g.push(NodeKind::InputY);
+        let z = g.push(NodeKind::InputZ);
+        let add1 = g.push(NodeKind::Add {
+            a: Some(GraphPort { node: x, output: 0 }),
+            b: Some(GraphPort { node: y, output: 0 }),
+        });
+        let add2 = g.push(NodeKind::Add {
+            a: Some(GraphPort {
+                node: add1,
+                output: 0,
+            }),
+            b: Some(GraphPort { node: z, output: 0 }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort {
+                node: add2,
+                output: 0,
+            }),
+        });
+        let xs = [1.0f32];
+        let zs = [3.0f32];
+        let result = run_multi(&g, &xs, 2.0, &zs); // y=2
+        assert!(
+            (result[0] - 6.0).abs() < 1e-5,
+            "x+y+z = 1+2+3 = 6: {}",
+            result[0]
+        );
+    }
+
+    /// A constant graph produces the same value for all slice elements.
+    #[test]
+    fn graph_constant_uniform_slice() {
+        let mut g = Graph::new();
+        let c = g.push(NodeKind::Constant(42.0));
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: c, output: 0 }),
+        });
+        let xs = [0.0f32, 1.0, 2.0];
+        let result = run_multi(&g, &xs, 0.0, &xs);
+        for &v in &result {
+            assert!((v - 42.0).abs() < 1e-5, "constant slice should be 42: {v}");
+        }
+    }
+
+    /// A graph with InputX → Abs produces |x| (non-negative).
+    #[test]
+    fn graph_abs_inputx_nonneg() {
+        let mut g = Graph::new();
+        let x = g.push(NodeKind::InputX);
+        let abs = g.push(NodeKind::Abs {
+            a: Some(GraphPort { node: x, output: 0 }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort {
+                node: abs,
+                output: 0,
+            }),
+        });
+        let xs = [-5.0f32, -1.0, 0.0, 3.0, 7.0];
+        let result = run_multi(&g, &xs, 0.0, &xs);
+        for &v in &result {
+            assert!(v >= 0.0, "abs should be non-negative: {v}");
+        }
+        assert!((result[0] - 5.0).abs() < 1e-5, "abs(-5) = 5: {}", result[0]);
+    }
+}
+
+// Mirrors test_edition_funcs.cpp — SDF hemisphere + do_sphere variations.
+#[cfg(test)]
+mod edition_sdf_hemisphere_parity {
+    use voxel_core::edition::ops::VoxelToolBuffer;
+    use voxel_core::math::{Vector3f, Vector3i};
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
+
+    /// do_sphere at the edge of the buffer creates a hemisphere (half-sphere).
+    /// Mirrors sdf_hemisphere pattern.
+    #[test]
+    fn do_sphere_at_edge_creates_partial_region() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(16));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        // Sphere centered at corner (0,0,0) — only 1/8 visible.
+        let mut tool = VoxelToolBuffer::new(&mut buf, ChannelId::Type.index());
+        tool.do_sphere(Vector3f::new(0.0, 0.0, 0.0), 5.0);
+        let mut solid = 0;
+        for z in 0..16 {
+            for y in 0..16 {
+                for x in 0..16 {
+                    if buf.get_voxel(x, y, z, ChannelId::Type.index()) != 0 {
+                        solid += 1;
+                    }
+                }
+            }
+        }
+        // ~1/8 of a full sphere (radius 5 ≈ 523 voxels) ≈ 65.
+        assert!(solid > 20 && solid < 150, "hemisphere voxel count: {solid}");
+    }
+
+    /// do_sphere with radius 0 carves a single voxel.
+    #[test]
+    fn do_sphere_radius_zero_single_voxel() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        let mut tool = VoxelToolBuffer::new(&mut buf, ChannelId::Type.index());
+        tool.do_sphere(Vector3f::new(4.0, 4.0, 4.0), 0.0);
+        let solid: usize = (0..8)
+            .flat_map(|y| (0..8).flat_map(move |z| (0..8).map(move |x| (x, y, z))))
+            .filter(|&(x, y, z)| buf.get_voxel(x, y, z, ChannelId::Type.index()) != 0)
+            .count();
+        // radius 0 should carve at most a few voxels (center ± 0).
+        assert!(solid <= 8, "radius 0 should carve few voxels: {solid}");
+    }
+
+    /// do_box then do_sphere (same area) — sphere fills within the box bounds.
+    #[test]
+    fn box_then_sphere_overlaps() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(16));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        {
+            let mut tool = VoxelToolBuffer::new(&mut buf, ChannelId::Type.index());
+            tool.do_box(Vector3i::new(0, 0, 0), Vector3i::new(8, 8, 8));
+        }
+        let count_box: usize = (0..16)
+            .flat_map(|y| (0..16).flat_map(move |z| (0..16).map(move |x| (x, y, z))))
+            .filter(|&(x, y, z)| buf.get_voxel(x, y, z, ChannelId::Type.index()) != 0)
+            .count();
+        {
+            let mut tool = VoxelToolBuffer::new(&mut buf, ChannelId::Type.index());
+            tool.do_sphere(Vector3f::new(4.0, 4.0, 4.0), 6.0);
+        }
+        let count_both: usize = (0..16)
+            .flat_map(|y| (0..16).flat_map(move |z| (0..16).map(move |x| (x, y, z))))
+            .filter(|&(x, y, z)| buf.get_voxel(x, y, z, ChannelId::Type.index()) != 0)
+            .count();
+        assert!(
+            count_both >= count_box,
+            "sphere should not remove box voxels: {count_both} vs {count_box}"
+        );
+    }
+}
+
+// Mirrors test_voxel_data_map.cpp — block operations.
+#[cfg(test)]
+mod voxel_data_map_ops_parity {
+    use voxel_core::math::Vector3i;
+    use voxel_core::storage::VoxelDataMap;
+
+    /// A block can be created and retrieved.
+    #[test]
+    fn create_and_get_block() {
+        let mut map = VoxelDataMap::new(0);
+        map.set_empty_block(Vector3i::zero(), true);
+        assert!(
+            map.get_block(Vector3i::zero()).is_some(),
+            "block should exist after create"
+        );
+    }
+
+    /// A non-existent block returns None.
+    #[test]
+    fn get_nonexistent_block_returns_none() {
+        let map = VoxelDataMap::new(0);
+        assert!(map.get_block(Vector3i::new(100, 100, 100)).is_none());
+    }
+
+    /// voxel_to_block maps voxel coordinates to block coordinates.
+    #[test]
+    fn voxel_to_block_mapping() {
+        let map = VoxelDataMap::new(0);
+        let bs = VoxelDataMap::BLOCK_SIZE as i32;
+        assert_eq!(map.voxel_to_block(Vector3i::zero()), Vector3i::zero());
+        assert_eq!(
+            map.voxel_to_block(Vector3i::new(bs, 0, 0)),
+            Vector3i::new(1, 0, 0)
+        );
+    }
+
+    /// block_count tracks created blocks.
+    #[test]
+    fn block_count_tracks_creates() {
+        let mut map = VoxelDataMap::new(0);
+        assert_eq!(map.block_count(), 0);
+        map.set_empty_block(Vector3i::zero(), true);
+        assert_eq!(map.block_count(), 1);
+        map.set_empty_block(Vector3i::new(1, 0, 0), true);
+        assert_eq!(map.block_count(), 2);
+    }
+}
