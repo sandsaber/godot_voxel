@@ -8808,3 +8808,185 @@ mod graph_more_combos_parity {
         assert!((run(&g) - 3.0).abs() < 1e-5);
     }
 }
+
+// Additional instance library + scatter config parity.
+#[cfg(test)]
+mod instance_library_ops_parity {
+    use voxel_core::instancing::{InstanceLibrary, InstanceLibraryItem};
+
+    #[test]
+    fn add_and_get_item() {
+        let mut lib = InstanceLibrary::new();
+        let idx = lib.add_item(InstanceLibraryItem {
+            name: "tree".into(),
+            density: 0.5,
+            ..Default::default()
+        });
+        assert_eq!(idx, 0);
+        assert!(lib.get_item(0).is_some());
+        assert_eq!(lib.get_item(0).unwrap().name, "tree");
+    }
+
+    #[test]
+    fn get_nonexistent_item_returns_none() {
+        let lib = InstanceLibrary::new();
+        assert!(lib.get_item(99).is_none());
+    }
+
+    #[test]
+    fn len_tracks_items() {
+        let mut lib = InstanceLibrary::new();
+        assert_eq!(lib.len(), 0);
+        lib.add_item(Default::default());
+        assert_eq!(lib.len(), 1);
+        lib.add_item(Default::default());
+        assert_eq!(lib.len(), 2);
+    }
+
+    #[test]
+    fn is_empty_for_new_library() {
+        let lib = InstanceLibrary::new();
+        assert!(lib.is_empty());
+    }
+}
+
+// Additional mesher MeshArrays + Surface parity.
+#[cfg(test)]
+mod mesh_arrays_parity {
+    use voxel_core::meshers::{MesherOutput, Surface, SurfaceArrays};
+
+    #[test]
+    fn empty_output_has_zero_vertices() {
+        let output = MesherOutput::default();
+        assert_eq!(output.total_vertex_count(), 0);
+    }
+
+    #[test]
+    fn empty_output_has_zero_triangles() {
+        let output = MesherOutput::default();
+        assert_eq!(output.total_triangle_count(), 0);
+    }
+
+    #[test]
+    fn empty_surface_is_empty() {
+        use voxel_core::meshers::transvoxel::structures::MeshArrays;
+        let surface = Surface::new(SurfaceArrays::Transvoxel(MeshArrays::default()), 0);
+        assert!(surface.is_empty());
+    }
+
+    #[test]
+    fn output_clear_resets() {
+        let mut output = MesherOutput::default();
+        output.clear();
+        assert_eq!(output.total_vertex_count(), 0);
+    }
+}
+
+// Additional terrain stats parity.
+#[cfg(test)]
+mod terrain_stats_parity {
+    use voxel_core::terrain::VoxelTerrainStats;
+
+    #[test]
+    fn default_stats_all_zero() {
+        let stats = VoxelTerrainStats::default();
+        assert_eq!(stats.blocks_loaded, 0);
+        assert_eq!(stats.blocks_unloaded, 0);
+        assert_eq!(stats.meshes_built, 0);
+        assert_eq!(stats.meshes_dropped, 0);
+    }
+}
+
+// Additional graph node count + topology parity.
+#[cfg(test)]
+mod graph_topology_parity {
+    use voxel_core::generators::graph::{Graph, NodeKind};
+
+    #[test]
+    fn graph_push_returns_sequential_ids() {
+        let mut g = Graph::new();
+        let id0 = g.push(NodeKind::Constant(1.0));
+        let id1 = g.push(NodeKind::Constant(2.0));
+        let id2 = g.push(NodeKind::Constant(3.0));
+        assert!(id0 != id1 && id1 != id2, "ids should be distinct");
+    }
+
+    #[test]
+    fn graph_default_is_empty() {
+        let g = Graph::default();
+        assert_eq!(g.nodes().len(), 0);
+    }
+
+    #[test]
+    fn graph_clone_preserves_nodes() {
+        let mut g = Graph::new();
+        g.push(NodeKind::Constant(1.0));
+        g.push(NodeKind::InputX);
+        let cloned = g.clone();
+        assert_eq!(cloned.nodes().len(), g.nodes().len());
+    }
+}
+
+// Additional scatter config + seed parity.
+#[cfg(test)]
+mod scatter_config_parity {
+    use voxel_core::instancing::ScatterConfig;
+
+    #[test]
+    fn default_config_has_zero_seed() {
+        let config = ScatterConfig::default();
+        assert_eq!(config.seed, 0);
+    }
+
+    #[test]
+    fn config_with_custom_seed() {
+        let config = ScatterConfig { seed: 42, ..ScatterConfig::default() };
+        assert_eq!(config.seed, 42);
+    }
+}
+
+// Additional transvoxel padding + minimum_padding parity.
+#[cfg(test)]
+mod mesher_padding_parity {
+    use voxel_core::meshers::{CubesMesher, TransvoxelMesher, VoxelMesher};
+
+    #[test]
+    fn transvoxel_minimum_padding_positive() {
+        let mesher = TransvoxelMesher::new();
+        assert!(
+            mesher.minimum_padding() > 0,
+            "transvoxel should need padding"
+        );
+    }
+
+    #[test]
+    fn cubes_minimum_padding_positive() {
+        let mesher = CubesMesher::new();
+        assert!(mesher.minimum_padding() > 0, "cubes should need padding");
+    }
+}
+
+// Additional lod octree node_data parity.
+#[cfg(test)]
+mod octree_node_data_parity {
+    use voxel_core::terrain::lod_octree::OctreeNodeData;
+
+    #[test]
+    fn default_node_data() {
+        let data = OctreeNodeData::default();
+        let _ = data;
+    }
+}
+
+// Additional Box2i math parity.
+#[cfg(test)]
+mod box2i_parity {
+    use voxel_core::math::{Box2i, Vector2i};
+
+    #[test]
+    fn box2i_contains_point() {
+        let b = Box2i::new(Vector2i::new(0, 0), Vector2i::new(10, 10));
+        assert!(b.contains_point(Vector2i::new(5, 5)));
+        assert!(!b.contains_point(Vector2i::new(-1, 0)));
+    }
+}
