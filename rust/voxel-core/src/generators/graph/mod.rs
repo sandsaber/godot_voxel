@@ -23,6 +23,7 @@
 //! `Remap`, `OutputSdf`. Range analysis, `Curve`/`Image`/`Noise`/`SDF`
 //! nodes, FastNoise2 integration, and the `Expression` node are deferred.
 
+pub mod expression_node;
 pub mod generator_graph;
 pub mod image;
 pub mod runtime;
