@@ -23,8 +23,6 @@ shaders/dev/.godot/
 
 # Tool directories
 .superpowers/
-.agents/
-.codex/
 docs/superpowers/
 
 # Rust build artifacts
