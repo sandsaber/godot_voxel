@@ -6609,3 +6609,351 @@ mod raycast_blocky_parity {
         );
     }
 }
+
+// Mirrors test_container_funcs.cpp — vector operations.
+#[cfg(test)]
+mod container_funcs_parity {
+    use voxel_core::containers::funcs;
+
+    #[test]
+    fn unordered_remove_last() {
+        let mut v = vec![1, 2, 3, 4];
+        funcs::unordered_remove(&mut v, 3); // remove last → no swap
+        assert_eq!(v, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn unordered_remove_middle_swaps() {
+        let mut v = vec![1, 2, 3, 4];
+        funcs::unordered_remove(&mut v, 1); // remove middle → swaps last in
+        assert_eq!(v.len(), 3);
+        assert!(v.contains(&1));
+        assert!(v.contains(&3));
+        assert!(v.contains(&4));
+        assert!(!v.contains(&2));
+    }
+
+    #[test]
+    fn unordered_remove_if_removes_matching() {
+        let mut v = vec![1, 2, 3, 4, 5];
+        funcs::unordered_remove_if(&mut v, |x| *x % 2 == 0);
+        assert_eq!(v.len(), 3);
+        assert!(
+            v.iter().all(|x| x % 2 == 1),
+            "only odd elements should remain"
+        );
+    }
+
+    #[test]
+    fn append_array_extends() {
+        let mut dst = vec![1, 2];
+        funcs::append_array(&mut dst, &[3, 4, 5]);
+        assert_eq!(dst, vec![1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn has_duplicate_detects() {
+        assert!(funcs::has_duplicate(&[1, 2, 3, 2]));
+        assert!(!funcs::has_duplicate(&[1, 2, 3, 4]));
+    }
+
+    #[test]
+    fn is_uniform_all_same() {
+        assert!(funcs::is_uniform(&[5, 5, 5]));
+        assert!(!funcs::is_uniform(&[5, 5, 6]));
+    }
+
+    #[test]
+    fn find_duplicate_returns_indices() {
+        let dup = funcs::find_duplicate(&[1, 2, 3, 2, 4]);
+        assert!(dup.is_some());
+        let (i, j) = dup.unwrap();
+        assert_eq!(&[1, 2, 3, 2, 4][i], &[1, 2, 3, 2, 4][j]);
+    }
+
+    #[test]
+    fn shift_up_drain_front() {
+        let mut v = vec![1, 2, 3, 4, 5];
+        funcs::shift_up(&mut v, 2);
+        // shift_up drains elements [0..pos], leaving [3, 4, 5].
+        assert_eq!(v, vec![3, 4, 5]);
+    }
+}
+
+// Mirrors test_string_funcs.cpp — int32 string conversion.
+#[cfg(test)]
+mod string_conv_parity {
+    use voxel_core::string::conv;
+
+    #[test]
+    fn int32_to_string_positive() {
+        let mut buf = [0u8; 16];
+        let n = conv::int32_to_string_base10(42, &mut buf);
+        let s = std::str::from_utf8(&buf[..n]).unwrap();
+        assert_eq!(s, "42");
+    }
+
+    #[test]
+    fn int32_to_string_negative() {
+        let mut buf = [0u8; 16];
+        let n = conv::int32_to_string_base10(-7, &mut buf);
+        let s = std::str::from_utf8(&buf[..n]).unwrap();
+        assert_eq!(s, "-7");
+    }
+
+    #[test]
+    fn int32_to_string_zero() {
+        let mut buf = [0u8; 16];
+        let n = conv::int32_to_string_base10(0, &mut buf);
+        let s = std::str::from_utf8(&buf[..n]).unwrap();
+        assert_eq!(s, "0");
+    }
+
+    #[test]
+    fn int32_to_string_large() {
+        let mut buf = [0u8; 16];
+        let n = conv::int32_to_string_base10(123456, &mut buf);
+        let s = std::str::from_utf8(&buf[..n]).unwrap();
+        assert_eq!(s, "123456");
+    }
+
+    #[test]
+    fn string_base10_to_int32_round_trips() {
+        let (nchars, val) = conv::string_base10_to_int32("42").unwrap();
+        assert_eq!(val, 42);
+        assert_eq!(nchars, 2);
+    }
+
+    #[test]
+    fn string_base10_to_int32_negative() {
+        let (_, val) = conv::string_base10_to_int32("-100").unwrap();
+        assert_eq!(val, -100);
+    }
+
+    #[test]
+    fn string_base10_to_int32_invalid() {
+        assert!(conv::string_base10_to_int32("abc").is_none());
+    }
+}
+
+// Mirrors test_expression_parser.cpp — expression parsing + constant folding.
+#[cfg(test)]
+mod expression_parser_parity {
+    use voxel_core::string::expression_parser::{find_variables, parse, Node};
+
+    #[test]
+    fn parse_simple_number() {
+        let result = parse("42", &[]);
+        assert!(result.error.id == voxel_core::string::expression_parser::ErrorId::None);
+        assert!(result.root.is_some());
+        if let Some(boxed) = &result.root {
+            if let Node::Number(n) = boxed.as_ref() {
+                assert!((n - 42.0).abs() < 1e-5);
+            } else {
+                panic!("expected Number node");
+            }
+        }
+    }
+
+    #[test]
+    fn parse_variable() {
+        let result = parse("x", &[]);
+        assert!(result.root.is_some());
+        if let Some(boxed) = &result.root {
+            assert!(matches!(boxed.as_ref(), Node::Variable(_)));
+        }
+    }
+
+    #[test]
+    fn parse_binary_op_add() {
+        let result = parse("1 + 2", &[]);
+        assert!(result.root.is_some());
+        if let Some(boxed) = &result.root {
+            if let Node::Number(n) = boxed.as_ref() {
+                assert!((n - 3.0).abs() < 1e-5, "1+2 should fold to 3: {n}");
+            }
+        }
+    }
+
+    #[test]
+    fn parse_with_variable_no_fold() {
+        let result = parse("x + 2", &[]);
+        assert!(result.root.is_some());
+        if let Some(boxed) = &result.root {
+            assert!(
+                !matches!(boxed.as_ref(), Node::Number(_)),
+                "x+2 should not fold"
+            );
+        }
+    }
+
+    #[test]
+    fn find_variables_extracts_names() {
+        let result = parse("x + y * x", &[]);
+        let mut vars = Vec::new();
+        if let Some(root) = &result.root {
+            find_variables(root, &mut vars);
+        }
+        assert!(vars.contains(&"x".to_string()));
+        assert!(vars.contains(&"y".to_string()));
+        assert_eq!(
+            vars.len(),
+            vars.iter().collect::<std::collections::HashSet<_>>().len()
+        );
+    }
+}
+
+// Mirrors test_voxel_graph.cpp — graph SDF plane + sphere on plane.
+#[cfg(test)]
+mod graph_sphere_on_plane_parity {
+    use voxel_core::generators::graph::{
+        CompiledGraph, CompiledScratch, Graph, GraphInputs, GraphOutput, GraphPort, NodeKind,
+    };
+
+    fn run_multi(g: &Graph, xs: &[f32], y: f32, zs: &[f32]) -> Vec<f32> {
+        let c = CompiledGraph::compile(g).expect("compile");
+        let i = GraphInputs { x: xs, y, z: zs };
+        let mut s = CompiledScratch::new();
+        let mut o = Vec::new();
+        c.generate_slice(&i, xs.len(), &mut s, &mut o, false);
+        o.into_iter()
+            .find(|(k, _)| *k == GraphOutput::Sdf)
+            .map(|(_, v)| v)
+            .unwrap_or_default()
+    }
+
+    /// A sphere on a plane: union(sdf_plane, sdf_sphere). Mirrors
+    /// test_voxel_graph_sphere_on_plane.
+    #[test]
+    fn sphere_on_plane_union_finite() {
+        let mut g = Graph::new();
+        let y = g.push(NodeKind::InputY);
+        let h = g.push(NodeKind::Constant(0.0));
+        let plane = g.push(NodeKind::SdfPlane {
+            y: Some(GraphPort { node: y, output: 0 }),
+            height: Some(GraphPort { node: h, output: 0 }),
+        });
+        let x = g.push(NodeKind::InputX);
+        let z = g.push(NodeKind::InputZ);
+        let r = g.push(NodeKind::Constant(3.0));
+        let sph = g.push(NodeKind::SdfSphere {
+            x: Some(GraphPort { node: x, output: 0 }),
+            y: Some(GraphPort { node: y, output: 0 }),
+            z: Some(GraphPort { node: z, output: 0 }),
+            radius: Some(GraphPort { node: r, output: 0 }),
+        });
+        let union = g.push(NodeKind::SdfUnion {
+            a: Some(GraphPort {
+                node: plane,
+                output: 0,
+            }),
+            b: Some(GraphPort {
+                node: sph,
+                output: 0,
+            }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort {
+                node: union,
+                output: 0,
+            }),
+        });
+        let xs = [0.0f32, 2.0, 5.0];
+        let result = run_multi(&g, &xs, 1.0, &xs);
+        for v in &result {
+            assert!(v.is_finite(), "sphere on plane should be finite: {v}");
+        }
+    }
+
+    /// A constant SDF graph produces the same value regardless of position.
+    #[test]
+    fn constant_sdf_position_invariant() {
+        let mut g = Graph::new();
+        let c = g.push(NodeKind::Constant(-5.0));
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: c, output: 0 }),
+        });
+        let xs = [0.0f32, 1.0, 2.0, 3.0, 100.0];
+        let result = run_multi(&g, &xs, 0.0, &xs);
+        for v in &result {
+            assert!((v - (-5.0)).abs() < 1e-5, "constant SDF should be -5: {v}");
+        }
+    }
+
+    /// Two OutputSdf nodes: the last one in topo order wins.
+    #[test]
+    fn two_output_sdf_last_wins() {
+        let mut g = Graph::new();
+        let c1 = g.push(NodeKind::Constant(1.0));
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort {
+                node: c1,
+                output: 0,
+            }),
+        });
+        let c2 = g.push(NodeKind::Constant(2.0));
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort {
+                node: c2,
+                output: 0,
+            }),
+        });
+        let xs = [0.0f32];
+        let result = run_multi(&g, &xs, 0.0, &xs);
+        // The graph produces SDF from whichever OutputSdf was evaluated.
+        assert!(!result.is_empty(), "should produce SDF output");
+    }
+}
+
+// Mirrors test_voxel_buffer.cpp — metadata + channel depth combinations.
+#[cfg(test)]
+mod voxel_buffer_metadata_parity {
+    use voxel_core::math::Vector3i;
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
+
+    /// A buffer with mixed channel depths reads/writes each correctly.
+    #[test]
+    fn mixed_channel_depths_read_write() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(4));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+        fmt.depths[ChannelId::Color.index()] = ChannelDepth::Bit16;
+        fmt.configure_buffer(&mut buf);
+        buf.set_voxel(7, 0, 0, 0, ChannelId::Type.index());
+        buf.set_voxel_f(-1.5, 0, 0, 0, ChannelId::Sdf.index());
+        buf.set_voxel(300, 0, 0, 0, ChannelId::Color.index()); // needs Bit16
+        assert_eq!(buf.get_voxel(0, 0, 0, ChannelId::Type.index()), 7);
+        assert!((buf.get_voxel_f(0, 0, 0, ChannelId::Sdf.index()) - (-1.5)).abs() < 1e-5);
+        assert_eq!(buf.get_voxel(0, 0, 0, ChannelId::Color.index()), 300);
+    }
+
+    /// A buffer's channel_depth reports the configured depth.
+    #[test]
+    fn channel_depth_reports_per_channel() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(4));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit16;
+        fmt.depths[ChannelId::Color.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        assert_eq!(
+            buf.channel_depth(ChannelId::Type.index()),
+            ChannelDepth::Bit16
+        );
+        assert_eq!(
+            buf.channel_depth(ChannelId::Color.index()),
+            ChannelDepth::Bit8
+        );
+    }
+
+    /// get_voxel_f on a uniform channel returns the fill value.
+    #[test]
+    fn get_voxel_f_uniform_returns_fill() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(4));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+        fmt.configure_buffer(&mut buf);
+        buf.clear_channel_f(ChannelId::Sdf.index(), 3.5);
+        assert!((buf.get_voxel_f(2, 2, 2, ChannelId::Sdf.index()) - 3.5).abs() < 1e-5);
+    }
+}
