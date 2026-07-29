@@ -14,6 +14,7 @@
 
 pub mod constants;
 pub mod containers;
+pub mod edition;
 pub mod engine;
 pub mod format;
 pub mod generators;

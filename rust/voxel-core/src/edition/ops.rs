@@ -1,0 +1,362 @@
+//! Shape operations and SDF blending for single-buffer voxel editing.
+//!
+//! Ports `DoShapeSingleBuffer` and SDF shape/operation types from
+//! `edition/funcs.h`. All operations work on a single [`VoxelBuffer`]
+//! and are engine-agnostic (no Godot dependency).
+
+use crate::math::{Vector3f, Vector3i};
+use crate::storage::{ChannelDepth, ChannelId, VoxelBuffer};
+
+/// Edit mode (add/remove/set). Matches C++ `Mode` in `funcs.h:492`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditMode {
+    Add,
+    Remove,
+    Set,
+}
+
+/// SDF blend mode for combining the shape's SDF with the existing voxel.
+/// Matches C++ SDF operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SdfBlendMode {
+    /// `min(existing, shape_sdf)` — union (grow).
+    Union,
+    /// `max(existing, -shape_sdf)` — subtract (carve).
+    Subtract,
+    /// Replace the voxel value entirely.
+    Set,
+}
+
+/// A voxel tool that edits a single [`VoxelBuffer`]. Engine-agnostic
+/// equivalent of C++ `VoxelToolBuffer`.
+pub struct VoxelToolBuffer<'a> {
+    buffer: &'a mut VoxelBuffer,
+    channel: usize,
+    mode: EditMode,
+    /// Value written for blocky `Set` mode (raw u64).
+    value: u64,
+}
+
+impl<'a> VoxelToolBuffer<'a> {
+    pub fn new(buffer: &'a mut VoxelBuffer, channel: usize) -> Self {
+        Self {
+            buffer,
+            channel,
+            mode: EditMode::Set,
+            value: 1,
+        }
+    }
+
+    pub fn with_mode(mut self, mode: EditMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    pub fn with_value(mut self, value: u64) -> Self {
+        self.value = value;
+        self
+    }
+
+    /// Edit a sphere at `center` with `radius`. SDF channels use smooth
+    /// blending; blocky channels use value set/add/remove.
+    pub fn do_sphere(&mut self, center: Vector3f, radius: f32) {
+        do_sphere(
+            self.buffer,
+            self.channel,
+            self.mode,
+            self.value,
+            center,
+            radius,
+        );
+    }
+
+    /// Edit an axis-aligned box from `min` to `max`.
+    pub fn do_box(&mut self, min: Vector3i, max: Vector3i) {
+        do_box(self.buffer, self.channel, self.mode, self.value, min, max);
+    }
+
+    /// Set a single voxel at integer position.
+    pub fn set_voxel(&mut self, pos: Vector3i, value: u64) {
+        if pos.x < 0 || pos.y < 0 || pos.z < 0 {
+            return;
+        }
+        let size = self.buffer.size();
+        if pos.x >= size.x || pos.y >= size.y || pos.z >= size.z {
+            return;
+        }
+        self.buffer
+            .set_voxel(value, pos.x, pos.y, pos.z, self.channel);
+    }
+}
+
+/// Apply a sphere edit to a VoxelBuffer's channel.
+pub fn do_sphere(
+    buffer: &mut VoxelBuffer,
+    channel: usize,
+    mode: EditMode,
+    value: u64,
+    center: Vector3f,
+    radius: f32,
+) {
+    let depth = buffer.channel_depth(channel);
+    let is_sdf = channel == ChannelId::Sdf.index();
+    let size = buffer.size();
+
+    // Compute the integer bounding box of the sphere.
+    let min = Vector3i::new(
+        (center.x - radius).floor() as i32,
+        (center.y - radius).floor() as i32,
+        (center.z - radius).floor() as i32,
+    )
+    .max_element(Vector3i::zero());
+    let max = Vector3i::new(
+        (center.x + radius).ceil() as i32,
+        (center.y + radius).ceil() as i32,
+        (center.z + radius).ceil() as i32,
+    )
+    .min_element(size);
+    if min.x >= max.x || min.y >= max.y || min.z >= max.z {
+        return;
+    }
+
+    let r2 = radius * radius;
+    buffer.decompress_channel(channel);
+
+    for z in min.z..max.z {
+        for y in min.y..max.y {
+            for x in min.x..max.x {
+                let dx = x as f32 + 0.5 - center.x;
+                let dy = y as f32 + 0.5 - center.y;
+                let dz = z as f32 + 0.5 - center.z;
+                let dist_sq = dx * dx + dy * dy + dz * dz;
+                let inside = dist_sq <= r2;
+
+                if !inside {
+                    continue;
+                }
+
+                if is_sdf && depth != ChannelDepth::Bit8 {
+                    // Smooth SDF blending. SDF convention: negative = inside
+                    // (solid), positive = outside (air). Shape SDF is
+                    // `dist - radius` (negative inside the sphere).
+                    let sdf = dist_sq.sqrt() - radius;
+                    let existing = buffer.get_voxel_f(x, y, z, channel);
+                    let blended = blend_sdf(existing, sdf, mode);
+                    buffer.set_voxel_f(blended, x, y, z, channel);
+                } else {
+                    // Blocky value mode.
+                    match mode {
+                        EditMode::Add => {
+                            let cur = buffer.get_voxel(x, y, z, channel);
+                            if cur == 0 {
+                                buffer.set_voxel(value, x, y, z, channel);
+                            }
+                        }
+                        EditMode::Remove => {
+                            buffer.set_voxel(0, x, y, z, channel);
+                        }
+                        EditMode::Set => {
+                            buffer.set_voxel(value, x, y, z, channel);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Apply a box edit to a VoxelBuffer's channel.
+pub fn do_box(
+    buffer: &mut VoxelBuffer,
+    channel: usize,
+    mode: EditMode,
+    value: u64,
+    min: Vector3i,
+    max: Vector3i,
+) {
+    let depth = buffer.channel_depth(channel);
+    let is_sdf = channel == ChannelId::Sdf.index();
+    let size = buffer.size();
+    let lo = min.max_element(Vector3i::zero());
+    let hi = max.min_element(size);
+    if lo.x >= hi.x || lo.y >= hi.y || lo.z >= hi.z {
+        return;
+    }
+
+    buffer.decompress_channel(channel);
+
+    if is_sdf && depth != ChannelDepth::Bit8 {
+        for z in lo.z..hi.z {
+            for y in lo.y..hi.y {
+                for x in lo.x..hi.x {
+                    let pos = Vector3i::new(x, y, z);
+                    let sdf = sdf_box(pos, lo, hi);
+                    let existing = buffer.get_voxel_f(x, y, z, channel);
+                    let blended = blend_sdf(existing, sdf, mode);
+                    buffer.set_voxel_f(blended, x, y, z, channel);
+                }
+            }
+        }
+    } else {
+        for z in lo.z..hi.z {
+            for y in lo.y..hi.y {
+                for x in lo.x..hi.x {
+                    match mode {
+                        EditMode::Add => {
+                            let cur = buffer.get_voxel(x, y, z, channel);
+                            if cur == 0 {
+                                buffer.set_voxel(value, x, y, z, channel);
+                            }
+                        }
+                        EditMode::Remove => {
+                            buffer.set_voxel(0, x, y, z, channel);
+                        }
+                        EditMode::Set => {
+                            buffer.set_voxel(value, x, y, z, channel);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Blend the shape SDF with the existing voxel SDF value.
+fn blend_sdf(existing: f32, shape_sdf: f32, mode: EditMode) -> f32 {
+    match mode {
+        EditMode::Add => existing.min(shape_sdf),
+        EditMode::Remove => existing.max(-shape_sdf),
+        EditMode::Set => shape_sdf,
+    }
+}
+
+/// For box SDF: compute the signed distance from point to the box boundary.
+/// Negative = inside the box (solid), positive = outside (air).
+fn sdf_box(pos: Vector3i, lo: Vector3i, hi: Vector3i) -> f32 {
+    let cx = pos.x as f32 + 0.5;
+    let cy = pos.y as f32 + 0.5;
+    let cz = pos.z as f32 + 0.5;
+    // Box half-extents from center.
+    let hx = (hi.x - lo.x) as f32 * 0.5;
+    let hy = (hi.y - lo.y) as f32 * 0.5;
+    let hz = (hi.z - lo.z) as f32 * 0.5;
+    let bcx = lo.x as f32 + hx;
+    let bcy = lo.y as f32 + hy;
+    let bcz = lo.z as f32 + hz;
+    // Distance from center, positive outside the half-extent.
+    let dx = (cx - bcx).abs() - hx;
+    let dy = (cy - bcy).abs() - hy;
+    let dz = (cz - bcz).abs() - hz;
+    // SDF: max(dx,dy,dz) when outside, min(dx,dy,dz) when inside.
+    let outside = dx.max(dy).max(dz).max(0.0);
+    let inside = dx.max(dy).max(dz).min(0.0);
+    outside + inside
+}
+
+trait Vector3iExt {
+    fn min_element(self, other: Self) -> Self;
+    fn max_element(self, other: Self) -> Self;
+}
+
+impl Vector3iExt for Vector3i {
+    fn min_element(self, other: Self) -> Self {
+        Vector3i::new(
+            self.x.min(other.x),
+            self.y.min(other.y),
+            self.z.min(other.z),
+        )
+    }
+    fn max_element(self, other: Self) -> Self {
+        Vector3i::new(
+            self.x.max(other.x),
+            self.y.max(other.y),
+            self.z.max(other.z),
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::{ChannelDepth, VoxelFormat};
+
+    fn make_buffer(size: i32) -> VoxelBuffer {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(size));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+        fmt.configure_buffer(&mut buf);
+        buf
+    }
+
+    #[test]
+    fn do_sphere_add_creates_solid_in_sdf() {
+        let mut buf = make_buffer(16);
+        let ch = ChannelId::Sdf.index();
+        // Start fully outside (air).
+        buf.clear_channel_f(ch, 100.0); // SDF_FAR_OUTSIDE
+
+        do_sphere(
+            &mut buf,
+            ch,
+            EditMode::Add,
+            1,
+            Vector3f::new(8.0, 8.0, 8.0),
+            4.0,
+        );
+
+        // Center should be inside (negative SDF).
+        let center = buf.get_voxel_f(8, 8, 8, ch);
+        assert!(center < 0.0, "center should be inside solid, got {center}");
+
+        // Corner should still be outside.
+        let corner = buf.get_voxel_f(0, 0, 0, ch);
+        assert!(corner > 0.0, "corner should remain air, got {corner}");
+    }
+
+    #[test]
+    fn do_sphere_remove_carves_hole() {
+        let mut buf = make_buffer(16);
+        let ch = ChannelId::Sdf.index();
+        // Start fully inside (solid).
+        buf.clear_channel_f(ch, -100.0);
+
+        do_sphere(
+            &mut buf,
+            ch,
+            EditMode::Remove,
+            1,
+            Vector3f::new(8.0, 8.0, 8.0),
+            4.0,
+        );
+
+        // Center should now be outside (carved).
+        let center = buf.get_voxel_f(8, 8, 8, ch);
+        assert!(center > 0.0, "center should be carved to air, got {center}");
+    }
+
+    #[test]
+    fn do_box_set_blocky() {
+        let mut buf = make_buffer(16);
+        let ch = ChannelId::Type.index();
+        do_box(
+            &mut buf,
+            ch,
+            EditMode::Set,
+            42,
+            Vector3i::new(2, 2, 2),
+            Vector3i::new(6, 6, 6),
+        );
+
+        assert_eq!(buf.get_voxel(3, 3, 3, ch), 42);
+        assert_eq!(buf.get_voxel(0, 0, 0, ch), 0);
+    }
+
+    #[test]
+    fn voxel_tool_buffer_set_voxel() {
+        let mut buf = make_buffer(8);
+        let ch = ChannelId::Type.index();
+        let mut tool = VoxelToolBuffer::new(&mut buf, ch).with_value(7);
+        tool.set_voxel(Vector3i::new(1, 2, 3), 7);
+        assert_eq!(buf.get_voxel(1, 2, 3, ch), 7);
+    }
+}
