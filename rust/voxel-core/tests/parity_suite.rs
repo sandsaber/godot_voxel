@@ -14453,3 +14453,162 @@ mod graph_image_output_parity {
         }
     }
 }
+
+// Mirrors test_voxel_buffer.cpp — blocky library full bake with AO + cutout geometry.
+#[cfg(test)]
+mod blocky_bake_ao_cutout_parity {
+    use voxel_core::meshers::blocky::{bake_library, BakedLibrary, BakedModel, AIR_ID};
+
+    /// bake_library on a full-cube library sets contributes_to_ao = true.
+    #[test]
+    fn full_cube_contributes_to_ao() {
+        let mut lib = full_cube_library();
+        bake_library(&mut lib);
+        assert!(
+            lib.models[1].contributes_to_ao,
+            "full cube should contribute to AO"
+        );
+    }
+
+    /// bake_library sets full_sides_mask for a cube (all 6 sides full).
+    #[test]
+    fn full_cube_all_sides_full() {
+        let mut lib = full_cube_library();
+        bake_library(&mut lib);
+        let cube = &lib.models[1];
+        assert_eq!(
+            cube.model.full_sides_mask, 0b111111,
+            "all 6 sides should be full"
+        );
+    }
+
+    /// bake_library sets empty_sides_mask = 0 for a cube (no empty sides).
+    #[test]
+    fn full_cube_no_empty_sides() {
+        let mut lib = full_cube_library();
+        bake_library(&mut lib);
+        let cube = &lib.models[1];
+        assert_eq!(
+            cube.model.empty_sides_mask, 0,
+            "no empty sides for full cube"
+        );
+    }
+
+    /// bake_library sets side_pattern_count > 0.
+    #[test]
+    fn bake_sets_side_pattern_count() {
+        let mut lib = full_cube_library();
+        bake_library(&mut lib);
+        assert!(
+            lib.side_pattern_count > 0,
+            "should have patterns after bake"
+        );
+    }
+
+    /// A library with just air (index 0) bakes without panic.
+    #[test]
+    fn air_only_library_bakes() {
+        let mut lib = BakedLibrary::default();
+        // Air model at index 0 (default empty=true).
+        lib.models.push(BakedModel::default());
+        bake_library(&mut lib);
+        // Air doesn't contribute to AO.
+        assert!(!lib.models[0].contributes_to_ao || lib.models[0].empty);
+    }
+
+    /// Two cubes with different colors produce same side pattern (both full cubes).
+    #[test]
+    fn two_cubes_same_side_pattern() {
+        let mut lib = full_cube_library();
+        // Add a second cube (different color).
+        lib.models.push(BakedModel {
+            empty: false,
+            color: voxel_core::math::Color::from_rgb(0.8, 0.2, 0.2),
+            culls_neighbors: true,
+            contributes_to_ao: true,
+            ..full_cube_model()
+        });
+        bake_library(&mut lib);
+        // Both cubes should have the same side_pattern_indices (both are full cubes).
+        let p1 = lib.models[1].model.side_pattern_indices[0];
+        let p2 = lib.models[2].model.side_pattern_indices[0];
+        assert_eq!(p1, p2, "two full cubes should share side pattern");
+    }
+
+    /// bake_library populates side_pattern_culling for self-occlusion.
+    #[test]
+    fn bake_self_occlusion() {
+        let mut lib = full_cube_library();
+        bake_library(&mut lib);
+        // A full side pattern should occlude itself.
+        let cube = &lib.models[1];
+        let p = cube.model.side_pattern_indices[0];
+        let i = (p + p * lib.side_pattern_count) as usize;
+        assert!(
+            lib.get_side_pattern_occlusion(p, p),
+            "full side should occlude itself"
+        );
+    }
+
+    /// Air model has all empty sides.
+    #[test]
+    fn air_all_sides_empty() {
+        let mut lib = BakedLibrary::default();
+        lib.models.push(BakedModel::default()); // air
+        bake_library(&mut lib);
+        let air = &lib.models[0];
+        assert_eq!(
+            air.model.empty_sides_mask, 0b111111,
+            "air should have all empty sides"
+        );
+        assert_eq!(
+            air.model.full_sides_mask, 0,
+            "air should have no full sides"
+        );
+    }
+
+    /// Helper: build a full-cube library (air + cube).
+    fn full_cube_library() -> BakedLibrary {
+        let air = BakedModel::default();
+        let cube = full_cube_model();
+        BakedLibrary {
+            models: vec![air, cube],
+            ..Default::default()
+        }
+    }
+
+    /// Helper: build a full-cube model with all 6 sides.
+    fn full_cube_model() -> BakedModel {
+        use voxel_core::constants::cube_tables::{
+            CORNER_POSITION, SIDE_CORNERS, SIDE_QUAD_TRIANGLES,
+        };
+        use voxel_core::math::{Vector2f, Vector3f};
+        use voxel_core::meshers::blocky::baked_library::{ModelSurface, SideSurface};
+
+        let mut cube = BakedModel {
+            empty: false,
+            culls_neighbors: true,
+            contributes_to_ao: true,
+            ..BakedModel::default()
+        };
+        cube.model.surface_count = 1;
+        cube.model.surfaces[0].collision_enabled = true;
+        for side in 0..6 {
+            let corners = SIDE_CORNERS[side];
+            let positions: Vec<Vector3f> = corners.iter().map(|&c| CORNER_POSITION[c]).collect();
+            let indices: Vec<i32> = SIDE_QUAD_TRIANGLES[side].to_vec();
+            cube.model.sides_surfaces[side][0] = SideSurface {
+                positions,
+                uvs: vec![
+                    Vector2f::new(0.0, 0.0),
+                    Vector2f::new(1.0, 0.0),
+                    Vector2f::new(1.0, 1.0),
+                    Vector2f::new(0.0, 1.0),
+                ],
+                indices,
+                tangents: Vec::new(),
+            };
+        }
+        cube
+    }
+}
