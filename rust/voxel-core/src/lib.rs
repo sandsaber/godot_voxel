@@ -23,6 +23,7 @@ pub mod io;
 pub mod math;
 pub mod memory;
 pub mod meshers;
+pub mod modifiers;
 pub mod storage;
 pub mod streams;
 pub mod string;
