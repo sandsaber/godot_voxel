@@ -11,6 +11,7 @@
 
 mod editor;
 mod generators;
+mod resources;
 mod streams;
 mod terrain;
 mod voxel_buffer;
