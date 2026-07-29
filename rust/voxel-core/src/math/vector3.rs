@@ -54,26 +54,24 @@ impl<T: Copy> Vector3T<T> {
         }
     }
 
-    /// Index access with runtime bounds check (debug). Mirrors `operator[]`.
+    /// Index access with runtime bounds check. Mirrors `operator[]`.
     #[inline]
     pub fn get(&self, i: usize) -> T {
-        debug_assert!(i < 3);
         match i {
             0 => self.x,
             1 => self.y,
             2 => self.z,
-            _ => unsafe { core::hint::unreachable_unchecked() },
+            _ => panic!("Vector3 index out of range"),
         }
     }
 
     #[inline]
     pub fn set(&mut self, i: usize, v: T) {
-        debug_assert!(i < 3);
         match i {
             0 => self.x = v,
             1 => self.y = v,
             2 => self.z = v,
-            _ => unsafe { core::hint::unreachable_unchecked() },
+            _ => panic!("Vector3 index out of range"),
         }
     }
 }
@@ -800,6 +798,40 @@ impl core::hash::Hash for Vector3i {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn public_get_returns_vector3_components() {
+        let v = Vector3T::new(10, 20, 30);
+
+        assert_eq!(v.get(0), 10);
+        assert_eq!(v.get(1), 20);
+        assert_eq!(v.get(2), 30);
+    }
+
+    #[test]
+    fn public_set_updates_vector3_components() {
+        let mut v = Vector3T::new(1, 2, 3);
+
+        v.set(0, 10);
+        v.set(1, 20);
+        v.set(2, 30);
+
+        assert_eq!(v, Vector3T::new(10, 20, 30));
+    }
+
+    #[test]
+    #[should_panic(expected = "Vector3 index out of range")]
+    fn public_get_panics_for_out_of_range_vector3_index() {
+        let v = Vector3T::new(1, 2, 3);
+        let _ = v.get(3);
+    }
+
+    #[test]
+    #[should_panic(expected = "Vector3 index out of range")]
+    fn public_set_panics_for_out_of_range_vector3_index() {
+        let mut v = Vector3T::new(1, 2, 3);
+        v.set(usize::MAX, 4);
+    }
 
     #[test]
     fn basic_ops_f32() {

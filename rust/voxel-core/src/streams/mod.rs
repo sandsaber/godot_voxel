@@ -29,6 +29,7 @@
 pub mod block_data_output;
 pub mod block_serializer;
 pub mod compressed_data;
+pub mod decode_limits;
 pub mod instance_data;
 pub mod load_block_data_task;
 pub mod region;
@@ -38,6 +39,7 @@ pub mod stream_memory;
 pub mod voxel_stream;
 
 pub use block_data_output::{BlockDataOutput, BlockDataOutputKind};
+pub use decode_limits::{DecodeLimitError, DecodeLimits};
 pub use load_block_data_task::{
     BlockGenerationRequest, BlockGenerationTaskFactory, BlockGenerationTaskResult,
     LoadBlockDataParams, LoadBlockDataTask,

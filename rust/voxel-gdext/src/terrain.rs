@@ -321,9 +321,8 @@ impl VoxelTerrain {
             value,
             settings.format.depths[channel],
         );
-        let ok = data.try_set_voxel(raw, pos, channel);
+        let ok = core.try_edit_voxel(raw, pos, channel);
         if ok {
-            data.mark_area_modified(voxel_core::math::Box3i::new(pos, Vector3i::splat(1)), false);
             // Mark the block dirty so the process loop re-uploads its mesh.
             let block_pos = voxel_core::storage::voxel_data_map::VoxelDataMap::voxel_to_block_b(
                 pos,

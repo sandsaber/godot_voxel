@@ -36,6 +36,62 @@ pub const MAX_SECTOR_INDEX: u32 = 0xffffff;
 /// 8-bit sector count cap. Matches `RegionBlockInfo::MAX_SECTOR_COUNT`.
 pub const MAX_SECTOR_COUNT: u32 = 0xff;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegionFormatError {
+    InvalidRegionAxis {
+        axis: &'static str,
+        value: i32,
+    },
+    InvalidBlockSizePo2(u8),
+    InvalidSectorSize(u32),
+    ByteCountOverflow,
+    SectorCountOverflow {
+        sectors_per_block: u64,
+    },
+    SectorIndexOverflow {
+        max_potential_sectors: u64,
+    },
+    HeaderSizeOverflow,
+    RegionBlockInfoOverflow {
+        field: &'static str,
+        value: u32,
+        max: u32,
+    },
+}
+
+impl std::fmt::Display for RegionFormatError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidRegionAxis { axis, value } => {
+                write!(f, "invalid region {axis} axis {value}")
+            }
+            Self::InvalidBlockSizePo2(v) => write!(f, "invalid block_size_po2 {v}"),
+            Self::InvalidSectorSize(v) => write!(f, "invalid sector_size {v}"),
+            Self::ByteCountOverflow => write!(f, "region byte count overflow"),
+            Self::SectorCountOverflow { sectors_per_block } => {
+                write!(
+                    f,
+                    "sectors per block {sectors_per_block} exceeds {MAX_SECTOR_COUNT}"
+                )
+            }
+            Self::SectorIndexOverflow {
+                max_potential_sectors,
+            } => {
+                write!(
+                    f,
+                    "potential sectors {max_potential_sectors} exceeds {MAX_SECTOR_INDEX}"
+                )
+            }
+            Self::HeaderSizeOverflow => write!(f, "region header size overflow"),
+            Self::RegionBlockInfoOverflow { field, value, max } => {
+                write!(f, "region block info {field} {value} exceeds {max}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RegionFormatError {}
+
 /// Describes the voxel format of a region file. Ported from `RegionFormat`.
 ///
 /// All blocks in a region share this format; it is written once in the header
@@ -70,37 +126,59 @@ impl Default for RegionFormat {
 impl RegionFormat {
     /// Whether `self` is a valid, serializable format. Ported from `validate`.
     pub fn validate(&self) -> bool {
-        if self.region_size.x < 0 || self.region_size.x as u32 >= MAX_BLOCKS_ACROSS {
-            return false;
+        self.validate_result().is_ok()
+    }
+
+    pub fn validate_result(&self) -> Result<(), RegionFormatError> {
+        for (axis, value) in [
+            ("x", self.region_size.x),
+            ("y", self.region_size.y),
+            ("z", self.region_size.z),
+        ] {
+            if value <= 0 || value as u32 >= MAX_BLOCKS_ACROSS {
+                return Err(RegionFormatError::InvalidRegionAxis { axis, value });
+            }
         }
-        if self.region_size.y < 0 || self.region_size.y as u32 >= MAX_BLOCKS_ACROSS {
-            return false;
+        if self.block_size_po2 == 0 {
+            return Err(RegionFormatError::InvalidBlockSizePo2(self.block_size_po2));
         }
-        if self.region_size.z < 0 || self.region_size.z as u32 >= MAX_BLOCKS_ACROSS {
-            return false;
-        }
-        if !(1..=8).contains(&self.block_size_po2) {
-            return false;
+        if self.sector_size == 0 {
+            return Err(RegionFormatError::InvalidSectorSize(self.sector_size));
         }
 
         // Worst-case: every channel fully allocated at max depth.
-        let voxels_per_block = 1u64 << (3 * self.block_size_po2 as u32);
+        let shift = 3u32
+            .checked_mul(self.block_size_po2 as u32)
+            .ok_or(RegionFormatError::ByteCountOverflow)?;
+        let voxels_per_block = 1u64
+            .checked_shl(shift)
+            .ok_or(RegionFormatError::ByteCountOverflow)?;
         let mut bytes_per_block = 0u64;
         for d in &self.channel_depths {
-            bytes_per_block += (d.bit_count() / 8) as u64 * voxels_per_block;
-        }
-        if self.sector_size == 0 || self.sector_size > u16::MAX as u32 {
-            return false;
+            let channel_bytes = (d.bit_count() / 8) as u64;
+            let bytes = channel_bytes
+                .checked_mul(voxels_per_block)
+                .ok_or(RegionFormatError::ByteCountOverflow)?;
+            bytes_per_block = bytes_per_block
+                .checked_add(bytes)
+                .ok_or(RegionFormatError::ByteCountOverflow)?;
         }
         let sectors_per_block = bytes_per_block.div_ceil(self.sector_size as u64);
         if sectors_per_block > MAX_SECTOR_COUNT as u64 {
-            return false;
+            return Err(RegionFormatError::SectorCountOverflow { sectors_per_block });
         }
-        let max_potential_sectors = self.region_size.volume_u64() * sectors_per_block;
+        let max_potential_sectors = (self.block_count_checked()? as u64)
+            .checked_mul(sectors_per_block)
+            .ok_or(RegionFormatError::SectorIndexOverflow {
+                max_potential_sectors: u64::MAX,
+            })?;
         if max_potential_sectors > MAX_SECTOR_INDEX as u64 {
-            return false;
+            return Err(RegionFormatError::SectorIndexOverflow {
+                max_potential_sectors,
+            });
         }
-        true
+        let _ = self.header_size_v3_checked()?;
+        Ok(())
     }
 
     /// Whether `block` matches this region's format (size + per-channel depth).
@@ -121,15 +199,50 @@ impl RegionFormat {
     /// Byte offset where block data begins (i.e. header end). Matches
     /// `get_header_size_v3`.
     pub fn header_size_v3(&self) -> usize {
+        self.header_size_v3_checked()
+            .expect("RegionFormat::header_size_v3 requires a valid header size")
+    }
+
+    pub fn block_count_checked(&self) -> Result<usize, RegionFormatError> {
+        let x = usize::try_from(self.region_size.x).map_err(|_| {
+            RegionFormatError::InvalidRegionAxis {
+                axis: "x",
+                value: self.region_size.x,
+            }
+        })?;
+        let y = usize::try_from(self.region_size.y).map_err(|_| {
+            RegionFormatError::InvalidRegionAxis {
+                axis: "y",
+                value: self.region_size.y,
+            }
+        })?;
+        let z = usize::try_from(self.region_size.z).map_err(|_| {
+            RegionFormatError::InvalidRegionAxis {
+                axis: "z",
+                value: self.region_size.z,
+            }
+        })?;
+        x.checked_mul(y)
+            .and_then(|v| v.checked_mul(z))
+            .ok_or(RegionFormatError::HeaderSizeOverflow)
+    }
+
+    pub fn header_size_v3_checked(&self) -> Result<usize, RegionFormatError> {
         let palette_bytes = if self.palette.is_some() {
             PALETTE_SIZE_IN_BYTES
         } else {
             0
         };
         MAGIC_AND_VERSION_SIZE
-            + FIXED_HEADER_DATA_SIZE
-            + palette_bytes
-            + self.region_size.volume_u64() as usize * std::mem::size_of::<RegionBlockInfo>()
+            .checked_add(FIXED_HEADER_DATA_SIZE)
+            .and_then(|v| v.checked_add(palette_bytes))
+            .and_then(|v| {
+                self.block_count_checked()
+                    .ok()
+                    .and_then(|count| count.checked_mul(std::mem::size_of::<RegionBlockInfo>()))
+                    .and_then(|lut| v.checked_add(lut))
+            })
+            .ok_or(RegionFormatError::HeaderSizeOverflow)
     }
 }
 
@@ -150,11 +263,27 @@ impl RegionBlockInfo {
 
     /// Build from sector index + count.
     pub fn new(sector_index: u32, sector_count: u32) -> Self {
-        debug_assert!(sector_index <= MAX_SECTOR_INDEX);
-        debug_assert!(sector_count <= MAX_SECTOR_COUNT);
-        Self {
-            data: (sector_index << 8) | (sector_count & 0xff),
+        Self::try_new(sector_index, sector_count).expect("validated region block info")
+    }
+
+    pub fn try_new(sector_index: u32, sector_count: u32) -> Result<Self, RegionFormatError> {
+        if sector_index > MAX_SECTOR_INDEX {
+            return Err(RegionFormatError::RegionBlockInfoOverflow {
+                field: "sector_index",
+                value: sector_index,
+                max: MAX_SECTOR_INDEX,
+            });
         }
+        if sector_count > MAX_SECTOR_COUNT {
+            return Err(RegionFormatError::RegionBlockInfoOverflow {
+                field: "sector_count",
+                value: sector_count,
+                max: MAX_SECTOR_COUNT,
+            });
+        }
+        Ok(Self {
+            data: (sector_index << 8) | sector_count,
+        })
     }
 
     /// `get_sector_index` — offset into the data area, in sectors.
@@ -166,8 +295,20 @@ impl RegionBlockInfo {
     /// `set_sector_index`.
     #[inline]
     pub fn set_sector_index(&mut self, i: u32) {
-        debug_assert!(i <= MAX_SECTOR_INDEX);
+        self.try_set_sector_index(i)
+            .expect("validated region block info sector index");
+    }
+
+    pub fn try_set_sector_index(&mut self, i: u32) -> Result<(), RegionFormatError> {
+        if i > MAX_SECTOR_INDEX {
+            return Err(RegionFormatError::RegionBlockInfoOverflow {
+                field: "sector_index",
+                value: i,
+                max: MAX_SECTOR_INDEX,
+            });
+        }
         self.data = (i << 8) | (self.data & 0xff);
+        Ok(())
     }
 
     /// `get_sector_count` — how many consecutive sectors the block occupies.
@@ -179,8 +320,20 @@ impl RegionBlockInfo {
     /// `set_sector_count`.
     #[inline]
     pub fn set_sector_count(&mut self, c: u32) {
-        debug_assert!(c <= MAX_SECTOR_COUNT);
-        self.data = (c & 0xff) | (self.data & 0xffffff00);
+        self.try_set_sector_count(c)
+            .expect("validated region block info sector count");
+    }
+
+    pub fn try_set_sector_count(&mut self, c: u32) -> Result<(), RegionFormatError> {
+        if c > MAX_SECTOR_COUNT {
+            return Err(RegionFormatError::RegionBlockInfoOverflow {
+                field: "sector_count",
+                value: c,
+                max: MAX_SECTOR_COUNT,
+            });
+        }
+        self.data = c | (self.data & 0xffffff00);
+        Ok(())
     }
 
     /// Whether this slot is allocated.
@@ -244,6 +397,31 @@ mod tests {
         let mut f = RegionFormat::default();
         f.region_size = Vector3i::new(-1, 16, 16);
         assert!(!f.validate());
+    }
+
+    #[test]
+    fn format_rejects_zero_region_axis() {
+        let mut f = RegionFormat::default();
+        f.region_size = Vector3i::new(0, 16, 16);
+
+        assert!(f.validate_result().is_err());
+        assert!(!f.validate());
+    }
+
+    #[test]
+    fn block_info_try_new_rejects_overflow_without_masking() {
+        assert!(RegionBlockInfo::try_new(MAX_SECTOR_INDEX + 1, 1).is_err());
+        assert!(RegionBlockInfo::try_new(1, MAX_SECTOR_COUNT + 1).is_err());
+    }
+
+    #[test]
+    fn block_info_try_setters_reject_overflow_without_changing_value() {
+        let mut info = RegionBlockInfo::new(7, 8);
+
+        assert!(info.try_set_sector_index(MAX_SECTOR_INDEX + 1).is_err());
+        assert_eq!(info.sector_index(), 7);
+        assert!(info.try_set_sector_count(MAX_SECTOR_COUNT + 1).is_err());
+        assert_eq!(info.sector_count(), 8);
     }
 
     #[test]

@@ -42,28 +42,26 @@ impl<T: Copy> Vector4T<T> {
         }
     }
 
-    /// Index access with runtime bounds check (debug). Mirrors `operator[]`.
+    /// Index access with runtime bounds check. Mirrors `operator[]`.
     #[inline]
     pub fn get(&self, i: usize) -> T {
-        debug_assert!(i < 4);
         match i {
             0 => self.x,
             1 => self.y,
             2 => self.z,
             3 => self.w,
-            _ => unsafe { core::hint::unreachable_unchecked() },
+            _ => panic!("Vector4 index out of range"),
         }
     }
 
     #[inline]
     pub fn set(&mut self, i: usize, v: T) {
-        debug_assert!(i < 4);
         match i {
             0 => self.x = v,
             1 => self.y = v,
             2 => self.z = v,
             3 => self.w = v,
-            _ => unsafe { core::hint::unreachable_unchecked() },
+            _ => panic!("Vector4 index out of range"),
         }
     }
 }
@@ -196,6 +194,42 @@ pub mod math {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn public_get_returns_vector4_components() {
+        let v = Vector4T::new(10, 20, 30, 40);
+
+        assert_eq!(v.get(0), 10);
+        assert_eq!(v.get(1), 20);
+        assert_eq!(v.get(2), 30);
+        assert_eq!(v.get(3), 40);
+    }
+
+    #[test]
+    fn public_set_updates_vector4_components() {
+        let mut v = Vector4T::new(1, 2, 3, 4);
+
+        v.set(0, 10);
+        v.set(1, 20);
+        v.set(2, 30);
+        v.set(3, 40);
+
+        assert_eq!(v, Vector4T::new(10, 20, 30, 40));
+    }
+
+    #[test]
+    #[should_panic(expected = "Vector4 index out of range")]
+    fn public_get_panics_for_out_of_range_vector4_index() {
+        let v = Vector4T::new(1, 2, 3, 4);
+        let _ = v.get(4);
+    }
+
+    #[test]
+    #[should_panic(expected = "Vector4 index out of range")]
+    fn public_set_panics_for_out_of_range_vector4_index() {
+        let mut v = Vector4T::new(1, 2, 3, 4);
+        v.set(usize::MAX, 5);
+    }
 
     #[test]
     fn ctors_and_index() {

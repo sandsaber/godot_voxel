@@ -24,6 +24,7 @@ pub struct SaveBlockDataTask {
     tracker_error: Option<AsyncDependencyError>,
     follow_up_tasks: Vec<Box<dyn ThreadedTask>>,
     output: Option<BlockDataOutput>,
+    save_generation: u64,
 }
 
 impl SaveBlockDataTask {
@@ -34,6 +35,26 @@ impl SaveBlockDataTask {
         stream_dependency: Arc<StreamingDependency>,
         tracker: Option<Arc<AsyncDependencyTracker>>,
         flush_on_last_tracked_task: bool,
+    ) -> Self {
+        Self::new_voxels_with_generation(
+            position_in_blocks,
+            lod_index,
+            voxels,
+            stream_dependency,
+            tracker,
+            flush_on_last_tracked_task,
+            0,
+        )
+    }
+
+    pub fn new_voxels_with_generation(
+        position_in_blocks: Vector3i,
+        lod_index: u8,
+        voxels: Option<VoxelBuffer>,
+        stream_dependency: Arc<StreamingDependency>,
+        tracker: Option<Arc<AsyncDependencyTracker>>,
+        flush_on_last_tracked_task: bool,
+        save_generation: u64,
     ) -> Self {
         let had_voxels = voxels.is_some();
         Self {
@@ -49,6 +70,7 @@ impl SaveBlockDataTask {
             tracker_error: None,
             follow_up_tasks: Vec::new(),
             output: None,
+            save_generation,
         }
     }
 
@@ -93,7 +115,9 @@ impl SaveBlockDataTask {
             self.output = Some(BlockDataOutput::saved_dropped(
                 self.position_in_blocks,
                 self.lod_index,
+                None,
                 self.had_voxels,
+                self.save_generation,
             ));
             return;
         };
@@ -125,9 +149,20 @@ impl SaveBlockDataTask {
 
         self.has_run = true;
         self.output = Some(if self.stream_error.is_some() {
-            BlockDataOutput::saved_dropped(self.position_in_blocks, self.lod_index, self.had_voxels)
+            BlockDataOutput::saved_dropped(
+                self.position_in_blocks,
+                self.lod_index,
+                Some(voxels),
+                self.had_voxels,
+                self.save_generation,
+            )
         } else {
-            BlockDataOutput::saved(self.position_in_blocks, self.lod_index, self.had_voxels)
+            BlockDataOutput::saved(
+                self.position_in_blocks,
+                self.lod_index,
+                self.had_voxels,
+                self.save_generation,
+            )
         });
     }
 }
@@ -374,13 +409,64 @@ mod tests {
 
         assert_eq!(output.kind, BlockDataOutputKind::Saved);
         assert!(output.dropped);
-        assert!(output.voxels.is_none());
+        assert!(output.voxels.is_some());
         assert!(output.had_voxels);
         assert!(task.has_run());
         assert!(matches!(
             task.stream_error(),
             Some(VoxelStreamError::Io(message)) if message == "save failed"
         ));
+    }
+
+    #[test]
+    fn failed_save_output_returns_generation_and_voxels() {
+        let stream: Arc<dyn VoxelStream> = Arc::new(ErrorSaveStream);
+        let dependency = StreamingDependency::new(stream);
+        let mut task = SaveBlockDataTask::new_voxels_with_generation(
+            Vector3i::new(1, 2, 3),
+            0,
+            Some(filled_buffer(55)),
+            dependency,
+            None,
+            false,
+            42,
+        );
+
+        task.run_save();
+        let output = task.take_output().unwrap();
+
+        assert_eq!(output.kind, BlockDataOutputKind::Saved);
+        assert_eq!(output.save_generation, 42);
+        assert!(output.dropped);
+        assert_eq!(
+            output
+                .voxels
+                .unwrap()
+                .get_voxel(1, 0, 0, ChannelId::Type.index()),
+            55
+        );
+    }
+
+    #[test]
+    fn successful_save_output_keeps_generation_and_drops_local_payload() {
+        let stream = Arc::new(MemoryStream::new());
+        let dependency = StreamingDependency::new(stream);
+        let mut task = SaveBlockDataTask::new_voxels_with_generation(
+            Vector3i::new(1, 2, 3),
+            0,
+            Some(filled_buffer(55)),
+            dependency,
+            None,
+            false,
+            43,
+        );
+
+        task.run_save();
+        let output = task.take_output().unwrap();
+
+        assert_eq!(output.save_generation, 43);
+        assert!(!output.dropped);
+        assert!(output.voxels.is_none());
     }
 
     #[test]

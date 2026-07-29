@@ -25,7 +25,7 @@ pub use data::{
     Data, GroupNode, Layer, Material, MaterialType, Model, Node, NodeCommon, Rotation, ShapeNode,
     TransformNode, MAX_MODEL_SIZE, PALETTE_SIZE,
 };
-pub use parser::{parse, VoxError};
+pub use parser::{parse, parse_with_limits, VoxError};
 
 #[cfg(test)]
 mod tests;
