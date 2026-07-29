@@ -221,25 +221,84 @@ impl INode3D for VoxelModifierMeshGD {
 // ---------------------------------------------------------------------------
 // VoxelLodTerrainGD — Node3D for multi-LOD terrain (API parity)
 // ---------------------------------------------------------------------------
-/// Multi-LOD terrain node. Wraps VoxelTerrainCore with multi-LOD paging.
-/// In a full implementation this uses LodOctree + transition cells.
+/// Multi-LOD terrain node. Wraps [`VoxelTerrainCore`] with multi-LOD paging
+/// driven by a [`voxel_core::terrain::LodOctree`].
+///
+/// The functional API exposes the octree's leaf/node counts after a
+/// subdivision pass — `subdivide_and_count_leaves` runs the real octree
+/// split logic and returns how many leaf blocks the LOD structure produces.
 #[derive(GodotClass)]
 #[class(base = Node3D, tool)]
 pub struct VoxelLodTerrainGD {
     base: Base<Node3D>,
-    #[var]
+    /// Number of LOD levels (1 = single-LOD). Plain field exposed via the
+    /// `get_lod_count`/`set_lod_count` #[func]s.
     lod_count: i32,
-    #[var]
+    /// Distance at which a LOD level splits into higher detail.
     lod_distance: f32,
+    /// The real LOD octree driving block split/join.
+    octree: voxel_core::terrain::LodOctree,
 }
 #[godot_api]
 impl INode3D for VoxelLodTerrainGD {
     fn init(base: Base<Node3D>) -> Self {
+        let mut octree = voxel_core::terrain::LodOctree::new();
+        octree.create(4);
         Self {
             base,
             lod_count: 4,
             lod_distance: 64.0,
+            octree,
         }
+    }
+}
+
+#[godot_api]
+impl VoxelLodTerrainGD {
+    /// Number of LOD levels.
+    #[func]
+    fn get_lod_count(&self) -> i32 {
+        self.lod_count
+    }
+
+    /// Set the LOD level count and rebuild the octree. `count` is clamped to
+    /// at least 1.
+    #[func]
+    fn set_lod_count(&mut self, count: i32) {
+        let n = count.max(1) as u32;
+        self.lod_count = n as i32;
+        self.octree.create(n);
+    }
+
+    /// LOD split distance.
+    #[func]
+    fn get_lod_distance(&self) -> f32 {
+        self.lod_distance
+    }
+
+    #[func]
+    fn set_lod_distance(&mut self, distance: f32) {
+        self.lod_distance = distance;
+    }
+
+    /// Run one subdivision pass over the octree (using `NoOpActions`, which
+    /// allow all splits) and return the resulting leaf count. This exercises
+    /// the real LOD split logic through the binding.
+    #[func]
+    fn subdivide_and_count_leaves(&mut self) -> i32 {
+        let mut actions = voxel_core::terrain::lod_octree::NoOpActions;
+        self.octree.subdivide(&mut actions);
+        let mut leaves = 0i32;
+        self.octree.for_each_leaf(|_, _, _| {
+            leaves += 1;
+        });
+        leaves
+    }
+
+    /// Total allocated octree nodes (excluding the root).
+    #[func]
+    fn get_octree_node_count(&self) -> i32 {
+        self.octree.node_count() as i32
     }
 }
 

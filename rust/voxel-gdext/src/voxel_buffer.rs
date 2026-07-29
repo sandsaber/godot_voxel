@@ -351,13 +351,19 @@ impl INode3D for VoxelNodeGD {
 // ---------------------------------------------------------------------------
 
 /// A Godot `Resource` wrapping a graph-based terrain generator.
-/// In a full implementation this would expose the graph node editor.
+///
+/// Wraps [`voxel_core::generators::graph::GraphGenerator`] — the functional
+/// API builds graphs, compiles them via `CompiledGraph`, and samples the SDF
+/// output at a world point, exercising the full graph generation pipeline
+/// through the binding.
 #[derive(GodotClass)]
 #[class(base = Resource, tool)]
 pub struct VoxelGeneratorGraphGD {
     base: Base<Resource>,
     /// Graph nodes serialized as a JSON string (for save/load).
     graph_json: GString,
+    /// The lazily-built engine-agnostic graph generator.
+    generator: Option<voxel_core::generators::graph::GraphGenerator>,
 }
 
 #[godot_api]
@@ -366,6 +372,7 @@ impl IResource for VoxelGeneratorGraphGD {
         Self {
             base,
             graph_json: "{}".to_godot(),
+            generator: None,
         }
     }
 }
@@ -377,8 +384,92 @@ impl VoxelGeneratorGraphGD {
         self.graph_json.clone()
     }
 
+    /// Replace the graph JSON. Resets the cached generator (it will rebuild on
+    /// the next `sample_*` call).
     #[func]
     fn set_graph_json(&mut self, json: GString) {
         self.graph_json = json;
+        self.generator = None;
+    }
+
+    /// Build a sphere-SDF graph (center `(cx,cy,cz)`, radius `r`), compile it,
+    /// and return the sampled signed distance at world point `(px,py,pz)`.
+    /// Negative = inside the sphere. Returns `NaN` if the graph fails to
+    /// compile (malformed topology).
+    #[func]
+    #[allow(clippy::too_many_arguments)]
+    fn sample_sphere_sdf(
+        &mut self,
+        cx: f32,
+        cy: f32,
+        cz: f32,
+        r: f32,
+        px: f32,
+        py: f32,
+        pz: f32,
+    ) -> f32 {
+        use voxel_core::generators::graph::{
+            CompiledGraph, CompiledScratch, Graph, GraphInputs, GraphOutput, GraphPort, NodeKind,
+        };
+        // SdfSphere evaluates sdf_sphere(pos, ZERO, radius), so feed the
+        // sample point relative to the sphere center as the position inputs.
+        let mut graph = Graph::new();
+        let nx = graph.push(NodeKind::Constant(px - cx));
+        let ny = graph.push(NodeKind::Constant(py - cy));
+        let nz = graph.push(NodeKind::Constant(pz - cz));
+        let nr = graph.push(NodeKind::Constant(r));
+        let sphere = graph.push(NodeKind::SdfSphere {
+            x: Some(GraphPort {
+                node: nx,
+                output: 0,
+            }),
+            y: Some(GraphPort {
+                node: ny,
+                output: 0,
+            }),
+            z: Some(GraphPort {
+                node: nz,
+                output: 0,
+            }),
+            radius: Some(GraphPort {
+                node: nr,
+                output: 0,
+            }),
+        });
+        graph.push(NodeKind::OutputSdf {
+            a: Some(GraphPort {
+                node: sphere,
+                output: 0,
+            }),
+        });
+        // Cache the generator so the compiled graph is reused across calls.
+        self.generator = Some(voxel_core::generators::graph::GraphGenerator::new(graph));
+        let Ok(compiled) = CompiledGraph::compile(self.generator.as_ref().unwrap().graph()) else {
+            return f32::NAN;
+        };
+        let xs = [0.0f32];
+        let zs = [0.0f32];
+        let inputs = GraphInputs {
+            x: &xs,
+            y: 0.0,
+            z: &zs,
+        };
+        let mut scratch = CompiledScratch::new();
+        let mut out = Vec::new();
+        compiled.generate_slice(&inputs, 1, &mut scratch, &mut out, false);
+        out.into_iter()
+            .find(|(k, _)| *k == GraphOutput::Sdf)
+            .and_then(|(_, v)| v.into_iter().next())
+            .unwrap_or(f32::NAN)
+    }
+
+    /// Returns the number of nodes in the currently-cached generator's graph,
+    /// or 0 if no graph has been built yet.
+    #[func]
+    fn get_node_count(&self) -> i32 {
+        self.generator
+            .as_ref()
+            .map(|g| g.graph().nodes().len() as i32)
+            .unwrap_or(0)
     }
 }

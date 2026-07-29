@@ -94,9 +94,9 @@ mod storage_parity {
         for i in 0..64 {
             buf.set_voxel_f(
                 i as f32 * 0.5,
-                (i % 4) as i32,
-                ((i / 4) % 4) as i32,
-                (i / 16) as i32,
+                i % 4,
+                (i / 4) % 4,
+                i / 16,
                 ChannelId::Sdf.index(),
             );
         }
@@ -113,9 +113,9 @@ mod storage_parity {
 
         // Verify all voxels match.
         for i in 0..64 {
-            let x = (i % 4) as i32;
-            let y = ((i / 4) % 4) as i32;
-            let z = (i / 16) as i32;
+            let x = i % 4;
+            let y = (i / 4) % 4;
+            let z = i / 16;
             let v1 = buf.get_voxel_f(x, y, z, ChannelId::Sdf.index());
             let v2 = buf2.get_voxel_f(x, y, z, ChannelId::Sdf.index());
             assert!(
@@ -239,6 +239,7 @@ mod graph_parity {
         CompiledGraph, Graph, GraphInputs, GraphOutput, GraphPort, GraphScratch, NodeKind,
     };
 
+    #[allow(dead_code)]
     fn eval_node(kind: NodeKind, inputs: &GraphInputs, slice_size: usize) -> Vec<f32> {
         let mut g = Graph::new();
         let id = g.push(kind);
@@ -664,7 +665,7 @@ mod terrain_parity {
 
         // Should have mesh blocks loaded.
         assert!(
-            core.mesh_blocks().len() > 0,
+            !core.mesh_blocks().is_empty(),
             "terrain should have loaded mesh blocks after convergence"
         );
     }
@@ -888,7 +889,7 @@ mod instancing_parity {
         let config = ScatterConfig::default();
         let result = gen.generate(&positions, &normals, 0, &config);
 
-        assert!(result.len() > 0, "should produce instances");
+        assert!(!result.is_empty(), "should produce instances");
         for instance in &result {
             assert!(
                 instance.scale >= 0.5 && instance.scale <= 1.5,
@@ -1404,5 +1405,451 @@ mod graph_runtime_parity {
             .unwrap();
         // At center, dist=0, sdf = 0 - 4 = -4.
         assert!((sdf - (-4.0)).abs() < 1e-5, "sphere sdf at center: {sdf}");
+    }
+
+    /// Each math node type produces its expected value for a known input.
+    /// These golden vectors pin the per-node evaluation semantics. Tests are
+    /// generated for the math nodes not already covered by graph_parity.
+    ///
+    /// Build a graph: Constant(input) → unop_node → OutputSdf, run it.
+    fn eval_unop(make_node: impl FnOnce(GraphPort) -> NodeKind, input: f32) -> f32 {
+        let mut g = Graph::new();
+        let a = g.push(NodeKind::Constant(input));
+        let n = g.push(make_node(GraphPort { node: a, output: 0 }));
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: n, output: 0 }),
+        });
+        run_graph(&g)
+    }
+
+    /// Build a graph: Constant(a), Constant(b) → binop_node → OutputSdf, run.
+    fn eval_binop(make_node: impl FnOnce(GraphPort, GraphPort) -> NodeKind, a: f32, b: f32) -> f32 {
+        let mut g = Graph::new();
+        let na = g.push(NodeKind::Constant(a));
+        let nb = g.push(NodeKind::Constant(b));
+        let n = g.push(make_node(
+            GraphPort {
+                node: na,
+                output: 0,
+            },
+            GraphPort {
+                node: nb,
+                output: 0,
+            },
+        ));
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: n, output: 0 }),
+        });
+        run_graph(&g)
+    }
+
+    fn run_graph(g: &Graph) -> f32 {
+        let compiled = CompiledGraph::compile(g).expect("compile");
+        let xs = [0.0f32];
+        let zs = [0.0f32];
+        let inputs = GraphInputs {
+            x: &xs,
+            y: 0.0,
+            z: &zs,
+        };
+        let mut scratch = CompiledScratch::new();
+        let mut out = Vec::new();
+        compiled.generate_slice(&inputs, 1, &mut scratch, &mut out, false);
+        out.into_iter()
+            .find(|(k, _)| *k == GraphOutput::Sdf)
+            .and_then(|(_, v)| v.into_iter().next())
+            .unwrap_or(f32::NAN)
+    }
+
+    #[test]
+    fn graph_subtract_golden() {
+        let v = eval_binop(
+            |a, b| NodeKind::Subtract {
+                a: Some(a),
+                b: Some(b),
+            },
+            10.0,
+            3.0,
+        );
+        assert!((v - 7.0).abs() < 1e-5, "subtract: {v}");
+    }
+
+    #[test]
+    fn graph_cos_golden() {
+        let v = eval_unop(|a| NodeKind::Cos { a: Some(a) }, 0.0);
+        assert!((v - 1.0).abs() < 1e-5, "cos: {v}");
+    }
+
+    #[test]
+    fn graph_abs_golden() {
+        let v = eval_unop(|a| NodeKind::Abs { a: Some(a) }, -5.0);
+        assert!((v - 5.0).abs() < 1e-5, "abs: {v}");
+    }
+
+    #[test]
+    fn graph_sqrt_golden() {
+        let v = eval_unop(|a| NodeKind::Sqrt { a: Some(a) }, 16.0);
+        assert!((v - 4.0).abs() < 1e-5, "sqrt: {v}");
+    }
+
+    #[test]
+    fn graph_min_golden() {
+        let v = eval_binop(
+            |a, b| NodeKind::Min {
+                a: Some(a),
+                b: Some(b),
+            },
+            3.0,
+            7.0,
+        );
+        assert!((v - 3.0).abs() < 1e-5, "min: {v}");
+    }
+
+    #[test]
+    fn graph_max_golden() {
+        let v = eval_binop(
+            |a, b| NodeKind::Max {
+                a: Some(a),
+                b: Some(b),
+            },
+            3.0,
+            7.0,
+        );
+        assert!((v - 7.0).abs() < 1e-5, "max: {v}");
+    }
+
+    #[test]
+    fn graph_floor_golden() {
+        let v = eval_unop(|a| NodeKind::Floor { a: Some(a) }, 3.7);
+        assert!((v - 3.0).abs() < 1e-5, "floor: {v}");
+    }
+
+    #[test]
+    fn graph_fract_golden() {
+        let v = eval_unop(|a| NodeKind::Fract { a: Some(a) }, 3.7);
+        assert!((v - 0.7).abs() < 1e-5, "fract: {v}");
+    }
+
+    #[test]
+    fn graph_pow_golden() {
+        let v = eval_binop(
+            |a, b| NodeKind::Pow {
+                a: Some(a),
+                b: Some(b),
+            },
+            2.0,
+            8.0,
+        );
+        assert!((v - 256.0).abs() < 1e-3, "pow: {v}");
+    }
+
+    #[test]
+    fn graph_clamp_golden() {
+        // clamp(15, 0, 10) = 10. min_v=Constant(0), max_v=Constant(10).
+        let mut g = Graph::new();
+        let na = g.push(NodeKind::Constant(15.0));
+        let nmin = g.push(NodeKind::Constant(0.0));
+        let nmax = g.push(NodeKind::Constant(10.0));
+        let clamp = g.push(NodeKind::Clamp {
+            a: Some(GraphPort {
+                node: na,
+                output: 0,
+            }),
+            min_v: Some(GraphPort {
+                node: nmin,
+                output: 0,
+            }),
+            max_v: Some(GraphPort {
+                node: nmax,
+                output: 0,
+            }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort {
+                node: clamp,
+                output: 0,
+            }),
+        });
+        let v = run_graph(&g);
+        assert!((v - 10.0).abs() < 1e-5, "clamp: {v}");
+    }
+}
+
+#[cfg(test)]
+mod raycast_parity {
+    use voxel_core::edition::raycast::{voxel_raycast, VoxelRaycastState};
+    use voxel_core::math::{Vector3f, Vector3i};
+
+    /// A ray travelling +X from (0.5,0.5,0.5) hits a wall at x=5 with the
+    /// expected position, previous position, distance, and face normal. Golden.
+    #[test]
+    fn raycast_plus_x_hits_wall_at_expected_voxel() {
+        let hit = voxel_raycast(
+            Vector3f::new(0.5, 0.5, 0.5),
+            Vector3f::new(1.0, 0.0, 0.0),
+            100.0,
+            |s: &VoxelRaycastState| s.position.x == 5,
+        )
+        .expect("should hit");
+        assert_eq!(hit.position, Vector3i::new(5, 0, 0), "hit position");
+        assert_eq!(
+            hit.previous_position,
+            Vector3i::new(4, 0, 0),
+            "prev position"
+        );
+        assert!(
+            (hit.distance - 4.5).abs() < 1e-4,
+            "hit distance: {}",
+            hit.distance
+        );
+        assert_eq!(hit.normal, Vector3i::new(-1, 0, 0), "face normal");
+    }
+
+    /// A ray with insufficient max_distance returns None (no hit).
+    #[test]
+    fn raycast_short_max_distance_misses() {
+        let hit = voxel_raycast(
+            Vector3f::new(0.5, 0.5, 0.5),
+            Vector3f::new(1.0, 0.0, 0.0),
+            2.0,
+            |s: &VoxelRaycastState| s.position.x == 5,
+        );
+        assert!(hit.is_none(), "short ray should miss");
+    }
+
+    /// A +Y ray hits a floor at y=3.
+    #[test]
+    fn raycast_plus_y_hits_floor() {
+        let hit = voxel_raycast(
+            Vector3f::new(0.5, 0.5, 0.5),
+            Vector3f::new(0.0, 1.0, 0.0),
+            100.0,
+            |s: &VoxelRaycastState| s.position.y == 3,
+        )
+        .expect("should hit");
+        assert_eq!(hit.position, Vector3i::new(0, 3, 0));
+        assert_eq!(hit.normal, Vector3i::new(0, -1, 0));
+    }
+
+    /// A NaN direction produces no hit (defensive).
+    #[test]
+    fn raycast_nan_direction_returns_none() {
+        let hit = voxel_raycast(
+            Vector3f::new(0.0, 0.0, 0.0),
+            Vector3f::new(f32::NAN, 0.0, 0.0),
+            100.0,
+            |_: &VoxelRaycastState| true,
+        );
+        assert!(hit.is_none(), "NaN direction should produce no hit");
+    }
+
+    /// The ray traverses exactly max_distance / 1 voxels along an axis-aligned
+    /// ray when the predicate never fires. Golden traversal count.
+    #[test]
+    fn raycast_traversal_count_bounded_by_max_distance() {
+        let mut count = 0u32;
+        let _ = voxel_raycast(
+            Vector3f::new(0.5, 0.5, 0.5),
+            Vector3f::new(1.0, 0.0, 0.0),
+            50.0,
+            |_: &VoxelRaycastState| {
+                count += 1;
+                false
+            },
+        );
+        assert_eq!(count, 50, "traversal count regressed: {count}");
+    }
+}
+
+#[cfg(test)]
+mod region_file_parity {
+    use std::path::PathBuf;
+    use voxel_core::math::Vector3i;
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
+    use voxel_core::streams::compressed_data::Compression;
+    use voxel_core::streams::region::RegionFile;
+
+    fn temp_region_path(test_name: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "voxel_parity_{}_{}.vxr",
+            test_name,
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&p);
+        p
+    }
+
+    /// Build a VoxelFormat where every channel is Bit8, matching the default
+    /// RegionFormat (which uses Bit8 for all channels).
+    fn bit8_format() -> VoxelFormat {
+        let mut fmt = VoxelFormat::new();
+        for d in fmt.depths.iter_mut() {
+            *d = ChannelDepth::Bit8;
+        }
+        fmt
+    }
+
+    /// save_block then load_block round-trips voxel data. The default region
+    /// format uses Bit8 channels, so we use the Type channel (Bit8). Golden:
+    /// the loaded value matches what was written.
+    #[test]
+    fn region_save_load_round_trips_type() {
+        let path = temp_region_path("type_rt");
+        let mut region = RegionFile::open(&path, true).expect("create region");
+
+        // Default RegionFormat → all channels Bit8, 16³ blocks.
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(16));
+        let fmt = bit8_format();
+        fmt.configure_buffer(&mut buf);
+        buf.fill(42, ChannelId::Type.index());
+
+        let pos = Vector3i::new(1, 2, 3);
+        region
+            .save_block(pos, &buf, Compression::Lz4)
+            .expect("save");
+        drop(region);
+
+        // Reopen and load.
+        let mut region2 = RegionFile::open(&path, false).expect("open region");
+        let mut buf2 = VoxelBuffer::with_size(Vector3i::splat(16));
+        fmt.configure_buffer(&mut buf2);
+        region2.load_block(pos, &mut buf2).expect("load");
+
+        let val = buf2.get_voxel(4, 4, 4, ChannelId::Type.index());
+        assert_eq!(val, 42, "region round-trip Type mismatch: {val}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Loading a block that was never saved returns an error (NotFound).
+    #[test]
+    fn region_load_missing_block_errors() {
+        let path = temp_region_path("missing");
+        let mut region = RegionFile::open(&path, true).expect("create region");
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(16));
+        let res = region.load_block(Vector3i::new(7, 7, 7), &mut buf);
+        assert!(res.is_err(), "loading missing block should error");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Overwriting a block then reloading returns the latest data (not stale).
+    #[test]
+    fn region_overwrite_returns_latest_data() {
+        let path = temp_region_path("overwrite");
+        let mut region = RegionFile::open(&path, true).expect("create region");
+        let fmt = bit8_format();
+        let pos = Vector3i::new(0, 0, 0);
+
+        let mut buf_a = VoxelBuffer::with_size(Vector3i::splat(16));
+        fmt.configure_buffer(&mut buf_a);
+        buf_a.fill(7, ChannelId::Type.index());
+        region.save_block(pos, &buf_a, Compression::Lz4).unwrap();
+
+        let mut buf_b = VoxelBuffer::with_size(Vector3i::splat(16));
+        fmt.configure_buffer(&mut buf_b);
+        buf_b.fill(99, ChannelId::Type.index());
+        region.save_block(pos, &buf_b, Compression::Lz4).unwrap();
+        drop(region);
+
+        let mut region2 = RegionFile::open(&path, false).expect("open");
+        let mut buf_read = VoxelBuffer::with_size(Vector3i::splat(16));
+        fmt.configure_buffer(&mut buf_read);
+        region2.load_block(pos, &mut buf_read).unwrap();
+        let val = buf_read.get_voxel(0, 0, 0, ChannelId::Type.index());
+        assert_eq!(val, 99, "overwrite should return latest: {val}");
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+#[cfg(test)]
+mod lod_octree_parity {
+    use voxel_core::terrain::lod_octree::{LodOctree, NoOpActions};
+
+    /// A freshly-created octree has no root and one node count placeholder.
+    #[test]
+    fn octree_create_is_empty() {
+        let mut oct = LodOctree::new();
+        oct.create(2);
+        assert!(!oct.is_root_created(), "root should not be created yet");
+        assert_eq!(oct.lod_count(), 2);
+    }
+
+    /// After one subdivision pass with 2 LODs, the octree produces 8 leaves
+    /// (one split of the root into 8 octants) and 9 nodes. Golden.
+    #[test]
+    fn octree_subdivide_2_lods_golden_leaf_count() {
+        let mut oct = LodOctree::new();
+        oct.create(2);
+        let mut actions = NoOpActions;
+        oct.subdivide(&mut actions);
+        let mut leaves = 0;
+        oct.for_each_leaf(|_, _, _| {
+            leaves += 1;
+        });
+        assert_eq!(leaves, 8, "2-LOD leaf count regressed: {leaves}");
+        assert_eq!(oct.node_count(), 9, "2-LOD node count regressed");
+    }
+
+    /// 3 LODs → 64 leaves (8²), 73 nodes. Golden.
+    #[test]
+    fn octree_subdivide_3_lods_golden_leaf_count() {
+        let mut oct = LodOctree::new();
+        oct.create(3);
+        let mut actions = NoOpActions;
+        oct.subdivide(&mut actions);
+        let mut leaves = 0;
+        oct.for_each_leaf(|_, _, _| {
+            leaves += 1;
+        });
+        assert_eq!(leaves, 64, "3-LOD leaf count regressed: {leaves}");
+        assert_eq!(oct.node_count(), 73, "3-LOD node count regressed");
+    }
+
+    /// 4 LODs → 512 leaves (8³), 585 nodes. Golden.
+    #[test]
+    fn octree_subdivide_4_lods_golden_leaf_count() {
+        let mut oct = LodOctree::new();
+        oct.create(4);
+        let mut actions = NoOpActions;
+        oct.subdivide(&mut actions);
+        let mut leaves = 0;
+        oct.for_each_leaf(|_, _, _| {
+            leaves += 1;
+        });
+        assert_eq!(leaves, 512, "4-LOD leaf count regressed: {leaves}");
+        assert_eq!(oct.node_count(), 585, "4-LOD node count regressed");
+    }
+
+    /// clear() resets the octree to an empty state (no root, minimal nodes).
+    #[test]
+    fn octree_clear_resets_state() {
+        let mut oct = LodOctree::new();
+        oct.create(3);
+        let mut actions = NoOpActions;
+        oct.subdivide(&mut actions);
+        assert!(oct.node_count() > 1);
+        oct.clear();
+        assert!(!oct.is_root_created());
+        // After clear, only the root slot remains (node_count counts root).
+        assert_eq!(oct.node_count(), 1);
+    }
+
+    /// Leaf count scales by 8× per added LOD level (8^(lod_count-1)).
+    #[test]
+    fn octree_leaf_count_scales_8x_per_lod() {
+        let leaves_at = |lod_count: u32| -> u32 {
+            let mut oct = LodOctree::new();
+            oct.create(lod_count);
+            let mut actions = NoOpActions;
+            oct.subdivide(&mut actions);
+            let mut leaves = 0u32;
+            oct.for_each_leaf(|_, _, _| {
+                leaves += 1;
+            });
+            leaves
+        };
+        let l2 = leaves_at(2);
+        let l3 = leaves_at(3);
+        assert_eq!(l3, l2 * 8, "leaves should 8× per added LOD: {l2} → {l3}");
     }
 }
