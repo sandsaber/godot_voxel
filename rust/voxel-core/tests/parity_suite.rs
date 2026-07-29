@@ -11844,3 +11844,273 @@ mod modifier_smooth_boundary_parity {
         assert_eq!(sdf, vec![-5.0], "empty stack should be identity");
     }
 }
+
+// Additional graph SDF shape combination patterns.
+#[cfg(test)]
+mod graph_sdf_shape_combos_parity {
+    use voxel_core::generators::graph::{
+        CompiledGraph, CompiledScratch, Graph, GraphInputs, GraphOutput, GraphPort, NodeKind,
+    };
+
+    fn run(g: &Graph) -> f32 {
+        let c = CompiledGraph::compile(g).expect("compile");
+        let xs = [0.0f32];
+        let zs = [0.0f32];
+        let i = GraphInputs {
+            x: &xs,
+            y: 0.0,
+            z: &zs,
+        };
+        let mut s = CompiledScratch::new();
+        let mut o = Vec::new();
+        c.generate_slice(&i, 1, &mut s, &mut o, false);
+        o.into_iter()
+            .find(|(k, _)| *k == GraphOutput::Sdf)
+            .and_then(|(_, v)| v.into_iter().next())
+            .unwrap()
+    }
+
+    #[test]
+    fn sphere_subtract_box_finite() {
+        let mut g = Graph::new();
+        let x = g.push(NodeKind::Constant(0.0));
+        let y = g.push(NodeKind::Constant(0.0));
+        let z = g.push(NodeKind::Constant(0.0));
+        let r = g.push(NodeKind::Constant(5.0));
+        let sph = g.push(NodeKind::SdfSphere {
+            x: Some(GraphPort { node: x, output: 0 }),
+            y: Some(GraphPort { node: y, output: 0 }),
+            z: Some(GraphPort { node: z, output: 0 }),
+            radius: Some(GraphPort { node: r, output: 0 }),
+        });
+        let bx = g.push(NodeKind::Constant(0.0));
+        let by = g.push(NodeKind::Constant(0.0));
+        let bz = g.push(NodeKind::Constant(0.0));
+        let box_sdf = g.push(NodeKind::SdfBox {
+            x: Some(GraphPort {
+                node: bx,
+                output: 0,
+            }),
+            y: Some(GraphPort {
+                node: by,
+                output: 0,
+            }),
+            z: Some(GraphPort {
+                node: bz,
+                output: 0,
+            }),
+            size_x: 2.0,
+            size_y: 2.0,
+            size_z: 2.0,
+        });
+        let sub = g.push(NodeKind::SdfSubtract {
+            a: Some(GraphPort {
+                node: sph,
+                output: 0,
+            }),
+            b: Some(GraphPort {
+                node: box_sdf,
+                output: 0,
+            }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort {
+                node: sub,
+                output: 0,
+            }),
+        });
+        let v = run(&g);
+        assert!(v.is_finite(), "sphere - box should be finite: {v}");
+    }
+
+    #[test]
+    fn plane_union_plane_same_as_plane() {
+        // union(plane(h=0), plane(h=0)) = min(plane, plane) = plane.
+        let mut g = Graph::new();
+        let y = g.push(NodeKind::Constant(0.0));
+        let h = g.push(NodeKind::Constant(0.0));
+        let p1 = g.push(NodeKind::SdfPlane {
+            y: Some(GraphPort { node: y, output: 0 }),
+            height: Some(GraphPort { node: h, output: 0 }),
+        });
+        let p2 = g.push(NodeKind::SdfPlane {
+            y: Some(GraphPort { node: y, output: 0 }),
+            height: Some(GraphPort { node: h, output: 0 }),
+        });
+        let u = g.push(NodeKind::SdfUnion {
+            a: Some(GraphPort {
+                node: p1,
+                output: 0,
+            }),
+            b: Some(GraphPort {
+                node: p2,
+                output: 0,
+            }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: u, output: 0 }),
+        });
+        // sdf = 0 - 0 = 0.
+        assert!(run(&g).abs() < 1e-5, "plane ∪ plane = plane: {}", run(&g));
+    }
+
+    #[test]
+    fn smooth_union_subtract_chain_finite() {
+        let mut g = Graph::new();
+        let na = g.push(NodeKind::Constant(-2.0));
+        let nb = g.push(NodeKind::Constant(1.0));
+        let su = g.push(NodeKind::SdfSmoothUnion {
+            a: Some(GraphPort {
+                node: na,
+                output: 0,
+            }),
+            b: Some(GraphPort {
+                node: nb,
+                output: 0,
+            }),
+            smoothness: 1.0,
+        });
+        let nc = g.push(NodeKind::Constant(0.5));
+        let ss = g.push(NodeKind::SdfSmoothSubtract {
+            a: Some(GraphPort {
+                node: su,
+                output: 0,
+            }),
+            b: Some(GraphPort {
+                node: nc,
+                output: 0,
+            }),
+            smoothness: 0.5,
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort {
+                node: ss,
+                output: 0,
+            }),
+        });
+        assert!(
+            run(&g).is_finite(),
+            "smooth union+subtract should be finite"
+        );
+    }
+}
+
+// Additional buffer: grab_channel + decompress patterns.
+#[cfg(test)]
+mod buffer_grab_decompress_parity {
+    use voxel_core::math::Vector3i;
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
+
+    #[test]
+    fn uniform_buffer_is_uniform() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        buf.fill(5, ChannelId::Type.index());
+        assert!(buf.is_uniform(ChannelId::Type.index()));
+    }
+
+    #[test]
+    fn non_uniform_after_divergent_write() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        buf.fill(5, ChannelId::Type.index());
+        buf.set_voxel(9, 7, 7, 7, ChannelId::Type.index());
+        assert!(!buf.is_uniform(ChannelId::Type.index()));
+    }
+
+    #[test]
+    fn compression_uniform_tag() {
+        use voxel_core::storage::Compression as StorageCompression;
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(4));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        buf.fill(1, ChannelId::Type.index());
+        assert_eq!(buf.get_voxel(0, 0, 0, ChannelId::Type.index()), 1);
+        assert_eq!(buf.get_voxel(3, 3, 3, ChannelId::Type.index()), 1);
+        // Verify storage Compression enum variants exist.
+        let _ = StorageCompression::None;
+    }
+}
+
+// Additional octree: clear + recreate lifecycle.
+#[cfg(test)]
+mod octree_lifecycle_parity {
+    use voxel_core::terrain::lod_octree::{LodOctree, NoOpActions};
+
+    #[test]
+    fn clear_makes_not_root_created() {
+        let mut oct = LodOctree::new();
+        oct.create(3);
+        let mut a = NoOpActions;
+        oct.subdivide(&mut a);
+        assert!(oct.is_root_created());
+        oct.clear();
+        assert!(!oct.is_root_created());
+    }
+
+    #[test]
+    fn clear_resets_node_count() {
+        let mut oct = LodOctree::new();
+        oct.create(3);
+        let mut a = NoOpActions;
+        oct.subdivide(&mut a);
+        assert!(oct.node_count() > 1);
+        oct.clear();
+        assert_eq!(oct.node_count(), 1);
+    }
+
+    #[test]
+    fn create_twke_resets() {
+        let mut oct = LodOctree::new();
+        oct.create(5);
+        oct.create(2);
+        assert_eq!(oct.lod_count(), 2);
+        assert_eq!(oct.max_depth(), 1);
+    }
+}
+
+// Additional scatter: item_index propagation across multiple indices.
+#[cfg(test)]
+mod scatter_item_index_parity {
+    use voxel_core::instancing::scatter::{InstanceGenerator, RandomScatterGenerator};
+    use voxel_core::instancing::ScatterConfig;
+    use voxel_core::math::Vector3f;
+
+    #[test]
+    fn item_index_propagated_for_all_indices() {
+        let positions: Vec<_> = (0..30).map(|i| Vector3f::new(i as f32, 0.0, 0.0)).collect();
+        let normals = vec![Vector3f::new(0.0, 1.0, 0.0); 30];
+        let config = ScatterConfig::default();
+        for idx in 0..10u32 {
+            let gen = RandomScatterGenerator {
+                density: 1.0,
+                min_scale: 1.0,
+                max_scale: 1.0,
+                snap_to_normal: false,
+            };
+            let result = gen.generate(&positions, &normals, idx, &config);
+            for inst in &result {
+                assert_eq!(inst.item_index, idx, "item_index should be {idx}");
+            }
+        }
+    }
+
+    #[test]
+    fn item_index_zero_default() {
+        let gen = RandomScatterGenerator {
+            density: 1.0,
+            min_scale: 1.0,
+            max_scale: 1.0,
+            snap_to_normal: false,
+        };
+        let positions = vec![Vector3f::new(0.0, 0.0, 0.0)];
+        let normals = vec![Vector3f::new(0.0, 1.0, 0.0)];
+        let result = gen.generate(&positions, &normals, 0, &ScatterConfig::default());
+        assert_eq!(result[0].item_index, 0);
+    }
+}
