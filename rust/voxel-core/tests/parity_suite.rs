@@ -6957,3 +6957,355 @@ mod voxel_buffer_metadata_parity {
         assert!((buf.get_voxel_f(2, 2, 2, ChannelId::Sdf.index()) - 3.5).abs() < 1e-5);
     }
 }
+
+// Mirrors test_task_priority_values — TaskPriority band ordering.
+#[cfg(test)]
+mod task_priority_parity {
+    use voxel_core::tasks::task_priority::TaskPriority;
+
+    #[test]
+    fn default_is_min() {
+        assert_eq!(TaskPriority::default(), TaskPriority::min());
+        assert_eq!(TaskPriority::min().whole, 0);
+    }
+
+    #[test]
+    fn new_packs_bands() {
+        let p = TaskPriority::new(1, 2, 3, 4);
+        assert_eq!(p.band0(), 1);
+        assert_eq!(p.band1(), 2);
+        assert_eq!(p.band2(), 3);
+        assert_eq!(p.band3(), 4);
+    }
+
+    #[test]
+    fn band3_takes_precedence() {
+        // Higher band3 → higher priority regardless of lower bands.
+        let high = TaskPriority::new(0, 0, 0, 2);
+        let low = TaskPriority::new(255, 255, 255, 1);
+        assert!(high.whole > low.whole, "band3=2 should outrank band3=1");
+    }
+
+    #[test]
+    fn band2_takes_precedence_over_band1() {
+        let high = TaskPriority::new(0, 0, 2, 0);
+        let low = TaskPriority::new(0, 255, 1, 0);
+        assert!(high.whole > low.whole);
+    }
+
+    #[test]
+    fn set_band_updates_value() {
+        let mut p = TaskPriority::default();
+        p.set_band0(5);
+        assert_eq!(p.band0(), 5);
+        p.set_band2(10);
+        assert_eq!(p.band2(), 10);
+    }
+
+    #[test]
+    fn max_priority() {
+        let max = TaskPriority::max();
+        assert_eq!(max.whole, u32::MAX);
+    }
+
+    #[test]
+    fn ordering_is_total() {
+        let p1 = TaskPriority::new(1, 0, 0, 0);
+        let p2 = TaskPriority::new(2, 0, 0, 0);
+        let p3 = TaskPriority::new(0, 1, 0, 0);
+        assert!(p1.whole < p2.whole);
+        assert!(p2.whole < p3.whole);
+    }
+}
+
+// Mirrors test_noise.cpp — FastNoiseLite range verification.
+#[cfg(test)]
+mod noise_range_parity {
+    use voxel_core::fastnoise_lite::{FastNoiseLite, NoiseType};
+    use voxel_core::generators::simple::Noise;
+
+    /// Noise output stays within [-1, 1] over a sample grid. Mirrors test_fnl_range.
+    #[test]
+    fn fnl_range_bounded() {
+        let mut gen = Noise::default();
+        gen.noise_mut().set_seed(Some(42));
+        gen.noise_mut().set_frequency(Some(0.1));
+        gen.noise_mut()
+            .set_noise_type(Some(NoiseType::OpenSimplex2));
+        for x in 0..20 {
+            for y in 0..20 {
+                for z in 0..20 {
+                    let v = gen.sample_noise_3d(x as f32, y as f32, z as f32);
+                    assert!(
+                        (-1.0..=1.0).contains(&v),
+                        "fnl out of range at ({x},{y},{z}): {v}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Different noise types produce different values at the same point.
+    #[test]
+    fn different_noise_types_differ() {
+        let mut simplex = Noise::default();
+        simplex.noise_mut().set_seed(Some(1));
+        simplex.noise_mut().set_frequency(Some(0.1));
+        simplex
+            .noise_mut()
+            .set_noise_type(Some(NoiseType::OpenSimplex2));
+
+        let mut perlin = Noise::default();
+        perlin.noise_mut().set_seed(Some(1));
+        perlin.noise_mut().set_frequency(Some(0.1));
+        perlin.noise_mut().set_noise_type(Some(NoiseType::Perlin));
+
+        let vs = simplex.sample_noise_3d(5.0, 5.0, 5.0);
+        let vp = perlin.sample_noise_3d(5.0, 5.0, 5.0);
+        assert!(
+            (vs - vp).abs() > 1e-6,
+            "OpenSimplex2 vs Perlin should differ: {vs} vs {vp}"
+        );
+    }
+
+    /// Raw FastNoiseLite 2D noise is deterministic for a fixed config.
+    #[test]
+    fn fnl_2d_deterministic() {
+        let mut n = FastNoiseLite::new();
+        n.set_seed(Some(7));
+        n.set_frequency(Some(0.05));
+        n.set_noise_type(Some(NoiseType::Perlin));
+        let a = n.get_noise_2d(3.0, 4.0);
+        let b = n.get_noise_2d(3.0, 4.0);
+        assert!(
+            (a - b).abs() < 1e-7,
+            "2D noise should be deterministic: {a} vs {b}"
+        );
+    }
+
+    /// Higher frequency produces more rapid variation (larger delta between
+    /// adjacent points).
+    #[test]
+    fn higher_frequency_more_rapid_variation() {
+        let mut low = FastNoiseLite::new();
+        low.set_seed(Some(1));
+        low.set_frequency(Some(0.01));
+        let mut high = FastNoiseLite::new();
+        high.set_seed(Some(1));
+        high.set_frequency(Some(0.5));
+        let low_delta = (low.get_noise_3d(0.0, 0.0, 0.0) - low.get_noise_3d(1.0, 0.0, 0.0)).abs();
+        let high_delta =
+            (high.get_noise_3d(0.0, 0.0, 0.0) - high.get_noise_3d(1.0, 0.0, 0.0)).abs();
+        assert!(
+            high_delta >= low_delta,
+            "high freq should vary more: {high_delta} vs {low_delta}"
+        );
+    }
+}
+
+// Mirrors test_voxel_graph.cpp — fuzzing-style edge cases.
+#[cfg(test)]
+mod graph_fuzzing_parity {
+    use voxel_core::generators::graph::{
+        CompiledGraph, CompiledScratch, Graph, GraphInputs, GraphOutput, GraphPort, NodeKind,
+    };
+
+    fn run(g: &Graph) -> Option<f32> {
+        let c = CompiledGraph::compile(g).ok()?;
+        let xs = [0.0f32];
+        let zs = [0.0f32];
+        let i = GraphInputs {
+            x: &xs,
+            y: 0.0,
+            z: &zs,
+        };
+        let mut s = CompiledScratch::new();
+        let mut o = Vec::new();
+        c.generate_slice(&i, 1, &mut s, &mut o, false);
+        o.into_iter()
+            .find(|(k, _)| *k == GraphOutput::Sdf)
+            .and_then(|(_, v)| v.into_iter().next())
+    }
+
+    /// A graph with a single constant 0 → OutputSdf produces 0. Mirrors fuzzing.
+    #[test]
+    fn constant_zero_output() {
+        let mut g = Graph::new();
+        let c = g.push(NodeKind::Constant(0.0));
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: c, output: 0 }),
+        });
+        let v = run(&g).unwrap();
+        assert!((v - 0.0).abs() < 1e-5, "constant 0: {v}");
+    }
+
+    /// A deeply nested chain of Add nodes doesn't overflow or produce NaN.
+    #[test]
+    fn deep_add_chain_no_overflow() {
+        let mut g = Graph::new();
+        let mut prev = g.push(NodeKind::Constant(1.0));
+        for _ in 0..20 {
+            let c = g.push(NodeKind::Constant(0.1));
+            prev = g.push(NodeKind::Add {
+                a: Some(GraphPort {
+                    node: prev,
+                    output: 0,
+                }),
+                b: Some(GraphPort { node: c, output: 0 }),
+            });
+        }
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort {
+                node: prev,
+                output: 0,
+            }),
+        });
+        let v = run(&g).unwrap();
+        assert!(v.is_finite(), "deep chain should be finite: {v}");
+    }
+
+    /// Multiple OutputSdf nodes compile and produce a value.
+    #[test]
+    fn multiple_output_sdf_compiles() {
+        let mut g = Graph::new();
+        let c1 = g.push(NodeKind::Constant(1.0));
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort {
+                node: c1,
+                output: 0,
+            }),
+        });
+        let c2 = g.push(NodeKind::Constant(2.0));
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort {
+                node: c2,
+                output: 0,
+            }),
+        });
+        let v = run(&g);
+        assert!(v.is_some(), "multiple OutputSdf should produce a value");
+    }
+
+    /// A graph with all math nodes chained produces a finite result.
+    #[test]
+    fn all_math_nodes_chained_finite() {
+        let mut g = Graph::new();
+        let x = g.push(NodeKind::InputX);
+        let abs = g.push(NodeKind::Abs {
+            a: Some(GraphPort { node: x, output: 0 }),
+        });
+        let floor = g.push(NodeKind::Floor {
+            a: Some(GraphPort {
+                node: abs,
+                output: 0,
+            }),
+        });
+        let c = g.push(NodeKind::Constant(2.0));
+        let mul = g.push(NodeKind::Multiply {
+            a: Some(GraphPort {
+                node: floor,
+                output: 0,
+            }),
+            b: Some(GraphPort { node: c, output: 0 }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort {
+                node: mul,
+                output: 0,
+            }),
+        });
+        let xs = [3.7f32];
+        let zs = [0.0f32];
+        let compiled = CompiledGraph::compile(&g).expect("compile");
+        let i = GraphInputs {
+            x: &xs,
+            y: 0.0,
+            z: &zs,
+        };
+        let mut s = CompiledScratch::new();
+        let mut o = Vec::new();
+        compiled.generate_slice(&i, 1, &mut s, &mut o, false);
+        let v: f32 = o
+            .into_iter()
+            .find(|(k, _)| *k == GraphOutput::Sdf)
+            .and_then(|(_, v)| v.into_iter().next())
+            .unwrap();
+        // floor(abs(3.7)) * 2 = 3 * 2 = 6.
+        assert!((v - 6.0).abs() < 1e-5, "floor(abs(3.7))*2 = 6: {v}");
+    }
+}
+
+// Mirrors test_edition_funcs.cpp — additional do_box/do_sphere variations.
+#[cfg(test)]
+mod edition_variations_parity {
+    use voxel_core::edition::ops::VoxelToolBuffer;
+    use voxel_core::math::{Vector3f, Vector3i};
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
+
+    /// do_box at the edge of the buffer clips correctly.
+    #[test]
+    fn do_box_at_edge_clips() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        let mut tool = VoxelToolBuffer::new(&mut buf, ChannelId::Type.index());
+        // Box partially outside the buffer.
+        tool.do_box(Vector3i::new(-2, -2, -2), Vector3i::new(4, 4, 4));
+        let mut solid = 0;
+        for z in 0..8 {
+            for y in 0..8 {
+                for x in 0..8 {
+                    if buf.get_voxel(x, y, z, ChannelId::Type.index()) != 0 {
+                        solid += 1;
+                    }
+                }
+            }
+        }
+        // Range [-2,4) clipped to [0,4) → 4³ = 64.
+        assert_eq!(
+            solid, 64,
+            "do_box at edge should clip to 64 voxels: {solid}"
+        );
+    }
+
+    /// set_voxel writes a single voxel, others unchanged.
+    #[test]
+    fn set_voxel_single() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(4));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        let mut tool = VoxelToolBuffer::new(&mut buf, ChannelId::Type.index());
+        tool.set_voxel(Vector3i::new(1, 2, 3), 7);
+        assert_eq!(buf.get_voxel(1, 2, 3, ChannelId::Type.index()), 7);
+        assert_eq!(buf.get_voxel(0, 0, 0, ChannelId::Type.index()), 0);
+    }
+
+    /// A sphere carved into a pre-filled solid area produces a cavity.
+    #[test]
+    fn sphere_cavity_in_solid() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(16));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        // Fill entirely solid (id 1).
+        buf.fill(1, ChannelId::Type.index());
+        // Carve a sphere of air (Set mode, value 0) at center.
+        let mut tool = VoxelToolBuffer::new(&mut buf, ChannelId::Type.index()).with_value(0);
+        tool.do_sphere(Vector3f::new(8.0, 8.0, 8.0), 3.0);
+        // Count air voxels (the cavity).
+        let mut air = 0;
+        for z in 0..16 {
+            for y in 0..16 {
+                for x in 0..16 {
+                    if buf.get_voxel(x, y, z, ChannelId::Type.index()) == 0 {
+                        air += 1;
+                    }
+                }
+            }
+        }
+        assert!(air > 0, "should have carved a cavity: {air}");
+        assert!(air < 1000, "cavity should be bounded: {air}");
+    }
+}
