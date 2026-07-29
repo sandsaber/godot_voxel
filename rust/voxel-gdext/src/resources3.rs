@@ -58,6 +58,11 @@ impl FastNoiseLiteGD {
     }
 }
 
+/// FastNoise2 noise resource. The upstream FastNoise2 is a C++ library (not
+/// ported to Rust); this binding delegates to the same `fastnoise-lite`
+/// sampler used by voxel-core's `Noise` generator so noise sampling is
+/// functional through the binding. `sample_3d` returns the raw 3D noise value
+/// at a world point, configured from the resource's seed/frequency.
 #[derive(GodotClass)]
 #[class(base = Resource, tool)]
 pub struct FastNoise2GD {
@@ -75,6 +80,30 @@ impl IResource for FastNoise2GD {
             seed: 0,
             frequency: 0.01,
         }
+    }
+}
+
+#[godot_api]
+impl FastNoise2GD {
+    /// Sample the raw 3D noise at world point `(x,y,z)`. Deterministic for a
+    /// fixed seed/frequency. Delegates to the `fastnoise-lite` sampler.
+    #[func]
+    fn sample_3d(&self, x: f32, y: f32, z: f32) -> f32 {
+        let mut gen = voxel_core::generators::simple::Noise::default();
+        let noise = gen.noise_mut();
+        noise.set_seed(Some(self.seed));
+        noise.set_frequency(Some(self.frequency));
+        gen.sample_noise_3d(x, y, z)
+    }
+
+    /// Sample raw 2D noise at `(x, z)` (Y = 0). Useful for heightmap-style use.
+    #[func]
+    fn sample_2d(&self, x: f32, z: f32) -> f32 {
+        let mut gen = voxel_core::generators::simple::Noise::default();
+        let noise = gen.noise_mut();
+        noise.set_seed(Some(self.seed));
+        noise.set_frequency(Some(self.frequency));
+        gen.sample_noise_3d(x, 0.0, z)
     }
 }
 

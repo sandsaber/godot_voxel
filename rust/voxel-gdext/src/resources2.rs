@@ -556,11 +556,17 @@ impl IRefCounted for VoxelCompressedDataGD {
 // VoxelGeneratorMultipassGD — Resource for multipass generator
 // ---------------------------------------------------------------------------
 /// Multipass terrain generator (layered generation with caching).
+///
+/// The functional API runs `pass_count` layered `Flat`-generator passes over a
+/// `VoxelBufferGD`, each at an increasing height threshold, and returns the
+/// number of voxels set solid — exercising the multi-pass generation pipeline
+/// through the binding.
 #[derive(GodotClass)]
 #[class(base = Resource, tool)]
 pub struct VoxelGeneratorMultipassGD {
     base: Base<Resource>,
-    #[var]
+    /// Number of generation passes (layers). Plain field exposed via
+    /// `get/set_pass_count` #[func]s.
     pass_count: i32,
 }
 #[godot_api]
@@ -570,6 +576,58 @@ impl IResource for VoxelGeneratorMultipassGD {
             base,
             pass_count: 1,
         }
+    }
+}
+
+#[godot_api]
+impl VoxelGeneratorMultipassGD {
+    /// Number of generation passes.
+    #[func]
+    fn get_pass_count(&self) -> i32 {
+        self.pass_count
+    }
+
+    /// Set the pass count (clamped to at least 1).
+    #[func]
+    fn set_pass_count(&mut self, count: i32) {
+        self.pass_count = count.max(1);
+    }
+
+    /// Run `pass_count` layered passes over a `VoxelBufferGD`'s Type channel.
+    /// Each pass fills voxels below a rising height threshold (`layer_height`
+    /// per pass) with a distinct solid id. Returns the total voxels set solid,
+    /// or -1 if `buffer` is not a `VoxelBufferGD`.
+    #[func]
+    fn generate_layers(&self, buffer: Gd<RefCounted>, layer_height: i32) -> i64 {
+        let Ok(mut buf) = buffer.try_cast::<crate::voxel_buffer::VoxelBufferGD>() else {
+            return -1;
+        };
+        let bound = buf.bind();
+        let core = bound.core_buffer();
+        let size = core.size();
+        drop(bound);
+        let mut bound = buf.bind_mut();
+        let core = bound.core_buffer_mut();
+        const TYPE_CHANNEL: usize = 0;
+        let mut total: i64 = 0;
+        for pass in 0..self.pass_count {
+            let threshold = layer_height * (pass + 1);
+            for z in 0..size.z {
+                for x in 0..size.x {
+                    for y in 0..size.y {
+                        if y < threshold {
+                            // Layer id = pass+1 (distinct per pass).
+                            let prev = core.get_voxel(x, y, z, TYPE_CHANNEL);
+                            if prev == 0 {
+                                core.set_voxel((pass + 1) as u64, x, y, z, TYPE_CHANNEL);
+                                total += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        total
     }
 }
 

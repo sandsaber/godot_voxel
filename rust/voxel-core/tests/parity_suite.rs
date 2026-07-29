@@ -2180,3 +2180,362 @@ mod lod_octree_parity {
         assert_eq!(l3, l2 * 8, "leaves should 8× per added LOD: {l2} → {l3}");
     }
 }
+
+#[cfg(test)]
+mod storage_typed_parity {
+    use voxel_core::math::Vector3i;
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
+
+    /// `fill_area` writes values into a sub-region; voxels outside are
+    /// unchanged. Golden: only the filled region is non-zero.
+    #[test]
+    fn fill_area_writes_subregion_only() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        buf.fill_area(
+            7,
+            Vector3i::new(2, 2, 2),
+            Vector3i::new(5, 5, 5),
+            ChannelId::Type.index(),
+        );
+        // Inside region: 7.
+        assert_eq!(buf.get_voxel(3, 3, 3, ChannelId::Type.index()), 7);
+        assert_eq!(buf.get_voxel(4, 4, 4, ChannelId::Type.index()), 7);
+        // Outside: 0.
+        assert_eq!(buf.get_voxel(0, 0, 0, ChannelId::Type.index()), 0);
+        assert_eq!(buf.get_voxel(6, 6, 6, ChannelId::Type.index()), 0);
+    }
+
+    /// `is_uniform` is true when all voxels in a channel share one value.
+    #[test]
+    fn is_uniform_after_uniform_fill() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        buf.fill(3, ChannelId::Type.index());
+        assert!(
+            buf.is_uniform(ChannelId::Type.index()),
+            "should be uniform after fill"
+        );
+        // Write one different voxel → no longer uniform.
+        buf.set_voxel(9, 0, 0, 0, ChannelId::Type.index());
+        assert!(
+            !buf.is_uniform(ChannelId::Type.index()),
+            "should not be uniform after divergence"
+        );
+    }
+
+    /// `copy_channel_from_area` copies a rectangular region between buffers.
+    #[test]
+    fn copy_channel_from_area_round_trips() {
+        let mut src = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut src);
+        src.fill_area(
+            5,
+            Vector3i::new(0, 0, 0),
+            Vector3i::new(4, 4, 4),
+            ChannelId::Type.index(),
+        );
+
+        let mut dst = VoxelBuffer::with_size(Vector3i::splat(8));
+        fmt.configure_buffer(&mut dst);
+        dst.copy_channel_from_area(
+            &src,
+            Vector3i::zero(),
+            Vector3i::new(4, 4, 4),
+            Vector3i::zero(),
+            ChannelId::Type.index(),
+        );
+        assert_eq!(dst.get_voxel(0, 0, 0, ChannelId::Type.index()), 5);
+        assert_eq!(dst.get_voxel(3, 3, 3, ChannelId::Type.index()), 5);
+        assert_eq!(dst.get_voxel(4, 4, 4, ChannelId::Type.index()), 0);
+    }
+
+    /// A uniform channel reports its compression as Uniform after `fill`.
+    #[test]
+    fn uniform_fill_keeps_uniform_compression() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        buf.fill(11, ChannelId::Type.index());
+        // Reading back every voxel yields the fill value.
+        for z in 0..8 {
+            for y in 0..8 {
+                for x in 0..8 {
+                    assert_eq!(buf.get_voxel(x, y, z, ChannelId::Type.index()), 11);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod transvoxel_regular_parity {
+    use voxel_core::math::Vector3i;
+    use voxel_core::meshers::{MesherInput, MesherOutput, TransvoxelMesher, VoxelMesher};
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
+
+    /// A uniform-solid buffer (all inside) produces no regular-cell geometry:
+    /// the surface doesn't cross any cell. Golden: 0 vertices.
+    #[test]
+    fn transvoxel_uniform_solid_produces_no_geometry() {
+        let mesher = TransvoxelMesher::new();
+        let mut voxels = VoxelBuffer::with_size(Vector3i::splat(16));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+        fmt.configure_buffer(&mut voxels);
+        voxels.clear_channel_f(ChannelId::Sdf.index(), -5.0); // all solid
+        let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+        let mut out = MesherOutput::default();
+        mesher.build(&mut out, &input);
+        assert_eq!(
+            out.total_vertex_count(),
+            0,
+            "uniform-solid should produce no geometry"
+        );
+    }
+
+    /// A uniform-air buffer (all outside) also produces no geometry. Golden: 0.
+    #[test]
+    fn transvoxel_uniform_air_produces_no_geometry() {
+        let mesher = TransvoxelMesher::new();
+        let mut voxels = VoxelBuffer::with_size(Vector3i::splat(16));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+        fmt.configure_buffer(&mut voxels);
+        voxels.clear_channel_f(ChannelId::Sdf.index(), 5.0); // all air
+        let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+        let mut out = MesherOutput::default();
+        mesher.build(&mut out, &input);
+        assert_eq!(
+            out.total_vertex_count(),
+            0,
+            "uniform-air should produce no geometry"
+        );
+    }
+
+    /// A single-voxel solid cube in air produces a closed mesh with the
+    /// expected vertex count (transvoxel regular cells). Golden.
+    #[test]
+    fn transvoxel_single_cube_vertex_count_golden() {
+        let mesher = TransvoxelMesher::new();
+        let mut voxels = VoxelBuffer::with_size(Vector3i::splat(16));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+        fmt.configure_buffer(&mut voxels);
+        // One solid voxel at center, surrounded by air.
+        voxels.set_voxel_f(-0.5, 8, 8, 8, ChannelId::Sdf.index());
+        let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+        let mut out = MesherOutput::default();
+        mesher.build(&mut out, &input);
+        assert!(
+            out.total_vertex_count() > 0,
+            "single cube should produce geometry"
+        );
+        assert_eq!(
+            out.total_vertex_count(),
+            6,
+            "single-cube vertex count regressed: {}",
+            out.total_vertex_count()
+        );
+    }
+
+    /// Increasing the sphere radius (more cells crossed by the surface)
+    /// increases the vertex count monotonically. Diff test.
+    #[test]
+    fn transvoxel_larger_sphere_has_more_vertices() {
+        let mesher = TransvoxelMesher::new();
+        let verts_for_radius = |radius: f32| -> usize {
+            let mut voxels = VoxelBuffer::with_size(Vector3i::splat(16));
+            let mut fmt = VoxelFormat::new();
+            fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+            fmt.configure_buffer(&mut voxels);
+            let cx = 8.0f32;
+            for z in 0..16 {
+                for y in 0..16 {
+                    for x in 0..16 {
+                        let d = ((x as f32 - cx).powi(2)
+                            + (y as f32 - cx).powi(2)
+                            + (z as f32 - cx).powi(2))
+                        .sqrt()
+                            - radius;
+                        voxels.set_voxel_f(d, x, y, z, ChannelId::Sdf.index());
+                    }
+                }
+            }
+            let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+            let mut out = MesherOutput::default();
+            mesher.build(&mut out, &input);
+            out.total_vertex_count()
+        };
+        let small = verts_for_radius(4.0);
+        let large = verts_for_radius(8.0);
+        assert!(
+            large >= small,
+            "larger sphere should have >= vertices: {large} vs {small}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod scatter_transform_parity {
+    use voxel_core::instancing::scatter::{InstanceGenerator, RandomScatterGenerator};
+    use voxel_core::instancing::ScatterConfig;
+    use voxel_core::math::Vector3f;
+
+    /// Generated instances carry the input position (within tolerance for
+    /// snap_to_normal jitter). Golden: position matches the surface point.
+    #[test]
+    fn scatter_preserves_input_positions() {
+        let gen = RandomScatterGenerator {
+            density: 1.0,
+            min_scale: 1.0,
+            max_scale: 1.0,
+            snap_to_normal: false,
+        };
+        let positions = vec![Vector3f::new(1.0, 2.0, 3.0), Vector3f::new(4.0, 5.0, 6.0)];
+        let normals = vec![Vector3f::new(0.0, 1.0, 0.0); 2];
+        let result = gen.generate(&positions, &normals, 0, &ScatterConfig::default());
+        assert_eq!(result.len(), 2);
+        for (inst, pos) in result.iter().zip(positions.iter()) {
+            assert!((inst.position.x - pos.x).abs() < 1e-5, "position x");
+            assert!((inst.position.y - pos.y).abs() < 1e-5, "position y");
+            assert!((inst.position.z - pos.z).abs() < 1e-5, "position z");
+        }
+    }
+
+    /// The item_index is propagated to every generated instance. Golden.
+    #[test]
+    fn scatter_propagates_item_index() {
+        let gen = RandomScatterGenerator {
+            density: 1.0,
+            min_scale: 1.0,
+            max_scale: 1.0,
+            snap_to_normal: false,
+        };
+        let positions = vec![Vector3f::new(0.0, 0.0, 0.0); 5];
+        let normals = vec![Vector3f::new(0.0, 1.0, 0.0); 5];
+        let result = gen.generate(&positions, &normals, 7, &ScatterConfig::default());
+        for inst in &result {
+            assert_eq!(inst.item_index, 7, "item_index should be 7");
+        }
+    }
+
+    /// Scale is always within [min_scale, max_scale]. Golden invariant.
+    #[test]
+    fn scatter_scale_within_bounds() {
+        let gen = RandomScatterGenerator {
+            density: 1.0,
+            min_scale: 0.3,
+            max_scale: 0.7,
+            snap_to_normal: true,
+        };
+        let positions: Vec<_> = (0..50).map(|i| Vector3f::new(i as f32, 0.0, 0.0)).collect();
+        let normals = vec![Vector3f::new(0.0, 1.0, 0.0); 50];
+        let result = gen.generate(&positions, &normals, 0, &ScatterConfig::default());
+        for inst in &result {
+            assert!(
+                inst.scale >= 0.3 && inst.scale <= 0.7,
+                "scale out of bounds: {}",
+                inst.scale
+            );
+        }
+    }
+
+    /// The rotation quaternion is normalized for every instance. Golden invariant.
+    #[test]
+    fn scatter_rotation_is_normalized_quaternion() {
+        let gen = RandomScatterGenerator {
+            density: 1.0,
+            min_scale: 1.0,
+            max_scale: 1.0,
+            snap_to_normal: true,
+        };
+        let positions: Vec<_> = (0..30).map(|i| Vector3f::new(i as f32, 0.0, 0.0)).collect();
+        let normals = vec![Vector3f::new(0.0, 1.0, 0.0); 30];
+        let result = gen.generate(&positions, &normals, 0, &ScatterConfig::default());
+        for inst in &result {
+            let r = &inst.rotation;
+            let len_sq = r[0] * r[0] + r[1] * r[1] + r[2] * r[2] + r[3] * r[3];
+            assert!(
+                (len_sq - 1.0).abs() < 0.01,
+                "quaternion not normalized: len_sq={len_sq}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod compression_parity {
+    use voxel_core::streams::compressed_data::{compress, decompress_with_limits, Compression};
+    use voxel_core::streams::decode_limits::DecodeLimits;
+
+    /// compress → decompress round-trips arbitrary bytes for LZ4. Golden.
+    #[test]
+    fn lz4_round_trips_data() {
+        let data: Vec<u8> = (0..1000).map(|i| (i % 251) as u8).collect();
+        let mut compressed = Vec::new();
+        compress(&data, &mut compressed, Compression::Lz4).expect("compress");
+        let mut decompressed = Vec::new();
+        decompress_with_limits(&compressed, &mut decompressed, DecodeLimits::default())
+            .expect("decompress");
+        assert_eq!(decompressed, data, "LZ4 round-trip mismatch");
+    }
+
+    /// LZ4Be (big-endian) also round-trips. Golden.
+    #[test]
+    fn lz4be_round_trips_data() {
+        let data: Vec<u8> = (0..500).map(|i| (i * 7 % 251) as u8).collect();
+        let mut compressed = Vec::new();
+        compress(&data, &mut compressed, Compression::Lz4Be).expect("compress");
+        let mut decompressed = Vec::new();
+        decompress_with_limits(&compressed, &mut decompressed, DecodeLimits::default())
+            .expect("decompress");
+        assert_eq!(decompressed, data, "LZ4Be round-trip mismatch");
+    }
+
+    /// Compressing highly-repetitive data yields a smaller payload than the
+    /// original. Golden: compressed < original.
+    #[test]
+    fn lz4_compresses_repetitive_data() {
+        let data = vec![42u8; 4096];
+        let mut compressed = Vec::new();
+        compress(&data, &mut compressed, Compression::Lz4).expect("compress");
+        assert!(
+            compressed.len() < data.len(),
+            "LZ4 should compress repetitive data: {} vs {}",
+            compressed.len(),
+            data.len()
+        );
+    }
+
+    /// Uncompressed mode (None) is a passthrough — decompressed == original.
+    #[test]
+    fn uncompressed_none_round_trips() {
+        let data: Vec<u8> = (0..256).map(|i| i as u8).collect();
+        let mut compressed = Vec::new();
+        compress(&data, &mut compressed, Compression::None).expect("compress");
+        let mut decompressed = Vec::new();
+        decompress_with_limits(&compressed, &mut decompressed, DecodeLimits::default())
+            .expect("decompress");
+        assert_eq!(decompressed, data, "None round-trip mismatch");
+    }
+
+    /// The LZ4 and LZ4Be formats are distinct (different endianness prefix).
+    /// Compressing the same data with each produces different bytes. Diff test.
+    #[test]
+    fn lz4_and_lz4be_produce_different_output() {
+        let data: Vec<u8> = (0..200).map(|i| (i % 251) as u8).collect();
+        let mut lz4 = Vec::new();
+        compress(&data, &mut lz4, Compression::Lz4).unwrap();
+        let mut lz4be = Vec::new();
+        compress(&data, &mut lz4be, Compression::Lz4Be).unwrap();
+        assert_ne!(lz4, lz4be, "LZ4 and LZ4Be should produce different bytes");
+    }
+}

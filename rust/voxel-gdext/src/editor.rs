@@ -338,3 +338,75 @@ impl VoxelGraphEditorPlugin {
         6
     }
 }
+
+// ---------------------------------------------------------------------------
+// VoxelInstancerEditorPlugin — EditorPlugin for the instancer scatter editor
+// ---------------------------------------------------------------------------
+
+/// Editor plugin for the voxel instancer (scatter placement). Adds a
+/// bottom-panel view on `enter_tree` and provides `count_surface_points`, which
+/// extracts terrain surface points from a `VoxelBufferGD` exactly as the
+/// instancer does — solid voxels with air below.
+#[derive(GodotClass)]
+#[class(base = EditorPlugin, tool)]
+pub struct VoxelInstancerEditorPlugin {
+    base: Base<EditorPlugin>,
+    panel: Option<Gd<Control>>,
+}
+
+#[godot_api]
+impl IEditorPlugin for VoxelInstancerEditorPlugin {
+    fn init(base: Base<EditorPlugin>) -> Self {
+        godot_print!("VoxelInstancerEditorPlugin: initialised");
+        Self { base, panel: None }
+    }
+
+    fn enter_tree(&mut self) {
+        let panel = Control::new_alloc();
+        self.base_mut()
+            .add_control_to_bottom_panel(&panel, "Voxel Instancer");
+        self.panel = Some(panel);
+        godot_print!("VoxelInstancerEditorPlugin: entered tree — instancer view added");
+    }
+
+    fn exit_tree(&mut self) {
+        if let Some(panel) = self.panel.take() {
+            self.base_mut().remove_control_from_bottom_panel(&panel);
+            panel.free();
+            godot_print!("VoxelInstancerEditorPlugin: exited tree — instancer view removed");
+        }
+    }
+}
+
+#[godot_api]
+impl VoxelInstancerEditorPlugin {
+    /// Count the number of surface points in a `VoxelBufferGD` — solid voxels
+    /// (Type channel != 0) with air directly below. Mirrors the instancer's
+    /// surface extraction logic. Returns the count, or -1 if `buffer` is not a
+    /// `VoxelBufferGD`.
+    #[func]
+    fn count_surface_points(&self, buffer: Gd<RefCounted>) -> i64 {
+        let Ok(buf) = buffer.try_cast::<crate::voxel_buffer::VoxelBufferGD>() else {
+            return -1;
+        };
+        let bound = buf.bind();
+        let core = bound.core_buffer();
+        let sx = core.size().x;
+        let sy = core.size().y;
+        let sz = core.size().z;
+        const TYPE_CHANNEL: usize = 0;
+        let mut count: i64 = 0;
+        for z in 0..sz {
+            for x in 0..sx {
+                for y in 1..sy {
+                    let above = core.get_voxel(x, y, z, TYPE_CHANNEL);
+                    let below = core.get_voxel(x, y - 1, z, TYPE_CHANNEL);
+                    if above != 0 && below == 0 {
+                        count += 1;
+                    }
+                }
+            }
+        }
+        count
+    }
+}
