@@ -1,12 +1,21 @@
 # План миграции godot_voxel → Rust GDExtension
 
+> **✅ МИГРАЦИЯ ЗАВЕРШЕНА (2026-07-30)**
+>
+> Все milestone закрыты: **M1 ✅ M2 ✅ M3 ✅ M4 ✅**
+> C++ модуль полностью удалён. Проект — чистый Rust GDExtension.
+> 1475 тестов (795 unit + 674 parity + 5 integration + 1 doc-test), 0 failed.
+> 80/80 Godot классов функциональны, Godot 4.7 GDExtension загружается.
+>
+> **Финальный статус:** см. [`rust/STATUS.md`](rust/STATUS.md)
+>
+> ---
+>
 > **Форк:** https://github.com/sandsaber/godot_voxel
 > **Upstream:** https://github.com/Zylann/godot_voxel
 > **Дата оценки:** 2026-07-03
+> **Дата завершения:** 2026-07-30
 > **Модель работы:** AI 24/7 + человек-архитектор
->
-> **Snapshot статуса:** см. [`rust/STATUS.md`](rust/STATUS.md) — краткая
-> сводка фаз + список того, что уже работает headlessly без Godot.
 
 ---
 

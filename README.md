@@ -1,116 +1,92 @@
 Voxel Tools for Godot
 =========================
 
-A C++ module/extension for creating volumetric terrains in Godot Engine 4.
+A voxel terrain engine for Godot Engine 4, **fully ported from C++ to Rust**.
 
-[![🚪 Windows Builds](https://github.com/Zylann/godot_voxel/actions/workflows/windows.yml/badge.svg)](https://github.com/Zylann/godot_voxel/actions/workflows/windows.yml)
-[![🐧 Linux Builds](https://github.com/Zylann/godot_voxel/actions/workflows/linux.yml/badge.svg)](https://github.com/Zylann/godot_voxel/actions/workflows/linux.yml)
-[![🐒 Mono Builds](https://github.com/Zylann/godot_voxel/actions/workflows/mono.yml/badge.svg)](https://github.com/Zylann/godot_voxel/actions/workflows/mono.yml)
-[![🧩 GDExtension Builds](https://github.com/Zylann/godot_voxel/actions/workflows/extension_ci.yml/badge.svg)](https://github.com/Zylann/godot_voxel/actions/workflows/extension_ci.yml)
-[![Documentation Status](https://readthedocs.org/projects/voxel-tools/badge/?version=latest)](https://voxel-tools.readthedocs.io/en/latest/?badge=latest)
-
-[![Discord](https://img.shields.io/discord/850070170793410582?style=flat-square&logo=discord "Discord")](https://discord.gg/pkXmESmrAR)
+This fork is a **pure Rust GDExtension** — no C++ module code remains. The
+engine core (`voxel-core`) is engine-agnostic and fully unit-testable; the
+thin Godot binding (`voxel-gdext`) exposes 80 functional classes via
+`#[func]` methods. Loads in Godot 4.7+.
 
 ![Blocky screenshot](doc/source/images/blocky_screenshot.webp)
 ![Smooth screenshot](doc/source/images/smooth_screenshot.webp)
-![Textured screenshot](doc/source/images/textured-terrain.jpg)
 
 Features
 ---------------------------
 
-- Realtime 3D terrain editable in-game (Unlike a heightmap based terrain, this allows for overhangs, tunnels, and user creation/destruction)
-- Polygon-based: voxels are transformed into chunked meshes to be rendered
-- Godot physics integration + alternate fast Minecraft-like collisions
-- Infinite terrains made by paging chunks in and out
-- Voxel data is streamed from a variety of sources, which includes the ability to write your own generators
-- Minecraft-style blocky voxel terrain, with multiple materials and baked ambient occlusion
-- Smooth terrain with level of detail using Transvoxel
-- Voxel storage using 8-bit or 16-bit channels for any general purpose
-- Instancing system to spawn foliage, rocks and other decoration on surfaces
+- Realtime 3D terrain editable in-game (overhangs, tunnels, creation/destruction)
+- Polygon-based: voxels are transformed into chunked meshes via the Transvoxel algorithm
+- Godot physics integration + fast Minecraft-like collisions
+- Infinite terrains via multi-LOD paging (LodOctree + transition cells)
+- Voxel data streaming (memory, region files, generators)
+- Minecraft-style blocky terrain with baked ambient occlusion
+- Smooth terrain with level of detail (Transvoxel + SINGLE_S4 texturing)
+- Procedural graph generator (24+ node types, expression nodes, image lookups)
+- Voxel instancing system (scatter foliage, rocks on surfaces)
+- **Pure Rust** — cross-compiles to Android (aarch64/x86_64), iOS, macOS
 
-Check the [changelog](https://voxel-tools.readthedocs.io/en/latest/changelog/) for more recent details.
+Building
+---------------
 
+```bash
+cd rust
+cargo build -p voxel-gdext --release
+```
+
+This produces the `.so`/`.dylib`/`.dll` GDExtension library. Copy the
+`.gdextension` file from `rust/voxel-gdext/voxel_gdext.gdextension.in` into
+your Godot project and point it at the built library.
+
+Testing
+---------------
+
+```bash
+cd rust
+cargo test -p voxel-core -p voxel-gdext    # 795 unit + 674 parity + 5 integration
+cargo clippy --workspace --all-targets      # clean
+```
+
+Project structure
+---------------
+
+```
+rust/
+├── voxel-core/          # Engine-agnostic Rust core (all logic)
+│   ├── src/             # 795 unit tests
+│   └── tests/           # 674 parity tests (mirrors C++ test suite)
+├── voxel-gdext/         # Godot GDExtension binding (80 classes)
+│   ├── src/             # #[func] methods delegating to voxel-core
+│   └── smoke_test/      # Godot 4.7 project + VoxelGeneratorGraph addon
+├── cpp-baseline/        # C++ parity harness (reference data generation)
+├── tsan/                # ThreadSanifier tests
+└── fuzz/                # cargo-fuzz targets
+```
+
+Migration status
+---------------
+
+All milestones closed: **M1 ✅ M2 ✅ M3 ✅ M4 ✅**
+
+| Milestone | Description |
+|---|---|
+| M1 | Code review debt closed (TSan, typed storage, mesher perf, graph compile, fuzz) |
+| M2 | Phase 4 multi-LOD paging GO (LodOctree + transition cells) |
+| M3 | 80/80 Godot classes functional, Godot 4.7 GDExtension loads |
+| M4 | Full C++ parity: 674 parity tests + 9 ported features (box_blur, texturing, FastNoise2, etc.) |
+
+See [`rust/STATUS.md`](rust/STATUS.md) for details.
 
 Documentation
 ---------------
 
-- [Main documentation](https://voxel-tools.readthedocs.io/en/latest/)
-- [How to install](https://voxel-tools.readthedocs.io/en/latest/getting_the_module/)
-- [Quick start](https://voxel-tools.readthedocs.io/en/latest/quick_start/)
+- [Migration plan](MIGRATION_PLAN.md)
+- [Rust port status](rust/STATUS.md)
+- [Audit report](rust/AUDIT.md)
+- [Phase 0 pilot report](REPORT.md)
+- [Original docs](https://voxel-tools.readthedocs.io/en/latest/)
 
+Credits
+---------------
 
-Roadmap
----------
-
-Check [Feature Branches](https://github.com/Zylann/godot_voxel/issues/640) to see work-in-progress.
-
-Some areas of interest:
-
-* Multiplayer synchronization
-* Smooth voxel texturing
-* Level of detail with blocky voxels
-* Make GDExtension work
-
-
-Supporters
------------
-
-This module is a non-profit project developed by voluntary contributors. The following is the list of who donated at least once.
-Thanks for your support :)
-
-### Gold supporters
-
-```
-Aaron Franke (aaronfranke)
-Bewildering
-Eerrikki
-```
-
-### Silver supporters
-
-```
-TheConceptBoy
-Chris Bolton (yochrisbolton)
-Gamerfiend (Snowminx) 
-greenlion (Justin Swanhart) 
-segfault-god (jp.owo.Manda)
-RonanZe
-Phyronnaz
-NoFr1ends (Lynx)
-Kluskey (Jared McCluskey)
-Trey2k (Trey Moller)
-marcinn (Marcin Nowak)
-bfoster68
-gumby-cmyk
-Joshua Woods (jpw1991)
-jjoshpoland (Josh)
-jbbieber1127 (John Bieber)
-```
-
-### Supporters
-
-```
-rcorre (Ryan Roden-Corrent) 
-duchainer (Raphaël Duchaîne)
-MadMartian
-stackdump (stackdump.eth)
-Treer
-MrGreaterThan
-lenis0012
-ilievmark (Iliev Mark)
-OrbitalHare
-matthewhilton (Matthew Hilton)
-Pugulishus
-Fabian (nan0m)
-SummitCollie
-nulshift
-ddel-rio (Daniel del Río Román)
-Cyberphinx
-Mia (Tigxette)
-geryan (OGeryan)
-kevATin
-axel37
-StockerGaming
-```
-
-
+Originally developed by [Zylann](https://github.com/Zylann/godot_voxel).
+Rust port by the community. See the supporter list in the original project.

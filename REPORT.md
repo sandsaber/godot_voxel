@@ -1,16 +1,29 @@
+# Rust Migration — Final Report
+
+> **All milestones closed: M1 ✅ M2 ✅ M3 ✅ M4 ✅**
+>
+> The voxel engine has been fully ported from C++ to Rust. The C++ module has
+> been removed. The project is now a pure Rust GDExtension for Godot 4.7+.
+>
+> **Final numbers (2026-07-30):**
+> - 795 unit tests + 674 parity tests + 5 integration tests + 1 doc-test = **1475 total, 0 failed**
+> - 80/80 Godot classes functional (all have `#[func]` methods)
+> - 9 C++ features ported as new voxel-core APIs
+> - clippy/fmt clean, release build verified
+> - Godot 4.7 GDExtension loads
+>
+> See [`rust/STATUS.md`](rust/STATUS.md) for the full status breakdown.
+>
+> ---
+>
+> **Historical Phase 0 report below (2026-07-03):**
+
 # Phase 0 Pilot — Report & GO/NO-GO
 
 > Branch: `rust/pilot` · Date: 2026-07-03 · Host: Linux x86_64, Rust 1.96.1, NDK r29
 > See `MIGRATION_PLAN.md` for the full plan. This report covers Phase 0 (pilot).
 > Update 2026-07-06: the C++ stub-tree harness now supplies the committed mesh
 > goldens. H1 and H2 both pass; see `rust/cpp-baseline/README.md`.
->
-> **Snapshot notice (2026-07-12):** The numbers below are the Phase 0 snapshot
-> and are now historical. The port has grown substantially — see
-> [`rust/STATUS.md`](rust/STATUS.md) for the current test counts, phase status,
-> and the M1 audit-close roadmap. As of 2026-07-12: 675 unit + 11 integration +
-> 1 doc-test, clippy/fmt clean, TSan green; M1.A–M1.D (TSan, typed storage,
-> wave 3 mesher perf, graph compile-step + range analysis) closed.
 
 ## TL;DR
 

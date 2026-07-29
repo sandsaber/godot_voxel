@@ -829,6 +829,19 @@ CI auto-trigger (item 11) отложено до стабилизации пил�
 
 ## 11. Повторный аудит реализации — 2026-07-10
 
+> **ФИНАЛЬНЫЙ СТАТУС (2026-07-30):** Все milestone закрыты — M1 ✅ M2 ✅ M3 ✅ M4 ✅.
+> C++ модуль полностью удалён из репозитория. Проект — чистый Rust GDExtension.
+> 1475 тестов (795 unit + 674 parity + 5 integration + 1 doc-test), 0 failed.
+> 80/80 Godot классов функциональны, Godot 4.7 GDExtension загружается.
+> 9 C++ features портированы как новые voxel-core API:
+> box_blur, run_blocky_random_tick, paste_masked issue769, texturing SINGLE_S4/SINGLE_S2,
+> image generation (Image2D), blocky bake AO+cutout, graph expression NODE_EXPRESSION,
+> FastNoise2 (pure Rust), VoxelGeneratorGraph UI (Godot GraphEdit GDScript addon).
+>
+> См. [`STATUS.md`](STATUS.md) для финальной сводки.
+>
+> Ниже — датированный снимок повторного аудита от 2026-07-10 (историческая справка).
+
 ### 11.1 Объём и критерии
 
 Проверен HEAD `60225f11de4a` на ветке `rust/pilot`. До изменения только этого документа

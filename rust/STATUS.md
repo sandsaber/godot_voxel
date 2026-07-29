@@ -13,12 +13,12 @@
 | 2 — Mobile validation (gdext `.so` desktop + Android) | ✅ desktop+Android `.so` (on-device: pending SDK) | — |
 | 3 — Compute layer (storage, streams, meshers, generators, format) | ✅ COMPLETE | (cumulative) |
 | 4 — Terrain + threading (storage/streaming/meshing/paging/graph) | ✅ GO (multi-LOD paging M2.1 + transition cells M2.2 + TSan M1.A) | 751 unit + 11 integration + 5 TSan |
-| 5 — Godot binding + editor | ⏳ not started | — |
+| 5 — Godot binding + editor | ✅ COMPLETE (80/80 classes, Godot 4.7 GDExtension loads) | 795 unit + 674 parity + 5 integration |
 
 **Total:** 795 unit tests + 674 parity + 5 integration + 1 doc-test, clippy clean.
 **Project structure:** C++ module fully removed. Pure Rust project — `rust/voxel-core` (engine),
 `rust/voxel-gdext` (Godot binding), `rust/cpp-baseline/` (parity reference harness).
-and Android aarch64 GDExtension smoke when triggered by hand.
+All milestones closed: **M1 ✅ M2 ✅ M3 ✅ M4 ✅**.
 
 ## Roadmap — «полностью закрыть аудит»
 
