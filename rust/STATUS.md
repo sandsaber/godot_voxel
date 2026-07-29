@@ -1,8 +1,8 @@
 # Rust Port — Status Snapshot
 
-> Branch: `rust/pilot` · Last update: 2026-07-12
+> Branch: `rust/pilot` (merged with `master` — C++ removed, pure Rust project) · Last update: 2026-07-30
 > See `MIGRATION_PLAN.md` at the repo root for the full plan + progress log.
-> Roadmap «полностью закрыть аудит» — см. §11 в `rust/AUDIT.md` и блок ниже.
+> C++ reference code preserved in `rust/cpp-baseline/` for parity validation.
 
 ## At a glance
 
@@ -15,9 +15,9 @@
 | 4 — Terrain + threading (storage/streaming/meshing/paging/graph) | ✅ GO (multi-LOD paging M2.1 + transition cells M2.2 + TSan M1.A) | 751 unit + 11 integration + 5 TSan |
 | 5 — Godot binding + editor | ⏳ not started | — |
 
-**Total:** 786 unit tests + 674 parity + 5 integration + 1 doc-test, clippy clean.
-**CI:** automatic Rust workflow is intentionally disabled for now. `.github/workflows/rust.yml`
-is manual-only (`workflow_dispatch`) and can run fmt, workspace tests, clippy, workspace build,
+**Total:** 795 unit tests + 674 parity + 5 integration + 1 doc-test, clippy clean.
+**Project structure:** C++ module fully removed. Pure Rust project — `rust/voxel-core` (engine),
+`rust/voxel-gdext` (Godot binding), `rust/cpp-baseline/` (parity reference harness).
 and Android aarch64 GDExtension smoke when triggered by hand.
 
 ## Roadmap — «полностью закрыть аудит»
