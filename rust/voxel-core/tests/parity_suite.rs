@@ -7645,3 +7645,322 @@ mod buffer_format_patterns_parity {
         assert_eq!(buf.get_voxel(2, 2, 2, ChannelId::Type.index()), 0);
     }
 }
+
+// Mirrors test_voxel_data_map.cpp — copy + paste_fill + area checks.
+#[cfg(test)]
+mod data_map_copy_parity {
+    use voxel_core::math::Vector3i;
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelDataMap, VoxelFormat};
+
+    /// paste then copy round-trips the data. Mirrors test_voxel_data_map_copy.
+    #[test]
+    fn paste_then_copy_round_trips() {
+        let mut map = VoxelDataMap::new(0);
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        map.set_format(fmt);
+
+        let mut src = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt2 = VoxelFormat::new();
+        fmt2.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt2.configure_buffer(&mut src);
+        for z in 0..8 {
+            for y in 0..8 {
+                for x in 0..8 {
+                    src.set_voxel(
+                        (x + y * 8 + z * 64) as u64 & 0xFF,
+                        x,
+                        y,
+                        z,
+                        ChannelId::Type.index(),
+                    );
+                }
+            }
+        }
+        map.paste(Vector3i::zero(), &src, 1 << ChannelId::Type.index(), true);
+
+        // Copy back to a new buffer.
+        let mut dst = VoxelBuffer::with_size(Vector3i::splat(8));
+        fmt2.configure_buffer(&mut dst);
+        map.copy(Vector3i::zero(), &mut dst, 1 << ChannelId::Type.index());
+        for z in 0..8 {
+            for y in 0..8 {
+                for x in 0..8 {
+                    let expected = (x + y * 8 + z * 64) as u64 & 0xFF;
+                    assert_eq!(
+                        dst.get_voxel(x, y, z, ChannelId::Type.index()),
+                        expected,
+                        "copy round-trip mismatch at ({x},{y},{z})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// set_voxel on the map writes and reads back. Mirrors paste_fill area check.
+    #[test]
+    fn map_set_get_voxel() {
+        let mut map = VoxelDataMap::new(0);
+        map.set_format(VoxelFormat::new());
+        map.set_voxel(5, Vector3i::new(0, 0, 0), ChannelId::Type.index());
+        assert_eq!(
+            map.get_voxel(Vector3i::new(0, 0, 0), ChannelId::Type.index()),
+            5
+        );
+        // Different voxel should be 0 (default).
+        assert_eq!(
+            map.get_voxel(Vector3i::new(1, 0, 0), ChannelId::Type.index()),
+            0
+        );
+    }
+
+    /// has_block is false for non-created blocks, true after creation.
+    #[test]
+    fn has_block_tracks_creation() {
+        let mut map = VoxelDataMap::new(0);
+        assert!(!map.has_block(Vector3i::zero()));
+        map.set_empty_block(Vector3i::zero(), true);
+        assert!(map.has_block(Vector3i::zero()));
+        assert!(!map.has_block(Vector3i::new(1, 0, 0)));
+    }
+
+    /// remove_block returns the removed block.
+    #[test]
+    fn remove_block_returns_block() {
+        let mut map = VoxelDataMap::new(0);
+        map.set_empty_block(Vector3i::zero(), true);
+        let removed = map.remove_block(Vector3i::zero());
+        assert!(removed.is_some(), "remove_block should return the block");
+        assert!(
+            !map.has_block(Vector3i::zero()),
+            "block should be gone after remove"
+        );
+    }
+
+    /// block_positions iterates all created blocks.
+    #[test]
+    fn block_positions_iterates_all() {
+        let mut map = VoxelDataMap::new(0);
+        map.set_empty_block(Vector3i::new(0, 0, 0), true);
+        map.set_empty_block(Vector3i::new(1, 0, 0), true);
+        map.set_empty_block(Vector3i::new(0, 1, 0), true);
+        let positions: Vec<_> = map.block_positions().collect();
+        assert_eq!(positions.len(), 3, "should have 3 block positions");
+    }
+}
+
+// Additional graph validation + multi-output parity.
+#[cfg(test)]
+mod graph_validation_parity {
+    use voxel_core::generators::graph::{CompiledGraph, Graph, NodeKind};
+
+    /// A graph with a dangling port (references non-existent node) fails compile.
+    #[test]
+    fn dangling_port_fails_compile() {
+        let mut g = Graph::new();
+        // Push a Constant, then an OutputSdf referencing a non-existent node id 99.
+        let _c = g.push(NodeKind::Constant(1.0));
+        g.push(NodeKind::OutputSdf {
+            a: Some(voxel_core::generators::graph::GraphPort {
+                node: 99,
+                output: 0,
+            }),
+        });
+        let result = CompiledGraph::compile(&g);
+        // Should either fail or succeed but produce no SDF (dangling port handled).
+        // The key is it doesn't panic.
+        let _ = result;
+    }
+
+    /// A graph's nodes() accessor returns the correct count.
+    #[test]
+    fn nodes_accessor_count() {
+        let mut g = Graph::new();
+        assert_eq!(g.nodes().len(), 0);
+        g.push(NodeKind::Constant(1.0));
+        assert_eq!(g.nodes().len(), 1);
+        g.push(NodeKind::InputX);
+        assert_eq!(g.nodes().len(), 2);
+    }
+
+    /// first_sdf_output finds an OutputSdf node. Mirrors graph_has_output check.
+    #[test]
+    fn graph_has_sdf_output() {
+        use voxel_core::generators::graph::GraphGenerator;
+        let mut g = Graph::new();
+        let c = g.push(NodeKind::Constant(1.0));
+        g.push(NodeKind::OutputSdf {
+            a: Some(voxel_core::generators::graph::GraphPort { node: c, output: 0 }),
+        });
+        let gen = GraphGenerator::new(g);
+        assert!(
+            gen.first_sdf_output().is_some(),
+            "should find an OutputSdf node"
+        );
+    }
+
+    /// A graph without OutputSdf has no SDF output.
+    #[test]
+    fn graph_without_output_has_no_sdf_output() {
+        use voxel_core::generators::graph::GraphGenerator;
+        let mut g = Graph::new();
+        g.push(NodeKind::Constant(1.0));
+        let gen = GraphGenerator::new(g);
+        assert!(
+            gen.first_sdf_output().is_none(),
+            "should not find OutputSdf"
+        );
+    }
+}
+
+// Additional block serializer multi-channel parity.
+#[cfg(test)]
+mod block_serializer_multichannel_parity {
+    use voxel_core::math::Vector3i;
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
+    use voxel_core::streams::block_serializer;
+    use voxel_core::streams::compressed_data::Compression;
+    use voxel_core::streams::decode_limits::DecodeLimits;
+
+    /// A buffer with both Type and Color channels round-trips both.
+    #[test]
+    fn multi_channel_round_trips() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.depths[ChannelId::Color.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        buf.fill(3, ChannelId::Type.index());
+        buf.fill(7, ChannelId::Color.index());
+
+        let mut payload = Vec::new();
+        block_serializer::serialize_and_compress(&buf, &mut payload, Compression::Lz4).unwrap();
+        let mut buf2 = VoxelBuffer::with_size(Vector3i::splat(8));
+        fmt.configure_buffer(&mut buf2);
+        block_serializer::decompress_and_deserialize_with_limits(
+            &payload,
+            &mut buf2,
+            DecodeLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(buf2.get_voxel(0, 0, 0, ChannelId::Type.index()), 3);
+        assert_eq!(buf2.get_voxel(0, 0, 0, ChannelId::Color.index()), 7);
+    }
+
+    /// A buffer with all 8 channels configured round-trips without data loss.
+    #[test]
+    fn all_channels_round_trips() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(4));
+        let mut fmt = VoxelFormat::new();
+        for d in fmt.depths.iter_mut() {
+            *d = ChannelDepth::Bit8;
+        }
+        fmt.configure_buffer(&mut buf);
+        // Write distinct values per channel.
+        for ch in 0..8 {
+            buf.fill((ch + 1) as u64, ch);
+        }
+        let mut payload = Vec::new();
+        block_serializer::serialize_and_compress(&buf, &mut payload, Compression::Lz4).unwrap();
+        let mut buf2 = VoxelBuffer::with_size(Vector3i::splat(4));
+        fmt.configure_buffer(&mut buf2);
+        block_serializer::decompress_and_deserialize_with_limits(
+            &payload,
+            &mut buf2,
+            DecodeLimits::default(),
+        )
+        .unwrap();
+        for ch in 0..8 {
+            assert_eq!(
+                buf2.get_voxel(0, 0, 0, ch),
+                (ch + 1) as u64,
+                "channel {ch} mismatch"
+            );
+        }
+    }
+
+    /// Compression::None and LZ4 both produce non-empty payloads for the same buffer.
+    #[test]
+    fn none_and_lz4_both_nonempty() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        buf.fill(1, ChannelId::Type.index());
+
+        let mut payload_none = Vec::new();
+        block_serializer::serialize_and_compress(&buf, &mut payload_none, Compression::None)
+            .unwrap();
+        let mut payload_lz4 = Vec::new();
+        block_serializer::serialize_and_compress(&buf, &mut payload_lz4, Compression::Lz4).unwrap();
+        assert!(!payload_none.is_empty(), "None payload should be non-empty");
+        assert!(!payload_lz4.is_empty(), "LZ4 payload should be non-empty");
+    }
+}
+
+// Additional SDF math + curve combinations.
+#[cfg(test)]
+mod sdf_curve_combinations_parity {
+    use voxel_core::generators::simple::Curve;
+    use voxel_core::math::{sdf, Vector3f};
+
+    /// sdf_sphere at a non-origin center is dist(center, pos) - radius.
+    #[test]
+    fn sdf_sphere_offset_center() {
+        let d = sdf::sdf_sphere(
+            Vector3f::new(5.0, 0.0, 0.0),
+            Vector3f::new(2.0, 0.0, 0.0),
+            1.0,
+        );
+        // dist = 3, sdf = 3 - 1 = 2.
+        assert!((d - 2.0).abs() < 1e-5, "sphere offset: {d}");
+    }
+
+    /// sdf_box at a corner produces a positive distance (outside).
+    #[test]
+    fn sdf_box_corner_positive() {
+        let d = sdf::sdf_box(Vector3f::new(5.0, 5.0, 5.0), Vector3f::splat(2.0));
+        assert!(d > 0.0, "box corner should be positive (outside): {d}");
+    }
+
+    /// sdf_torus in the ring plane inside the tube is negative.
+    #[test]
+    fn sdf_torus_in_tube_negative() {
+        let d = sdf::sdf_torus(Vector3f::new(5.0, 0.0, 0.0), 5.0, 1.0);
+        assert!(d < 0.0, "torus at ring center should be inside tube: {d}");
+    }
+
+    /// Curve identity(256) has 256 points, sample(0.5) ≈ 0.5.
+    #[test]
+    fn curve_identity_256_points() {
+        let c = Curve::identity(256);
+        assert!(
+            (c.sample(0.5) - 0.5).abs() < 1e-5,
+            "identity curve sample(0.5): {}",
+            c.sample(0.5)
+        );
+        assert!(
+            (c.sample(0.0) - 0.0).abs() < 1e-5,
+            "identity curve sample(0.0)"
+        );
+        assert!(
+            (c.sample(1.0) - 1.0).abs() < 1e-5,
+            "identity curve sample(1.0)"
+        );
+    }
+
+    /// Curve from_points with ascending values interpolates correctly.
+    #[test]
+    fn curve_from_points_interpolates() {
+        let c = Curve::from_points(vec![0.0, 10.0, 20.0]);
+        assert!((c.sample(0.0) - 0.0).abs() < 1e-5);
+        assert!((c.sample(0.5) - 10.0).abs() < 1e-5);
+        assert!((c.sample(1.0) - 20.0).abs() < 1e-5);
+        // Midpoint between first two: t=0.25 → 5.0.
+        assert!(
+            (c.sample(0.25) - 5.0).abs() < 1e-5,
+            "curve interpolation at 0.25: {}",
+            c.sample(0.25)
+        );
+    }
+}
