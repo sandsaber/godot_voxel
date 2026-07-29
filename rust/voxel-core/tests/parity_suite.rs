@@ -12557,3 +12557,263 @@ mod buffer_fill_area_corner_parity {
         assert_eq!(buf.get_voxel(0, 0, 0, ChannelId::Type.index()), 9);
     }
 }
+
+// Additional graph: multi-element output SDF verification.
+#[cfg(test)]
+mod graph_output_verification_parity {
+    use voxel_core::generators::graph::{
+        CompiledGraph, CompiledScratch, Graph, GraphInputs, GraphOutput, GraphPort, NodeKind,
+    };
+
+    fn run_multi(g: &Graph, xs: &[f32]) -> Vec<f32> {
+        let c = CompiledGraph::compile(g).expect("compile");
+        let i = GraphInputs {
+            x: xs,
+            y: 0.0,
+            z: xs,
+        };
+        let mut s = CompiledScratch::new();
+        let mut o = Vec::new();
+        c.generate_slice(&i, xs.len(), &mut s, &mut o, false);
+        o.into_iter()
+            .find(|(k, _)| *k == GraphOutput::Sdf)
+            .map(|(_, v)| v)
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn input_x_direct_output() {
+        let mut g = Graph::new();
+        let x = g.push(NodeKind::InputX);
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: x, output: 0 }),
+        });
+        let xs = [1.0f32, 2.0, 3.0, 4.0, 5.0];
+        let r = run_multi(&g, &xs);
+        assert_eq!(r, xs.to_vec());
+    }
+
+    #[test]
+    fn negate_via_subtract_from_zero() {
+        let mut g = Graph::new();
+        let z = g.push(NodeKind::Constant(0.0));
+        let x = g.push(NodeKind::InputX);
+        let sub = g.push(NodeKind::Subtract {
+            a: Some(GraphPort { node: z, output: 0 }),
+            b: Some(GraphPort { node: x, output: 0 }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort {
+                node: sub,
+                output: 0,
+            }),
+        });
+        let xs = [1.0f32, 5.0, 10.0];
+        let r = run_multi(&g, &xs);
+        assert!((r[0] - (-1.0)).abs() < 1e-5, "0-1=-1: {}", r[0]);
+        assert!((r[1] - (-5.0)).abs() < 1e-5, "0-5=-5: {}", r[1]);
+        assert!((r[2] - (-10.0)).abs() < 1e-5, "0-10=-10: {}", r[2]);
+    }
+
+    #[test]
+    fn double_negate_via_subtract() {
+        let mut g = Graph::new();
+        let z = g.push(NodeKind::Constant(0.0));
+        let x = g.push(NodeKind::InputX);
+        let neg1 = g.push(NodeKind::Subtract {
+            a: Some(GraphPort { node: z, output: 0 }),
+            b: Some(GraphPort { node: x, output: 0 }),
+        });
+        let neg2 = g.push(NodeKind::Subtract {
+            a: Some(GraphPort { node: z, output: 0 }),
+            b: Some(GraphPort {
+                node: neg1,
+                output: 0,
+            }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort {
+                node: neg2,
+                output: 0,
+            }),
+        });
+        let xs = [3.0f32];
+        let r = run_multi(&g, &xs);
+        // 0-(0-3) = 0-(-3) = 3.
+        assert!((r[0] - 3.0).abs() < 1e-5, "double negate: {}", r[0]);
+    }
+
+    #[test]
+    fn constant_graph_produces_uniform_output() {
+        let mut g = Graph::new();
+        let c = g.push(NodeKind::Constant(7.0));
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: c, output: 0 }),
+        });
+        let xs = [0.0f32, 1.0, 2.0, 3.0];
+        let r = run_multi(&g, &xs);
+        for &v in &r {
+            assert!((v - 7.0).abs() < 1e-5, "constant should be 7: {v}");
+        }
+    }
+}
+
+// Additional scatter: deterministic count across different seed offsets.
+#[cfg(test)]
+mod scatter_seed_offset_parity {
+    use voxel_core::instancing::scatter::{InstanceGenerator, RandomScatterGenerator};
+    use voxel_core::instancing::ScatterConfig;
+    use voxel_core::math::Vector3f;
+
+    #[test]
+    fn same_seed_same_count_across_calls() {
+        let positions: Vec<_> = (0..50).map(|i| Vector3f::new(i as f32, 0.0, 0.0)).collect();
+        let normals = vec![Vector3f::new(0.0, 1.0, 0.0); 50];
+        let config = ScatterConfig::default();
+        let gen = RandomScatterGenerator {
+            density: 0.4,
+            min_scale: 0.8,
+            max_scale: 1.2,
+            snap_to_normal: true,
+        };
+        let a = gen.generate(&positions, &normals, 0, &config).len();
+        let b = gen.generate(&positions, &normals, 0, &config).len();
+        assert_eq!(a, b, "same seed should produce same count: {a} vs {b}");
+    }
+
+    #[test]
+    fn different_density_proportional_counts() {
+        let positions: Vec<_> = (0..200)
+            .map(|i| Vector3f::new(i as f32, 0.0, 0.0))
+            .collect();
+        let normals = vec![Vector3f::new(0.0, 1.0, 0.0); 200];
+        let config = ScatterConfig::default();
+        let low = RandomScatterGenerator {
+            density: 0.1,
+            min_scale: 1.0,
+            max_scale: 1.0,
+            snap_to_normal: false,
+        }
+        .generate(&positions, &normals, 0, &config)
+        .len();
+        let high = RandomScatterGenerator {
+            density: 0.9,
+            min_scale: 1.0,
+            max_scale: 1.0,
+            snap_to_normal: false,
+        }
+        .generate(&positions, &normals, 0, &config)
+        .len();
+        // Higher density should produce significantly more.
+        assert!(
+            high > low * 3,
+            "density 0.9 should produce >> density 0.1: {high} vs {low}"
+        );
+    }
+}
+
+// Additional edition: do_box in different quadrants.
+#[cfg(test)]
+mod edition_quadrant_parity {
+    use voxel_core::edition::ops::VoxelToolBuffer;
+    use voxel_core::math::Vector3i;
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
+
+    #[test]
+    fn do_box_negative_origin_clips_to_zero() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        let mut tool = VoxelToolBuffer::new(&mut buf, ChannelId::Type.index());
+        tool.do_box(Vector3i::new(-5, -5, -5), Vector3i::new(3, 3, 3));
+        // Only [0,3) per axis → 3³ = 27 voxels.
+        let solid: usize = (0..8)
+            .flat_map(|y| (0..8).flat_map(move |z| (0..8).map(move |x| (x, y, z))))
+            .filter(|&(x, y, z)| buf.get_voxel(x, y, z, ChannelId::Type.index()) != 0)
+            .count();
+        assert_eq!(solid, 27, "do_box negative origin clip: {solid}");
+    }
+
+    #[test]
+    fn do_box_corner_quadrant() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        let mut tool = VoxelToolBuffer::new(&mut buf, ChannelId::Type.index());
+        // Box at far corner [6,8) → 2³ = 8 voxels.
+        tool.do_box(Vector3i::new(6, 6, 6), Vector3i::new(8, 8, 8));
+        let solid: usize = (0..8)
+            .flat_map(|y| (0..8).flat_map(move |z| (0..8).map(move |x| (x, y, z))))
+            .filter(|&(x, y, z)| buf.get_voxel(x, y, z, ChannelId::Type.index()) != 0)
+            .count();
+        assert_eq!(solid, 8, "do_box corner quadrant: {solid}");
+    }
+}
+
+// Additional transvoxel: triangle count ratio.
+#[cfg(test)]
+mod transvoxel_triangle_ratio_parity {
+    use voxel_core::math::Vector3i;
+    use voxel_core::meshers::{MesherInput, MesherOutput, TransvoxelMesher, VoxelMesher};
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
+
+    #[test]
+    fn sphere_triangle_count_proportional_to_vertices() {
+        let mesher = TransvoxelMesher::new();
+        let mut voxels = VoxelBuffer::with_size(Vector3i::splat(16));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+        fmt.configure_buffer(&mut voxels);
+        let c = 8.0;
+        for z in 0..16 {
+            for y in 0..16 {
+                for x in 0..16 {
+                    let d =
+                        ((x as f32 - c).powi(2) + (y as f32 - c).powi(2) + (z as f32 - c).powi(2))
+                            .sqrt()
+                            - 6.0;
+                    voxels.set_voxel_f(d, x, y, z, ChannelId::Sdf.index());
+                }
+            }
+        }
+        let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+        let mut out = MesherOutput::default();
+        mesher.build(&mut out, &input);
+        let verts = out.total_vertex_count();
+        let tris = out.total_triangle_count();
+        assert!(
+            verts > 0 && tris > 0,
+            "should have geometry: {verts}v {tris}t"
+        );
+        // Each triangle has 3 vertices, so tris ≈ verts/3 roughly.
+        assert!(
+            tris * 3 >= verts * 2 / 3,
+            "triangle/vertex ratio: {tris}t vs {verts}v"
+        );
+    }
+
+    #[test]
+    fn plane_triangle_count_positive() {
+        let mesher = TransvoxelMesher::new();
+        let mut voxels = VoxelBuffer::with_size(Vector3i::splat(16));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+        fmt.configure_buffer(&mut voxels);
+        for z in 0..16 {
+            for x in 0..16 {
+                for y in 0..16 {
+                    voxels.set_voxel_f(y as f32 - 8.0, x, y, z, ChannelId::Sdf.index());
+                }
+            }
+        }
+        let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+        let mut out = MesherOutput::default();
+        mesher.build(&mut out, &input);
+        assert!(
+            out.total_triangle_count() > 0,
+            "plane should produce triangles"
+        );
+    }
+}
