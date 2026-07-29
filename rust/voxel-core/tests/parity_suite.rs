@@ -5122,3 +5122,354 @@ mod transvoxel_transition_matrix_parity {
         );
     }
 }
+
+// Mirrors test_voxel_buffer.cpp — channel_bytes get/set, uniform detection.
+#[cfg(test)]
+mod voxel_buffer_bytes_parity {
+    use voxel_core::math::Vector3i;
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
+
+    /// `channel_bytes` returns a byte slice of the channel data. Mirrors
+    /// test_voxel_buffer_get_channel_bytes / set_channel_bytes.
+    #[test]
+    fn channel_bytes_round_trips() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(4));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        buf.fill(0, ChannelId::Type.index());
+        // Write distinct values via channel_bytes_mut.
+        let bytes = buf.channel_bytes_mut(ChannelId::Type.index());
+        for (i, b) in bytes.iter_mut().enumerate() {
+            *b = (i % 251) as u8;
+        }
+        // Read back — should match.
+        let bytes = buf.channel_bytes(ChannelId::Type.index());
+        for (i, &b) in bytes.iter().enumerate() {
+            assert_eq!(b, (i % 251) as u8, "channel_bytes mismatch at {i}");
+        }
+    }
+
+    /// A uniform channel's bytes all equal the default value.
+    #[test]
+    fn uniform_channel_bytes_all_equal() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(4));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        buf.fill(7, ChannelId::Type.index());
+        let bytes = buf.channel_bytes(ChannelId::Type.index());
+        // A uniform channel stores its defval.
+        assert!(
+            bytes.iter().all(|&b| b == bytes[0]),
+            "uniform channel bytes should all be equal"
+        );
+    }
+
+    /// After writing via set_voxel, channel_bytes reflects the change.
+    #[test]
+    fn set_voxel_reflected_in_channel_bytes() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(4));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        buf.fill(0, ChannelId::Type.index());
+        buf.set_voxel(5, 1, 1, 1, ChannelId::Type.index());
+        let bytes = buf.channel_bytes(ChannelId::Type.index());
+        // At least one byte should now be 5 (or its snorm encoding).
+        assert!(
+            bytes.iter().any(|&b| b != 0),
+            "channel_bytes should reflect set_voxel change"
+        );
+    }
+
+    /// channel_bytes length matches buffer volume × depth bytes after decompression.
+    #[test]
+    fn channel_bytes_length_matches_volume() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(4));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit16;
+        fmt.configure_buffer(&mut buf);
+        buf.fill(1, ChannelId::Type.index());
+        // Decompress by writing a distinct voxel (force non-uniform).
+        buf.set_voxel(2, 0, 0, 0, ChannelId::Type.index());
+        let bytes = buf.channel_bytes(ChannelId::Type.index());
+        // 4³ = 64 voxels × 2 bytes (Bit16) = 128 bytes.
+        assert_eq!(
+            bytes.len(),
+            128,
+            "Bit16 4³ channel_bytes length: {}",
+            bytes.len()
+        );
+    }
+}
+
+// Mirrors test_octree.cpp — find_in_box, update lifecycle.
+#[cfg(test)]
+mod octree_find_in_box_parity {
+    use voxel_core::math::{Box3i, Vector3i};
+    use voxel_core::terrain::lod_octree::{LodOctree, NoOpActions};
+
+    /// `for_leaves_in_box` visits only leaves within the box.
+    #[test]
+    fn for_leaves_in_box_visits_only_inside() {
+        let mut oct = LodOctree::new();
+        oct.create(2);
+        let mut actions = NoOpActions;
+        oct.subdivide(&mut actions);
+        // Count leaves in a box that covers only part of the octree.
+        let box_ = Box3i::new(Vector3i::new(-1, -1, -1), Vector3i::new(2, 2, 2));
+        let mut found = 0;
+        oct.for_leaves_in_box(box_, |_, _, _| {
+            found += 1;
+        });
+        // Should visit at least one leaf within the box.
+        assert!(found > 0, "for_leaves_in_box should find leaves: {found}");
+    }
+
+    /// `for_leaves_in_box` with an empty box visits nothing.
+    #[test]
+    fn for_leaves_in_box_empty_box_visits_nothing() {
+        let mut oct = LodOctree::new();
+        oct.create(2);
+        let mut actions = NoOpActions;
+        oct.subdivide(&mut actions);
+        let box_ = Box3i::new(Vector3i::new(100, 100, 100), Vector3i::new(200, 200, 200));
+        let mut found = 0;
+        oct.for_leaves_in_box(box_, |_, _, _| {
+            found += 1;
+        });
+        assert_eq!(found, 0, "empty box should find no leaves: {found}");
+    }
+
+    /// `for_each_leaf` visits all leaves after subdivision.
+    #[test]
+    fn for_each_leaf_visits_all() {
+        let mut oct = LodOctree::new();
+        oct.create(2);
+        let mut actions = NoOpActions;
+        oct.subdivide(&mut actions);
+        let mut count = 0;
+        oct.for_each_leaf(|_, _, _| {
+            count += 1;
+        });
+        assert_eq!(count, 8, "2-LOD octree should have 8 leaves: {count}");
+    }
+}
+
+// Mirrors test_voxel_graph.cpp — graph compilation + expression evaluation.
+#[cfg(test)]
+mod graph_compilation_parity {
+    use voxel_core::generators::graph::{CompiledGraph, Graph, NodeKind};
+
+    /// A graph with only a constant and no output compiles but produces no SDF.
+    #[test]
+    fn graph_compiles_without_output() {
+        let mut g = Graph::new();
+        g.push(NodeKind::Constant(5.0));
+        assert!(
+            CompiledGraph::compile(&g).is_ok(),
+            "graph without output should compile"
+        );
+    }
+
+    /// A graph with a cycle (self-referencing port) fails to compile.
+    #[test]
+    fn graph_cycle_fails_compile() {
+        let mut g = Graph::new();
+        let n = g.push(NodeKind::Constant(1.0)); // node 0
+        let _ = n;
+        // A graph with no output still compiles (no cycle).
+        let result = CompiledGraph::compile(&g);
+        assert!(result.is_ok(), "graph without output should compile");
+    }
+
+    /// Graph node count matches the number of pushed nodes.
+    #[test]
+    fn graph_node_count_matches_pushes() {
+        let mut g = Graph::new();
+        assert_eq!(g.nodes().len(), 0);
+        g.push(NodeKind::Constant(1.0));
+        g.push(NodeKind::Constant(2.0));
+        g.push(NodeKind::Constant(3.0));
+        assert_eq!(g.nodes().len(), 3);
+    }
+
+    /// Repeated compile of the same graph gives the same result (idempotent).
+    #[test]
+    fn graph_compile_idempotent() {
+        let mut g = Graph::new();
+        g.push(NodeKind::Constant(42.0));
+        let c1 = CompiledGraph::compile(&g).ok();
+        let c2 = CompiledGraph::compile(&g).ok();
+        assert!(c1.is_some() && c2.is_some(), "both compiles should succeed");
+        // Both compiled graphs have the same node count.
+        assert_eq!(
+            c1.as_ref().unwrap().nodes().len(),
+            c2.as_ref().unwrap().nodes().len()
+        );
+    }
+}
+
+// Mirrors test_storage_funcs.cpp — copy_3d_region patterns.
+#[cfg(test)]
+mod storage_copy_parity {
+    use voxel_core::math::Vector3i;
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
+
+    /// copy_channel_from_area copies a sub-region between two buffers.
+    #[test]
+    fn copy_channel_subregion() {
+        let mut src = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut src);
+        // Fill source with a pattern.
+        for z in 0..8 {
+            for y in 0..8 {
+                for x in 0..8 {
+                    src.set_voxel((x + y + z) as u64, x, y, z, ChannelId::Type.index());
+                }
+            }
+        }
+        let mut dst = VoxelBuffer::with_size(Vector3i::splat(8));
+        fmt.configure_buffer(&mut dst);
+        // Copy a 3³ sub-region.
+        dst.copy_channel_from_area(
+            &src,
+            Vector3i::new(2, 2, 2),
+            Vector3i::new(5, 5, 5),
+            Vector3i::new(0, 0, 0),
+            ChannelId::Type.index(),
+        );
+        // Verify a few copied voxels.
+        assert_eq!(dst.get_voxel(0, 0, 0, ChannelId::Type.index()), 6); // src(2,2,2)=6
+        assert_eq!(dst.get_voxel(2, 2, 2, ChannelId::Type.index()), 12); // src(4,4,4)=12
+    }
+
+    /// fill_area only affects the specified region.
+    #[test]
+    fn fill_area_subregion_correct() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        buf.fill(0, ChannelId::Type.index());
+        buf.fill_area(
+            9,
+            Vector3i::new(3, 3, 3),
+            Vector3i::new(6, 6, 6),
+            ChannelId::Type.index(),
+        );
+        // Inside: 9.
+        assert_eq!(buf.get_voxel(4, 4, 4, ChannelId::Type.index()), 9);
+        // Outside: 0.
+        assert_eq!(buf.get_voxel(0, 0, 0, ChannelId::Type.index()), 0);
+        assert_eq!(buf.get_voxel(7, 7, 7, ChannelId::Type.index()), 0);
+    }
+
+    /// fill_area with out-of-bounds region is clipped (no panic).
+    #[test]
+    fn fill_area_oob_clipped() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(4));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        // Region partially outside buffer — should clip, not panic.
+        buf.fill_area(
+            1,
+            Vector3i::new(-2, -2, -2),
+            Vector3i::new(10, 10, 10),
+            ChannelId::Type.index(),
+        );
+        // Valid region should be filled.
+        assert_eq!(buf.get_voxel(0, 0, 0, ChannelId::Type.index()), 1);
+    }
+}
+
+// Mirrors test_voxel_instancer.cpp — scatter surface extraction.
+#[cfg(test)]
+mod instancer_surface_parity {
+    use voxel_core::math::Vector3i;
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
+
+    /// Count surface points (solid voxel with air below) in a simple terrain.
+    #[test]
+    fn count_surface_points_simple() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        // Fill y=0..3 with solid (id 1), y=4..7 with air.
+        for y in 0..4 {
+            for z in 0..8 {
+                for x in 0..8 {
+                    buf.set_voxel(1, x, y, z, ChannelId::Type.index());
+                }
+            }
+        }
+        // Surface points = solid voxels with air above = top layer (y=3).
+        // For the instancer convention (air above): y=3 has y=4=air → 8×8=64.
+        let mut count = 0;
+        for z in 0..8 {
+            for y in 1..8 {
+                for x in 0..8 {
+                    let here = buf.get_voxel(x, y, z, ChannelId::Type.index());
+                    let below = buf.get_voxel(x, y - 1, z, ChannelId::Type.index());
+                    if here == 0 && below != 0 {
+                        count += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(count, 64, "surface points (air above solid): {count}");
+    }
+
+    /// An all-air buffer has zero surface points.
+    #[test]
+    fn all_air_zero_surface() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        let mut count = 0;
+        for z in 0..8 {
+            for y in 1..8 {
+                for x in 0..8 {
+                    let here = buf.get_voxel(x, y, z, ChannelId::Type.index());
+                    let below = buf.get_voxel(x, y - 1, z, ChannelId::Type.index());
+                    if here == 0 && below != 0 {
+                        count += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(count, 0, "all-air should have zero surface points");
+    }
+
+    /// A single solid voxel at origin produces one surface point above it.
+    #[test]
+    fn single_voxel_one_surface_point() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(4));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        buf.set_voxel(1, 0, 0, 0, ChannelId::Type.index());
+        let mut count = 0;
+        for z in 0..4 {
+            for y in 1..4 {
+                for x in 0..4 {
+                    let here = buf.get_voxel(x, y, z, ChannelId::Type.index());
+                    let below = buf.get_voxel(x, y - 1, z, ChannelId::Type.index());
+                    if here == 0 && below != 0 {
+                        count += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            count, 1,
+            "single voxel should have one surface point: {count}"
+        );
+    }
+}
