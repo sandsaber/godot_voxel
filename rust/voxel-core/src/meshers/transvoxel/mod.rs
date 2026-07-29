@@ -13,6 +13,7 @@
 pub mod regular;
 pub mod regular_tables;
 pub mod structures;
+pub mod texturing;
 pub mod transition;
 pub mod transition_tables;
 

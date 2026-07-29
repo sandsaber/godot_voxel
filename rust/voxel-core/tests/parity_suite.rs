@@ -14259,3 +14259,98 @@ mod paste_masked_full_pattern_parity {
         }
     }
 }
+
+// Mirrors test_transvoxel.cpp issue772 — texturing SINGLE_S4 mode material selection.
+#[cfg(test)]
+mod texturing_single_s4_parity {
+    use voxel_core::meshers::transvoxel::texturing::{
+        get_regular_cell_materials, get_transition_cell_materials, pack_bytes, TexturingMode,
+    };
+
+    #[test]
+    fn texturing_mode_none_default() {
+        assert_eq!(TexturingMode::default(), TexturingMode::None);
+    }
+
+    #[test]
+    fn single_s4_uniform_cell_single_material() {
+        let corners = [5u8; 8];
+        let channel = [5u8; 64];
+        let cell = get_regular_cell_materials(&channel, &corners);
+        assert_eq!(cell.selected_indices[0], 5);
+        assert_eq!(cell.packed_indices, pack_bytes([5, 0, 0, 0]));
+        for &ci in &cell.component_indices {
+            assert_eq!(ci, 0);
+        }
+    }
+
+    #[test]
+    fn single_s4_two_materials_both_selected() {
+        let corners = [1u8, 1, 1, 1, 2, 2, 2, 2];
+        let channel = [1u8, 2];
+        let cell = get_regular_cell_materials(&channel, &corners);
+        assert!(cell.selected_indices.contains(&1));
+        assert!(cell.selected_indices.contains(&2));
+    }
+
+    #[test]
+    fn single_s4_dominant_material_first() {
+        let corners = [3u8, 3, 3, 3, 3, 3, 3, 7];
+        let channel = [3u8, 7];
+        let cell = get_regular_cell_materials(&channel, &corners);
+        assert_eq!(
+            cell.selected_indices[0], 3,
+            "dominant material should be first"
+        );
+    }
+
+    #[test]
+    fn single_s4_pack_bytes_correct() {
+        let packed = pack_bytes([10, 20, 30, 40]);
+        assert_eq!(packed & 0xFF, 10);
+        assert_eq!((packed >> 8) & 0xFF, 20);
+        assert_eq!((packed >> 16) & 0xFF, 30);
+        assert_eq!((packed >> 24) & 0xFF, 40);
+    }
+
+    #[test]
+    fn single_s4_transition_cell_materials() {
+        let corners = [1u8; 9];
+        let cell = get_transition_cell_materials(&corners);
+        assert_eq!(cell.selected_indices[0], 1);
+        assert_eq!(cell.packed_indices, pack_bytes([1, 0, 0, 0]));
+    }
+
+    #[test]
+    fn single_s4_transition_two_materials() {
+        let corners = [2u8, 2, 2, 2, 5, 5, 5, 5, 2];
+        let cell = get_transition_cell_materials(&corners);
+        assert!(cell.selected_indices.contains(&2));
+        assert!(cell.selected_indices.contains(&5));
+    }
+
+    #[test]
+    fn single_s4_component_indices_correct() {
+        let corners = [1u8, 1, 1, 1, 2, 2, 2, 2];
+        let channel = [1u8, 2];
+        let cell = get_regular_cell_materials(&channel, &corners);
+        let idx_1 = cell.selected_indices.iter().position(|&v| v == 1).unwrap() as u8;
+        let idx_2 = cell.selected_indices.iter().position(|&v| v == 2).unwrap() as u8;
+        assert_eq!(
+            cell.component_indices[0], idx_1,
+            "corner 0 should map to material 1"
+        );
+        assert_eq!(
+            cell.component_indices[4], idx_2,
+            "corner 4 should map to material 2"
+        );
+    }
+
+    #[test]
+    fn single_s4_all_different_materials() {
+        let corners = [0u8, 1, 2, 3, 4, 5, 6, 7];
+        let channel = [0u8, 1, 2, 3, 4, 5, 6, 7];
+        let cell = get_regular_cell_materials(&channel, &corners);
+        assert!(cell.packed_indices != 0, "should select some materials");
+    }
+}
