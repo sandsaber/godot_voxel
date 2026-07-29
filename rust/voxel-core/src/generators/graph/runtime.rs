@@ -435,8 +435,9 @@ impl Graph {
                     scratch.put(id, r);
                 }
                 NodeKind::Divide { a, b } => {
+                    // C++ parity: exact-zero test (not epsilon), default denominator is 1.
                     let r = binop(scratch, a, b, slice_size, |x, y| {
-                        if y.abs() <= f32::EPSILON {
+                        if y == 0.0 {
                             0.0
                         } else {
                             x / y
@@ -481,12 +482,13 @@ impl Graph {
                     let to_end = *to_end;
                     let from_span = from_end - from_start;
                     let to_span = to_end - to_start;
+                    // C++ parity: pure linear remap (a*x + b), NO clamp.
                     let r = monop(scratch, a, slice_size, |v| {
                         if from_span.abs() <= f32::EPSILON {
-                            to_start
+                            0.0
                         } else {
                             let t = (v - from_start) / from_span;
-                            to_start + t.clamp(0.0, 1.0) * to_span
+                            to_start + t * to_span
                         }
                     });
                     scratch.put(id, r);
@@ -986,8 +988,9 @@ impl CompiledGraph {
                 node_index,
                 (0..slice_size)
                     .map(|i| {
+                        // C++ parity: exact-zero test, not epsilon.
                         let denom = self.val(scratch, b, i);
-                        if denom.abs() < 1e-12 {
+                        if denom == 0.0 {
                             0.0
                         } else {
                             self.val(scratch, a, i) / denom
@@ -1057,13 +1060,19 @@ impl CompiledGraph {
                 to_end,
             } => {
                 let (fs, fe, ts, te) = (*from_start, *from_end, *to_start, *to_end);
+                let from_span = fe - fs;
+                let to_span = te - ts;
                 scratch.set(
                     node_index,
                     (0..slice_size)
                         .map(|i| {
-                            let v = self.val(scratch, a, i);
-                            let t = ((v - fs) / (fe - fs)).clamp(0.0, 1.0);
-                            ts + t * (te - ts)
+                            // C++ parity: pure linear remap (no clamp).
+                            if from_span.abs() <= f32::EPSILON {
+                                0.0
+                            } else {
+                                let v = self.val(scratch, a, i);
+                                ts + (v - fs) / from_span * to_span
+                            }
                         })
                         .collect(),
                 );
@@ -1963,7 +1972,8 @@ mod tests {
     }
 
     #[test]
-    fn remap_clamps_outside_the_input_range() {
+    fn remap_matches_cpp_pure_linear_no_clamp() {
+        // GRAPH-2 parity: C++ remap is pure linear (a*x + b), no clamp.
         let mut graph = Graph::new();
         let x = graph.push(NodeKind::InputX);
         let remap = graph.push(NodeKind::Remap {
@@ -1977,7 +1987,7 @@ mod tests {
             a: Some(GraphPort::new(remap)),
         });
 
-        // 0 -> 10, 1 -> 15, 2 -> 20, 5 -> clamps to 20.
+        // 0 -> 10, 1 -> 15, 2 -> 20, 5 -> 35 (extrapolation, no clamp).
         let xs = vec![0.0, 1.0, 2.0, 5.0];
         let inputs = GraphInputs {
             x: &xs,
@@ -1994,7 +2004,11 @@ mod tests {
         assert!((data[0] - 10.0).abs() < 1e-5);
         assert!((data[1] - 15.0).abs() < 1e-5);
         assert!((data[2] - 20.0).abs() < 1e-5);
-        assert!((data[3] - 20.0).abs() < 1e-5);
+        assert!(
+            (data[3] - 35.0).abs() < 1e-5,
+            "extrapolation should NOT clamp: {}",
+            data[3]
+        );
     }
 
     #[test]
