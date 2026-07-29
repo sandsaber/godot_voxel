@@ -561,9 +561,26 @@ pub fn parse_with_limits(bytes: &[u8], limits: DecodeLimits) -> Result<Data> {
             r.seek(next);
         }
 
-        // The format doesn't always align chunk boundaries with `chunk_size`
-        // (children sit in the trailing `child_chunks_size` region); the C++
-        // loop just re-reads the next tag, so we do the same — no forced seek.
+        // VOX-1 parity: always seek to chunk_start + chunk_size after every
+        // chunk (known or unknown). This prevents a malformed known chunk from
+        // desynchronizing the parser by over-reading into the next chunk.
+        // The C++ port has the same weakness (no forced seek); this is a
+        // Rust-side hardening fix.
+        let chunk_end = chunk_start
+            .checked_add(chunk_size)
+            .ok_or(VoxError::UnexpectedEof)?;
+        if chunk_end > r.len() {
+            return Err(VoxError::UnexpectedEof);
+        }
+        if r.position() > chunk_end {
+            return Err(VoxError::InvalidData(format!(
+                "chunk {:?} over-read its declared size (read {}, declared {})",
+                chunk_id,
+                r.position() - chunk_start,
+                chunk_size
+            )));
+        }
+        r.seek(chunk_end);
     }
 
     data.root_node_id = validate_scene_graph(&data)?;
