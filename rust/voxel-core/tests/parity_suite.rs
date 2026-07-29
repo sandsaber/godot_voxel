@@ -11358,9 +11358,7 @@ mod scatter_precision_parity {
 #[cfg(test)]
 mod graph_compiled_gen_block_parity {
     use voxel_core::generators::base::{VoxelGenerator, VoxelQueryData};
-    use voxel_core::generators::graph::{
-        Graph, GraphGenerator, GraphPort, NodeKind,
-    };
+    use voxel_core::generators::graph::{Graph, GraphGenerator, GraphPort, NodeKind};
     use voxel_core::math::Vector3i;
     use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
 
@@ -11579,5 +11577,270 @@ mod transvoxel_edge_solid_parity {
             out.total_vertex_count() > 0,
             "diagonal surface should produce geometry"
         );
+    }
+}
+
+// Additional graph: expression equivalence + operator identity patterns.
+#[cfg(test)]
+mod graph_operator_identity_parity {
+    use voxel_core::generators::graph::{
+        CompiledGraph, CompiledScratch, Graph, GraphInputs, GraphOutput, GraphPort, NodeKind,
+    };
+
+    fn run_binop(make: impl FnOnce(GraphPort, GraphPort) -> NodeKind, a: f32, b: f32) -> f32 {
+        let mut g = Graph::new();
+        let na = g.push(NodeKind::Constant(a));
+        let nb = g.push(NodeKind::Constant(b));
+        let n = g.push(make(
+            GraphPort {
+                node: na,
+                output: 0,
+            },
+            GraphPort {
+                node: nb,
+                output: 0,
+            },
+        ));
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: n, output: 0 }),
+        });
+        let c = CompiledGraph::compile(&g).expect("compile");
+        let xs = [0.0f32];
+        let zs = [0.0f32];
+        let i = GraphInputs {
+            x: &xs,
+            y: 0.0,
+            z: &zs,
+        };
+        let mut s = CompiledScratch::new();
+        let mut o = Vec::new();
+        c.generate_slice(&i, 1, &mut s, &mut o, false);
+        o.into_iter()
+            .find(|(k, _)| *k == GraphOutput::Sdf)
+            .and_then(|(_, v)| v.into_iter().next())
+            .unwrap()
+    }
+
+    #[test]
+    fn add_zero_identity_all_values() {
+        for &v in &[0.0f32, 1.0, -1.0, 3.5, -100.0] {
+            assert!(
+                (run_binop(
+                    |a, b| NodeKind::Add {
+                        a: Some(a),
+                        b: Some(b)
+                    },
+                    v,
+                    0.0
+                ) - v)
+                    .abs()
+                    < 1e-5
+            );
+        }
+    }
+
+    #[test]
+    fn multiply_one_identity_all_values() {
+        for &v in &[0.0f32, 1.0, -1.0, 3.5, 50.0] {
+            assert!(
+                (run_binop(
+                    |a, b| NodeKind::Multiply {
+                        a: Some(a),
+                        b: Some(b)
+                    },
+                    v,
+                    1.0
+                ) - v)
+                    .abs()
+                    < 1e-5
+            );
+        }
+    }
+
+    #[test]
+    fn subtract_self_yields_zero() {
+        for &v in &[5.0f32, 10.0, -3.0] {
+            assert!(
+                (run_binop(
+                    |a, b| NodeKind::Subtract {
+                        a: Some(a),
+                        b: Some(b)
+                    },
+                    v,
+                    v
+                ))
+                .abs()
+                    < 1e-5
+            );
+        }
+    }
+
+    #[test]
+    fn divide_self_yields_one() {
+        for &v in &[1.0f32, 5.0, 10.0, -2.0] {
+            assert!(
+                (run_binop(
+                    |a, b| NodeKind::Divide {
+                        a: Some(a),
+                        b: Some(b)
+                    },
+                    v,
+                    v
+                ) - 1.0)
+                    .abs()
+                    < 1e-5
+            );
+        }
+    }
+
+    #[test]
+    fn min_equals_first_when_smaller() {
+        assert!(
+            (run_binop(
+                |a, b| NodeKind::Min {
+                    a: Some(a),
+                    b: Some(b)
+                },
+                2.0,
+                7.0
+            ) - 2.0)
+                .abs()
+                < 1e-5
+        );
+    }
+
+    #[test]
+    fn max_equals_second_when_larger() {
+        assert!(
+            (run_binop(
+                |a, b| NodeKind::Max {
+                    a: Some(a),
+                    b: Some(b)
+                },
+                2.0,
+                7.0
+            ) - 7.0)
+                .abs()
+                < 1e-5
+        );
+    }
+
+    #[test]
+    fn union_identity_infinity() {
+        // union(x, +inf) = x (min picks x).
+        let v = run_binop(
+            |a, b| NodeKind::SdfUnion {
+                a: Some(a),
+                b: Some(b),
+            },
+            -3.0,
+            f32::INFINITY,
+        );
+        assert!((v - (-3.0)).abs() < 1e-5, "union(-3,inf)=-3: {v}");
+    }
+}
+
+// Additional storage: buffer metadata + multi-channel fills.
+#[cfg(test)]
+mod buffer_multi_channel_parity {
+    use voxel_core::math::Vector3i;
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
+
+    #[test]
+    fn fill_all_8_channels_independently() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(2));
+        let mut fmt = VoxelFormat::new();
+        for d in fmt.depths.iter_mut() {
+            *d = ChannelDepth::Bit8;
+        }
+        fmt.configure_buffer(&mut buf);
+        for ch in 0..8 {
+            buf.fill((ch + 1) as u64, ch);
+        }
+        for ch in 0..8 {
+            assert_eq!(buf.get_voxel(0, 0, 0, ch), (ch + 1) as u64, "channel {ch}");
+        }
+    }
+
+    #[test]
+    fn clear_one_channel_preserves_others() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(2));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[0] = ChannelDepth::Bit8;
+        fmt.depths[1] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        buf.fill(5, 0);
+        buf.fill(9, 1);
+        buf.clear_channel(0, 0);
+        assert_eq!(buf.get_voxel(0, 0, 0, 0), 0, "cleared channel should be 0");
+        assert_eq!(buf.get_voxel(0, 0, 0, 1), 9, "other channel preserved");
+    }
+
+    #[test]
+    fn bit16_type_round_trips_value_300() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(2));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit16;
+        fmt.configure_buffer(&mut buf);
+        buf.set_voxel(300, 0, 0, 0, ChannelId::Type.index());
+        assert_eq!(buf.get_voxel(0, 0, 0, ChannelId::Type.index()), 300);
+    }
+
+    #[test]
+    fn bit32_type_round_trips_value_70000() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(2));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit32;
+        fmt.configure_buffer(&mut buf);
+        buf.set_voxel(70000, 0, 0, 0, ChannelId::Type.index());
+        assert_eq!(buf.get_voxel(0, 0, 0, ChannelId::Type.index()), 70000);
+    }
+}
+
+// Additional modifier: smooth operations boundary behavior.
+#[cfg(test)]
+mod modifier_smooth_boundary_parity {
+    use voxel_core::math::Vector3f;
+    use voxel_core::modifiers::{ModifierStack, SdfOperation, SphereModifier};
+
+    #[test]
+    fn smooth_union_vs_hard_at_boundary() {
+        let positions = vec![Vector3f::new(0.0, 0.0, 0.0)];
+
+        let mut sdf_hard = vec![10.0f32];
+        let mut stack_hard = ModifierStack::new();
+        stack_hard.add(Box::new(SphereModifier {
+            center: Vector3f::zero(),
+            radius: 10.0,
+            operation: SdfOperation::Add,
+            smoothness: 0.0,
+        }));
+        stack_hard.apply(&mut sdf_hard, &positions);
+
+        let mut sdf_smooth = vec![10.0f32];
+        let mut stack_smooth = ModifierStack::new();
+        stack_smooth.add(Box::new(SphereModifier {
+            center: Vector3f::zero(),
+            radius: 10.0,
+            operation: SdfOperation::Add,
+            smoothness: 5.0,
+        }));
+        stack_smooth.apply(&mut sdf_smooth, &positions);
+
+        // Smooth should be ≤ hard (smooth rounds corners).
+        assert!(
+            sdf_smooth[0] <= sdf_hard[0] + 1e-5,
+            "smooth should be ≤ hard: {} vs {}",
+            sdf_smooth[0],
+            sdf_hard[0]
+        );
+    }
+
+    #[test]
+    fn empty_stack_is_identity() {
+        let positions = vec![Vector3f::new(1.0, 2.0, 3.0)];
+        let mut sdf = vec![-5.0f32];
+        ModifierStack::new().apply(&mut sdf, &positions);
+        assert_eq!(sdf, vec![-5.0], "empty stack should be identity");
     }
 }
