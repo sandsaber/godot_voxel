@@ -3935,3 +3935,351 @@ mod scatter_transform_verify_parity {
         }
     }
 }
+
+#[cfg(test)]
+mod transvoxel_shape_matrix_parity {
+    use voxel_core::math::Vector3i;
+    use voxel_core::meshers::{MesherInput, MesherOutput, TransvoxelMesher, VoxelMesher};
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
+
+    fn plane_sdf_at(angle: f32, x: i32, y: i32, _z: i32, offset: f32) -> f32 {
+        // Rotated plane: normal (cos, sin, 0), d = offset.
+        let nx = angle.cos();
+        let ny = angle.sin();
+        (x as f32 * nx + y as f32 * ny) - offset
+    }
+
+    /// A plane at several rotations produces geometry in all cases.
+    #[test]
+    fn rotated_planes_all_produce_geometry() {
+        let mesher = TransvoxelMesher::new();
+        for &angle in &[0.0, 0.3, 0.7, 1.2] {
+            let mut voxels = VoxelBuffer::with_size(Vector3i::splat(16));
+            let mut fmt = VoxelFormat::new();
+            fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+            fmt.configure_buffer(&mut voxels);
+            for z in 0..16 {
+                for y in 0..16 {
+                    for x in 0..16 {
+                        voxels.set_voxel_f(
+                            plane_sdf_at(angle, x, y, z, 8.0),
+                            x,
+                            y,
+                            z,
+                            ChannelId::Sdf.index(),
+                        );
+                    }
+                }
+            }
+            let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+            let mut out = MesherOutput::default();
+            mesher.build(&mut out, &input);
+            assert!(
+                out.total_vertex_count() > 0,
+                "rotated plane at angle {angle} should produce geometry"
+            );
+        }
+    }
+
+    /// A series of sphere radii all produce geometry (monotonic-ish growth).
+    #[test]
+    fn sphere_radius_series_all_produce_geometry() {
+        let mesher = TransvoxelMesher::new();
+        for &r in &[2.0, 4.0, 6.0, 8.0] {
+            let mut voxels = VoxelBuffer::with_size(Vector3i::splat(16));
+            let mut fmt = VoxelFormat::new();
+            fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+            fmt.configure_buffer(&mut voxels);
+            let c = 8.0;
+            for z in 0..16 {
+                for y in 0..16 {
+                    for x in 0..16 {
+                        let d = ((x as f32 - c).powi(2)
+                            + (y as f32 - c).powi(2)
+                            + (z as f32 - c).powi(2))
+                        .sqrt()
+                            - r;
+                        voxels.set_voxel_f(d, x, y, z, ChannelId::Sdf.index());
+                    }
+                }
+            }
+            let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+            let mut out = MesherOutput::default();
+            mesher.build(&mut out, &input);
+            assert!(
+                out.total_vertex_count() > 0,
+                "sphere r={r} should produce geometry"
+            );
+        }
+    }
+
+    /// A box shape (axis-aligned, via sdf_box-like SDF) produces geometry.
+    #[test]
+    fn box_shape_produces_geometry() {
+        let mesher = TransvoxelMesher::new();
+        let mut voxels = VoxelBuffer::with_size(Vector3i::splat(16));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+        fmt.configure_buffer(&mut voxels);
+        let c = 8.0;
+        let h = 3.0;
+        for z in 0..16 {
+            for y in 0..16 {
+                for x in 0..16 {
+                    let dx = (x as f32 - c).abs() - h;
+                    let dy = (y as f32 - c).abs() - h;
+                    let dz = (z as f32 - c).abs() - h;
+                    let outside = dx.max(dy).max(dz);
+                    let inside = dx.min(dy).min(dz).min(0.0).abs();
+                    let d = if outside > 0.0 { outside } else { inside };
+                    voxels.set_voxel_f(d, x, y, z, ChannelId::Sdf.index());
+                }
+            }
+        }
+        let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+        let mut out = MesherOutput::default();
+        mesher.build(&mut out, &input);
+        assert!(
+            out.total_vertex_count() > 0,
+            "box shape should produce geometry"
+        );
+    }
+}
+
+#[cfg(test)]
+mod graph_arithmetic_parity {
+    use voxel_core::generators::graph::{
+        CompiledGraph, CompiledScratch, Graph, GraphInputs, GraphOutput, GraphPort, NodeKind,
+    };
+
+    fn run_binop(make: impl FnOnce(GraphPort, GraphPort) -> NodeKind, a: f32, b: f32) -> f32 {
+        let mut g = Graph::new();
+        let na = g.push(NodeKind::Constant(a));
+        let nb = g.push(NodeKind::Constant(b));
+        let n = g.push(make(
+            GraphPort {
+                node: na,
+                output: 0,
+            },
+            GraphPort {
+                node: nb,
+                output: 0,
+            },
+        ));
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: n, output: 0 }),
+        });
+        let c = CompiledGraph::compile(&g).expect("compile");
+        let xs = [0.0f32];
+        let zs = [0.0f32];
+        let i = GraphInputs {
+            x: &xs,
+            y: 0.0,
+            z: &zs,
+        };
+        let mut s = CompiledScratch::new();
+        let mut o = Vec::new();
+        c.generate_slice(&i, 1, &mut s, &mut o, false);
+        o.into_iter()
+            .find(|(k, _)| *k == GraphOutput::Sdf)
+            .and_then(|(_, v)| v.into_iter().next())
+            .unwrap()
+    }
+
+    #[test]
+    fn add_various_pairs() {
+        assert!(
+            (run_binop(
+                |a, b| NodeKind::Add {
+                    a: Some(a),
+                    b: Some(b)
+                },
+                1.0,
+                2.0
+            ) - 3.0)
+                .abs()
+                < 1e-5
+        );
+        assert!(
+            (run_binop(
+                |a, b| NodeKind::Add {
+                    a: Some(a),
+                    b: Some(b)
+                },
+                -5.0,
+                5.0
+            ) - 0.0)
+                .abs()
+                < 1e-5
+        );
+        assert!(
+            (run_binop(
+                |a, b| NodeKind::Add {
+                    a: Some(a),
+                    b: Some(b)
+                },
+                0.1,
+                0.2
+            ) - 0.3)
+                .abs()
+                < 1e-5
+        );
+    }
+
+    #[test]
+    fn subtract_various_pairs() {
+        assert!(
+            (run_binop(
+                |a, b| NodeKind::Subtract {
+                    a: Some(a),
+                    b: Some(b)
+                },
+                10.0,
+                3.0
+            ) - 7.0)
+                .abs()
+                < 1e-5
+        );
+        assert!(
+            (run_binop(
+                |a, b| NodeKind::Subtract {
+                    a: Some(a),
+                    b: Some(b)
+                },
+                0.0,
+                5.0
+            ) - (-5.0))
+                .abs()
+                < 1e-5
+        );
+    }
+
+    #[test]
+    fn multiply_various_pairs() {
+        assert!(
+            (run_binop(
+                |a, b| NodeKind::Multiply {
+                    a: Some(a),
+                    b: Some(b)
+                },
+                3.0,
+                4.0
+            ) - 12.0)
+                .abs()
+                < 1e-5
+        );
+        assert!(
+            (run_binop(
+                |a, b| NodeKind::Multiply {
+                    a: Some(a),
+                    b: Some(b)
+                },
+                -2.0,
+                6.0
+            ) - (-12.0))
+                .abs()
+                < 1e-5
+        );
+    }
+
+    #[test]
+    fn divide_various_pairs() {
+        assert!(
+            (run_binop(
+                |a, b| NodeKind::Divide {
+                    a: Some(a),
+                    b: Some(b)
+                },
+                20.0,
+                4.0
+            ) - 5.0)
+                .abs()
+                < 1e-5
+        );
+        assert!(
+            (run_binop(
+                |a, b| NodeKind::Divide {
+                    a: Some(a),
+                    b: Some(b)
+                },
+                7.0,
+                2.0
+            ) - 3.5)
+                .abs()
+                < 1e-5
+        );
+    }
+}
+
+#[cfg(test)]
+mod scatter_multiconfig_parity {
+    use voxel_core::instancing::scatter::{InstanceGenerator, RandomScatterGenerator};
+    use voxel_core::instancing::ScatterConfig;
+    use voxel_core::math::Vector3f;
+
+    /// Different seeds via item_index produce different instance sets (the
+    /// scatter is deterministic per (config.seed + item_index)).
+    #[test]
+    fn different_item_indices_differ() {
+        let positions: Vec<_> = (0..40).map(|i| Vector3f::new(i as f32, 0.0, 0.0)).collect();
+        let normals = vec![Vector3f::new(0.0, 1.0, 0.0); 40];
+        let config = ScatterConfig::default();
+        let gen = RandomScatterGenerator {
+            density: 0.5,
+            min_scale: 0.5,
+            max_scale: 1.5,
+            snap_to_normal: true,
+        };
+        let a = gen.generate(&positions, &normals, 0, &config);
+        let b = gen.generate(&positions, &normals, 100, &config);
+        // At least one instance position should differ (different seed offset).
+        let any_diff = a.iter().zip(b.iter()).any(|(x, y)| {
+            (x.position.x - y.position.x).abs() > 1e-6
+                || (x.position.y - y.position.y).abs() > 1e-6
+                || (x.scale - y.scale).abs() > 1e-6
+        });
+        assert!(
+            any_diff || a.len() != b.len(),
+            "different item indices should differ"
+        );
+    }
+
+    /// Density 0.0 produces zero instances; density 1.0 produces all.
+    #[test]
+    fn density_extremes() {
+        let positions: Vec<_> = (0..30).map(|i| Vector3f::new(i as f32, 0.0, 0.0)).collect();
+        let normals = vec![Vector3f::new(0.0, 1.0, 0.0); 30];
+        let config = ScatterConfig::default();
+        let zero = RandomScatterGenerator {
+            density: 0.0,
+            min_scale: 1.0,
+            max_scale: 1.0,
+            snap_to_normal: false,
+        }
+        .generate(&positions, &normals, 0, &config);
+        assert_eq!(zero.len(), 0, "density 0 → no instances");
+        let full = RandomScatterGenerator {
+            density: 1.0,
+            min_scale: 1.0,
+            max_scale: 1.0,
+            snap_to_normal: false,
+        }
+        .generate(&positions, &normals, 0, &config);
+        assert_eq!(full.len(), 30, "density 1 → all instances");
+    }
+
+    /// An empty surface produces no instances.
+    #[test]
+    fn empty_surface_no_instances() {
+        let gen = RandomScatterGenerator {
+            density: 1.0,
+            min_scale: 1.0,
+            max_scale: 1.0,
+            snap_to_normal: false,
+        };
+        let positions: Vec<Vector3f> = Vec::new();
+        let normals: Vec<Vector3f> = Vec::new();
+        let result = gen.generate(&positions, &normals, 0, &ScatterConfig::default());
+        assert_eq!(result.len(), 0, "empty surface → no instances");
+    }
+}

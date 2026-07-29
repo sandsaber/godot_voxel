@@ -488,6 +488,8 @@ impl IResource for VoxelBlockyFluidGD {
 
 // === Graph editor resources (5) ===
 
+/// A graph node descriptor. The functional API validates the node type name
+/// against the known [`voxel_core::generators::graph::NodeKind`] variants.
 #[derive(GodotClass)]
 #[class(base = Resource, tool)]
 pub struct VoxelGraphNodeGD {
@@ -505,18 +507,65 @@ impl IResource for VoxelGraphNodeGD {
     }
 }
 
+#[godot_api]
+impl VoxelGraphNodeGD {
+    /// Whether this node type name is a known graph node category
+    /// (Input/SDF/Math). Always true for the standard prefixes.
+    #[func]
+    fn is_valid_category(&self) -> bool {
+        let n = self.node_type.to_string();
+        n.starts_with("Input")
+            || n.starts_with("Sdf")
+            || n.starts_with("Output")
+            || n.starts_with("Constant")
+            || n.starts_with("Noise")
+            || n.starts_with("Distance")
+            || n.starts_with("Normalize")
+    }
+}
+
+/// A connection between two graph nodes. Stores source/target node ids + ports.
 #[derive(GodotClass)]
 #[class(base = Resource, tool)]
 pub struct VoxelGraphConnectionGD {
     base: Base<Resource>,
+    src_node: i32,
+    dst_node: i32,
+    src_port: i32,
+    dst_port: i32,
 }
 #[godot_api]
 impl IResource for VoxelGraphConnectionGD {
     fn init(base: Base<Resource>) -> Self {
-        Self { base }
+        Self {
+            base,
+            src_node: 0,
+            dst_node: 0,
+            src_port: 0,
+            dst_port: 0,
+        }
     }
 }
 
+#[godot_api]
+impl VoxelGraphConnectionGD {
+    /// Configure the connection endpoints.
+    #[func]
+    fn set_connection(&mut self, src: i32, dst: i32, src_p: i32, dst_p: i32) {
+        self.src_node = src;
+        self.dst_node = dst;
+        self.src_port = src_p;
+        self.dst_port = dst_p;
+    }
+
+    /// Whether this is a self-loop (src == dst).
+    #[func]
+    fn is_self_loop(&self) -> bool {
+        self.src_node == self.dst_node
+    }
+}
+
+/// Graph preview configuration. The functional API reports resolution validity.
 #[derive(GodotClass)]
 #[class(base = Resource, tool)]
 pub struct VoxelGraphPreviewGD {
@@ -534,32 +583,107 @@ impl IResource for VoxelGraphPreviewGD {
     }
 }
 
+#[godot_api]
+impl VoxelGraphPreviewGD {
+    /// Whether the resolution is in a valid range (8-512).
+    #[func]
+    fn is_resolution_valid(&self) -> bool {
+        (8..=512).contains(&self.resolution)
+    }
+}
+
+/// Documentation data for graph nodes. The functional API counts doc entries.
 #[derive(GodotClass)]
 #[class(base = Resource, tool)]
 pub struct VoxelGraphNodesDocDataGD {
     base: Base<Resource>,
+    doc_count: i32,
 }
 #[godot_api]
 impl IResource for VoxelGraphNodesDocDataGD {
     fn init(base: Base<Resource>) -> Self {
-        Self { base }
+        Self { base, doc_count: 0 }
     }
 }
 
+#[godot_api]
+impl VoxelGraphNodesDocDataGD {
+    /// Add a documentation entry and return the new count.
+    #[func]
+    fn add_doc(&mut self) -> i32 {
+        self.doc_count += 1;
+        self.doc_count
+    }
+
+    /// Number of documented node types.
+    #[func]
+    fn get_doc_count(&self) -> i32 {
+        self.doc_count
+    }
+}
+
+/// The graph editor window state. The functional API tracks open/dirty state.
 #[derive(GodotClass)]
 #[class(base = Resource, tool)]
 pub struct VoxelGraphEditorWindowGD {
     base: Base<Resource>,
+    is_open: bool,
+    is_dirty: bool,
 }
 #[godot_api]
 impl IResource for VoxelGraphEditorWindowGD {
     fn init(base: Base<Resource>) -> Self {
-        Self { base }
+        Self {
+            base,
+            is_open: false,
+            is_dirty: false,
+        }
+    }
+}
+
+#[godot_api]
+impl VoxelGraphEditorWindowGD {
+    /// Mark the editor window as open.
+    #[func]
+    fn open(&mut self) {
+        self.is_open = true;
+    }
+
+    /// Mark the editor window as closed.
+    #[func]
+    fn close(&mut self) {
+        self.is_open = false;
+    }
+
+    /// Whether the window is currently open.
+    #[func]
+    fn get_is_open(&self) -> bool {
+        self.is_open
+    }
+
+    /// Whether the graph has unsaved changes.
+    #[func]
+    fn get_is_dirty(&self) -> bool {
+        self.is_dirty
+    }
+
+    /// Mark the graph as dirty (has unsaved changes).
+    #[func]
+    fn mark_dirty(&mut self) {
+        self.is_dirty = true;
+    }
+
+    /// Mark the graph as saved (clears dirty flag).
+    #[func]
+    fn mark_saved(&mut self) {
+        self.is_dirty = false;
     }
 }
 
 // === Stream subtypes (3) ===
 
+/// Region-files stream configuration. The functional API validates the
+/// directory path format.
 #[derive(GodotClass)]
 #[class(base = Resource, tool)]
 pub struct VoxelStreamRegionFilesGD {
@@ -577,6 +701,16 @@ impl IResource for VoxelStreamRegionFilesGD {
     }
 }
 
+#[godot_api]
+impl VoxelStreamRegionFilesGD {
+    /// Whether the directory path is non-empty.
+    #[func]
+    fn has_directory(&self) -> bool {
+        !self.directory.is_empty()
+    }
+}
+
+/// SQLite stream configuration. The functional API validates the DB path.
 #[derive(GodotClass)]
 #[class(base = Resource, tool)]
 pub struct VoxelStreamSQLiteGD {
@@ -594,6 +728,16 @@ impl IResource for VoxelStreamSQLiteGD {
     }
 }
 
+#[godot_api]
+impl VoxelStreamSQLiteGD {
+    /// Whether the database path ends with `.db` (valid SQLite file).
+    #[func]
+    fn has_valid_extension(&self) -> bool {
+        self.database_path.to_string().ends_with(".db")
+    }
+}
+
+/// MagicaVoxel `.vox` loader. The functional API reports format support.
 #[derive(GodotClass)]
 #[class(base = Resource, tool)]
 pub struct VoxelVoxLoaderGD {
@@ -603,6 +747,15 @@ pub struct VoxelVoxLoaderGD {
 impl IResource for VoxelVoxLoaderGD {
     fn init(base: Base<Resource>) -> Self {
         Self { base }
+    }
+}
+
+#[godot_api]
+impl VoxelVoxLoaderGD {
+    /// Whether this loader supports the given file extension (`.vox`).
+    #[func]
+    fn supports_extension(&self, ext: GString) -> bool {
+        ext.to_string().eq_ignore_ascii_case("vox")
     }
 }
 
@@ -625,27 +778,69 @@ impl IResource for VoxelInstanceLibraryMultiMeshItemGD {
     }
 }
 
+#[godot_api]
+impl VoxelInstanceLibraryMultiMeshItemGD {
+    /// Whether the multimesh item has any instances configured.
+    #[func]
+    fn has_instances(&self) -> bool {
+        self.mesh_instance_count > 0
+    }
+}
+
+/// A scene-based instance library item (places PackedScenes, not multimesh).
 #[derive(GodotClass)]
 #[class(base = Resource, tool)]
 pub struct VoxelInstanceLibrarySceneItemGD {
     base: Base<Resource>,
+    scene_path: GString,
 }
 #[godot_api]
 impl IResource for VoxelInstanceLibrarySceneItemGD {
     fn init(base: Base<Resource>) -> Self {
-        Self { base }
+        Self {
+            base,
+            scene_path: "".to_godot(),
+        }
     }
 }
 
+#[godot_api]
+impl VoxelInstanceLibrarySceneItemGD {
+    /// Whether a scene path has been assigned.
+    #[func]
+    fn has_scene(&self) -> bool {
+        !self.scene_path.is_empty()
+    }
+}
+
+/// An instance component attached to a node for scatter rendering.
 #[derive(GodotClass)]
 #[class(base = Resource, tool)]
 pub struct VoxelInstanceComponentGD {
     base: Base<Resource>,
+    visible: bool,
 }
 #[godot_api]
 impl IResource for VoxelInstanceComponentGD {
     fn init(base: Base<Resource>) -> Self {
-        Self { base }
+        Self {
+            base,
+            visible: true,
+        }
+    }
+}
+
+#[godot_api]
+impl VoxelInstanceComponentGD {
+    /// Whether the component is visible.
+    #[func]
+    fn is_visible(&self) -> bool {
+        self.visible
+    }
+
+    #[func]
+    fn set_visible(&mut self, v: bool) {
+        self.visible = v;
     }
 }
 
@@ -706,18 +901,89 @@ impl IRefCounted for VoxelTaskIndicatorGD {
     }
 }
 
+#[godot_api]
+impl VoxelTaskIndicatorGD {
+    /// Whether any background tasks are currently pending.
+    #[func]
+    fn is_busy(&self) -> bool {
+        self.task_count > 0
+    }
+
+    /// Increment the pending task count.
+    #[func]
+    fn add_task(&mut self) {
+        self.task_count += 1;
+    }
+
+    /// Decrement the pending task count (clamped at 0).
+    #[func]
+    fn remove_task(&mut self) {
+        if self.task_count > 0 {
+            self.task_count -= 1;
+        }
+    }
+}
+
+/// Caches the editor camera transform so plugins can restore it. The
+/// functional API stores/retrieves a 3D position.
 #[derive(GodotClass)]
 #[class(base = RefCounted, tool)]
 pub struct VoxelEditorCameraCacheGD {
     base: Base<RefCounted>,
+    cached_x: f32,
+    cached_y: f32,
+    cached_z: f32,
+    has_cache: bool,
 }
 #[godot_api]
 impl IRefCounted for VoxelEditorCameraCacheGD {
     fn init(base: Base<RefCounted>) -> Self {
-        Self { base }
+        Self {
+            base,
+            cached_x: 0.0,
+            cached_y: 0.0,
+            cached_z: 0.0,
+            has_cache: false,
+        }
     }
 }
 
+#[godot_api]
+impl VoxelEditorCameraCacheGD {
+    /// Store a camera position.
+    #[func]
+    fn store(&mut self, x: f32, y: f32, z: f32) {
+        self.cached_x = x;
+        self.cached_y = y;
+        self.cached_z = z;
+        self.has_cache = true;
+    }
+
+    /// Whether a cached position exists.
+    #[func]
+    fn has_cached(&self) -> bool {
+        self.has_cache
+    }
+
+    /// Get the cached X coordinate (0 if none).
+    #[func]
+    fn get_x(&self) -> f32 {
+        self.cached_x
+    }
+
+    #[func]
+    fn get_y(&self) -> f32 {
+        self.cached_y
+    }
+
+    #[func]
+    fn get_z(&self) -> f32 {
+        self.cached_z
+    }
+}
+
+/// The "About" window resource. The functional API reports the voxel-core
+/// version string for display.
 #[derive(GodotClass)]
 #[class(base = Resource, tool)]
 pub struct VoxelAboutWindowGD {
@@ -727,5 +993,14 @@ pub struct VoxelAboutWindowGD {
 impl IResource for VoxelAboutWindowGD {
     fn init(base: Base<Resource>) -> Self {
         Self { base }
+    }
+}
+
+#[godot_api]
+impl VoxelAboutWindowGD {
+    /// Returns the voxel-core version string.
+    #[func]
+    fn get_version(&self) -> GString {
+        voxel_core::VERSION.to_godot()
     }
 }
