@@ -13097,3 +13097,272 @@ mod mesher_uniform_output_parity {
         assert_eq!(out.total_vertex_count(), 0);
     }
 }
+
+// Additional graph: SDF field manipulation patterns.
+#[cfg(test)]
+mod graph_sdf_field_patterns_parity {
+    use voxel_core::generators::graph::{
+        CompiledGraph, CompiledScratch, Graph, GraphInputs, GraphOutput, GraphPort, NodeKind,
+    };
+
+    fn run(g: &Graph) -> f32 {
+        let c = CompiledGraph::compile(g).expect("compile");
+        let xs = [0.0f32];
+        let zs = [0.0f32];
+        let i = GraphInputs {
+            x: &xs,
+            y: 0.0,
+            z: &zs,
+        };
+        let mut s = CompiledScratch::new();
+        let mut o = Vec::new();
+        c.generate_slice(&i, 1, &mut s, &mut o, false);
+        o.into_iter()
+            .find(|(k, _)| *k == GraphOutput::Sdf)
+            .and_then(|(_, v)| v.into_iter().next())
+            .unwrap()
+    }
+
+    #[test]
+    fn subtract_then_add_same_sphere_restores() {
+        let make = |op2: SdfOp| {
+            let mut g = Graph::new();
+            let a = g.push(NodeKind::Constant(-5.0));
+            let b = g.push(NodeKind::Constant(3.0));
+            let sub = g.push(NodeKind::SdfSubtract {
+                a: Some(GraphPort { node: a, output: 0 }),
+                b: Some(GraphPort { node: b, output: 0 }),
+            });
+            let c = g.push(NodeKind::Constant(3.0));
+            let final_node = match op2 {
+                SdfOp::Add => g.push(NodeKind::SdfUnion {
+                    a: Some(GraphPort {
+                        node: sub,
+                        output: 0,
+                    }),
+                    b: Some(GraphPort { node: c, output: 0 }),
+                }),
+                SdfOp::Sub => g.push(NodeKind::SdfSubtract {
+                    a: Some(GraphPort {
+                        node: sub,
+                        output: 0,
+                    }),
+                    b: Some(GraphPort { node: c, output: 0 }),
+                }),
+            };
+            g.push(NodeKind::OutputSdf {
+                a: Some(GraphPort {
+                    node: final_node,
+                    output: 0,
+                }),
+            });
+            g
+        };
+        // subtract(-5, 3) = max(-5, -3) = -3. Then union(-3, 3) = min(-3, 3) = -3.
+        let after_add = run(&make(SdfOp::Add));
+        assert!(
+            (after_add - (-3.0)).abs() < 1e-5,
+            "sub then add: {after_add}"
+        );
+    }
+
+    enum SdfOp {
+        Add,
+        Sub,
+    }
+
+    #[test]
+    fn nested_smooth_union_all_finite() {
+        let mut g = Graph::new();
+        let na = g.push(NodeKind::Constant(-1.0));
+        let nb = g.push(NodeKind::Constant(1.0));
+        let su1 = g.push(NodeKind::SdfSmoothUnion {
+            a: Some(GraphPort {
+                node: na,
+                output: 0,
+            }),
+            b: Some(GraphPort {
+                node: nb,
+                output: 0,
+            }),
+            smoothness: 0.5,
+        });
+        let nc = g.push(NodeKind::Constant(-2.0));
+        let su2 = g.push(NodeKind::SdfSmoothUnion {
+            a: Some(GraphPort {
+                node: su1,
+                output: 0,
+            }),
+            b: Some(GraphPort {
+                node: nc,
+                output: 0,
+            }),
+            smoothness: 0.3,
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort {
+                node: su2,
+                output: 0,
+            }),
+        });
+        assert!(run(&g).is_finite());
+    }
+
+    #[test]
+    fn max_of_same_values() {
+        let mut g = Graph::new();
+        let na = g.push(NodeKind::Constant(5.0));
+        let nb = g.push(NodeKind::Constant(5.0));
+        let m = g.push(NodeKind::Max {
+            a: Some(GraphPort {
+                node: na,
+                output: 0,
+            }),
+            b: Some(GraphPort {
+                node: nb,
+                output: 0,
+            }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: m, output: 0 }),
+        });
+        assert!((run(&g) - 5.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn min_of_same_values() {
+        let mut g = Graph::new();
+        let na = g.push(NodeKind::Constant(5.0));
+        let nb = g.push(NodeKind::Constant(5.0));
+        let m = g.push(NodeKind::Min {
+            a: Some(GraphPort {
+                node: na,
+                output: 0,
+            }),
+            b: Some(GraphPort {
+                node: nb,
+                output: 0,
+            }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: m, output: 0 }),
+        });
+        assert!((run(&g) - 5.0).abs() < 1e-5);
+    }
+}
+
+// Additional scatter: scale range edge cases.
+#[cfg(test)]
+mod scatter_scale_range_parity {
+    use voxel_core::instancing::scatter::{InstanceGenerator, RandomScatterGenerator};
+    use voxel_core::instancing::ScatterConfig;
+    use voxel_core::math::Vector3f;
+
+    #[test]
+    fn wide_scale_range_produces_variation() {
+        let gen = RandomScatterGenerator {
+            density: 1.0,
+            min_scale: 0.1,
+            max_scale: 10.0,
+            snap_to_normal: false,
+        };
+        let positions: Vec<_> = (0..30).map(|i| Vector3f::new(i as f32, 0.0, 0.0)).collect();
+        let normals = vec![Vector3f::new(0.0, 1.0, 0.0); 30];
+        let result = gen.generate(&positions, &normals, 0, &ScatterConfig::default());
+        let scales: Vec<f32> = result.iter().map(|i| i.scale).collect();
+        let min_s = scales.iter().cloned().fold(f32::INFINITY, f32::min);
+        let max_s = scales.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            max_s > min_s,
+            "wide range should produce variation: {min_s}..{max_s}"
+        );
+    }
+
+    #[test]
+    fn narrow_scale_range_small_spread() {
+        let gen = RandomScatterGenerator {
+            density: 1.0,
+            min_scale: 0.9,
+            max_scale: 1.1,
+            snap_to_normal: false,
+        };
+        let positions: Vec<_> = (0..30).map(|i| Vector3f::new(i as f32, 0.0, 0.0)).collect();
+        let normals = vec![Vector3f::new(0.0, 1.0, 0.0); 30];
+        let result = gen.generate(&positions, &normals, 0, &ScatterConfig::default());
+        for inst in &result {
+            assert!(
+                inst.scale >= 0.9 && inst.scale <= 1.1,
+                "narrow scale out of range: {}",
+                inst.scale
+            );
+        }
+    }
+}
+
+// Additional math: ceildiv edge cases.
+#[cfg(test)]
+mod ceildiv_edge_parity {
+    use voxel_core::math::funcs;
+
+    #[test]
+    fn ceildiv_exact_division() {
+        assert_eq!(funcs::ceildiv(100, 10), 10);
+        assert_eq!(funcs::ceildiv(0, 5), 0);
+    }
+
+    #[test]
+    fn ceildiv_rounds_up() {
+        assert_eq!(funcs::ceildiv(1, 3), 1);
+        assert_eq!(funcs::ceildiv(2, 3), 1);
+        assert_eq!(funcs::ceildiv(3, 3), 1);
+        assert_eq!(funcs::ceildiv(4, 3), 2);
+    }
+
+    #[test]
+    fn wrap_negative_to_positive() {
+        assert_eq!(funcs::wrap_i32(-1, 5), 4);
+        assert_eq!(funcs::wrap_i32(-6, 5), 4);
+        assert_eq!(funcs::wrap_i32(-5, 5), 0);
+    }
+
+    #[test]
+    fn smoothstep_edges() {
+        assert!((funcs::smoothstep_f32(0.0, 10.0, -1.0) - 0.0).abs() < 1e-5);
+        assert!((funcs::smoothstep_f32(0.0, 10.0, 11.0) - 1.0).abs() < 1e-5);
+    }
+}
+
+// Additional buffer: size + depth combination patterns.
+#[cfg(test)]
+mod buffer_size_depth_parity {
+    use voxel_core::math::Vector3i;
+    use voxel_core::storage::{ChannelDepth, VoxelBuffer, VoxelFormat};
+
+    #[test]
+    fn small_buffer_bit8_reads_back() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(2));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[0] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        buf.fill(42, 0);
+        assert_eq!(buf.get_voxel(0, 0, 0, 0), 42);
+        assert_eq!(buf.get_voxel(1, 1, 1, 0), 42);
+    }
+
+    #[test]
+    fn large_buffer_bit16_reads_back() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(16));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[0] = ChannelDepth::Bit16;
+        fmt.configure_buffer(&mut buf);
+        buf.fill(1000, 0);
+        assert_eq!(buf.get_voxel(0, 0, 0, 0), 1000);
+        assert_eq!(buf.get_voxel(15, 15, 15, 0), 1000);
+    }
+
+    #[test]
+    fn rectangular_buffer_size() {
+        let buf = VoxelBuffer::with_size(Vector3i::new(4, 8, 2));
+        assert_eq!(buf.size(), Vector3i::new(4, 8, 2));
+    }
+}
