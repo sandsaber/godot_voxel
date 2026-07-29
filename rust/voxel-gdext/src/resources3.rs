@@ -325,6 +325,8 @@ impl VoxelBlockyModelCubeGD {
     }
 }
 
+/// An empty (air) blocky model. `to_baked_model` produces the default empty
+/// model (empty=true, no geometry), the sentinel for passable cells.
 #[derive(GodotClass)]
 #[class(base = Resource, tool)]
 pub struct VoxelBlockyModelEmptyGD {
@@ -337,27 +339,138 @@ impl IResource for VoxelBlockyModelEmptyGD {
     }
 }
 
+#[godot_api]
+impl VoxelBlockyModelEmptyGD {
+    /// Whether this model represents air (always true for the empty model).
+    #[func]
+    fn is_air(&self) -> bool {
+        true
+    }
+}
+
+impl VoxelBlockyModelEmptyGD {
+    /// Produce the engine-agnostic empty [`BakedModel`] (air sentinel).
+    #[allow(dead_code)]
+    pub fn to_baked_model(&self) -> voxel_core::meshers::blocky::BakedModel {
+        voxel_core::meshers::blocky::BakedModel::default() // empty == true
+    }
+}
+
+/// A mesh-based blocky model. `to_baked_model` produces a solid model with
+/// the configured transparency and color, ready for the blocky mesher.
 #[derive(GodotClass)]
 #[class(base = Resource, tool)]
 pub struct VoxelBlockyModelMeshGD {
     base: Base<Resource>,
+    #[var]
+    r: f32,
+    #[var]
+    g: f32,
+    #[var]
+    b: f32,
+    #[var]
+    transparent: bool,
 }
 #[godot_api]
 impl IResource for VoxelBlockyModelMeshGD {
     fn init(base: Base<Resource>) -> Self {
-        Self { base }
+        Self {
+            base,
+            r: 0.7,
+            g: 0.7,
+            b: 0.7,
+            transparent: false,
+        }
     }
 }
 
+#[godot_api]
+impl VoxelBlockyModelMeshGD {
+    /// Whether this mesh model is transparent.
+    #[func]
+    fn is_transparent(&self) -> bool {
+        self.transparent
+    }
+
+    #[func]
+    fn set_color(&mut self, r: f32, g: f32, b: f32) {
+        self.r = r;
+        self.g = g;
+        self.b = b;
+    }
+}
+
+impl VoxelBlockyModelMeshGD {
+    /// Produce the engine-agnostic solid [`BakedModel`] for this mesh.
+    #[allow(dead_code)]
+    pub fn to_baked_model(&self) -> voxel_core::meshers::blocky::BakedModel {
+        let mut m = voxel_core::meshers::blocky::BakedModel {
+            color: voxel_core::math::Color::from_rgb(self.r, self.g, self.b),
+            empty: false,
+            culls_neighbors: !self.transparent,
+            is_transparent: self.transparent,
+            ..voxel_core::meshers::blocky::BakedModel::default()
+        };
+        if self.transparent {
+            m.transparency_index = 1;
+        }
+        m
+    }
+}
+
+/// A fluid blocky model (water/lava). `to_baked_model` produces a model
+/// flagged as fluid with the given fluid level and flow parameters.
 #[derive(GodotClass)]
 #[class(base = Resource, tool)]
 pub struct VoxelBlockyModelFluidGD {
     base: Base<Resource>,
+    /// Fluid level (0-8). Plain field exposed via get/set_fluid_level #[func]s.
+    fluid_level: i32,
 }
 #[godot_api]
 impl IResource for VoxelBlockyModelFluidGD {
     fn init(base: Base<Resource>) -> Self {
-        Self { base }
+        Self {
+            base,
+            fluid_level: 8,
+        }
+    }
+}
+
+#[godot_api]
+impl VoxelBlockyModelFluidGD {
+    /// Get the fluid level (0-8).
+    #[func]
+    fn get_fluid_level(&self) -> i32 {
+        self.fluid_level
+    }
+
+    /// Set the fluid level (clamped 0-8).
+    #[func]
+    fn set_fluid_level(&mut self, level: i32) {
+        self.fluid_level = level.clamp(0, 8);
+    }
+
+    /// Whether this is a fluid model.
+    #[func]
+    fn is_fluid(&self) -> bool {
+        true
+    }
+}
+
+impl VoxelBlockyModelFluidGD {
+    /// Produce the engine-agnostic fluid-flagged [`BakedModel`].
+    #[allow(dead_code)]
+    pub fn to_baked_model(&self) -> voxel_core::meshers::blocky::BakedModel {
+        voxel_core::meshers::blocky::BakedModel {
+            color: voxel_core::math::Color::from_rgb(0.2, 0.4, 0.8),
+            empty: false,
+            is_transparent: true,
+            transparency_index: 1,
+            fluid_index: 0,
+            fluid_level: self.fluid_level.clamp(0, 255) as u8,
+            ..voxel_core::meshers::blocky::BakedModel::default()
+        }
     }
 }
 

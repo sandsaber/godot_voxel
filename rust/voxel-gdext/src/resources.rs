@@ -412,6 +412,21 @@ impl IRefCounted for VoxelDataBlockEnterInfoGD {
     }
 }
 
+#[godot_api]
+impl VoxelDataBlockEnterInfoGD {
+    /// Whether this block is at the world origin (0,0,0).
+    #[func]
+    fn is_at_origin(&self) -> bool {
+        self.block_x == 0 && self.block_y == 0 && self.block_z == 0
+    }
+
+    /// The LOD level of this block.
+    #[func]
+    fn get_lod_level(&self) -> i32 {
+        self.lod
+    }
+}
+
 // ---------------------------------------------------------------------------
 // VoxelInstanceLibraryGD — Resource for instance library
 // ---------------------------------------------------------------------------

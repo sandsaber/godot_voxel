@@ -3271,3 +3271,362 @@ mod storage_compression_parity {
         assert_eq!(buf.get_voxel(0, 0, 0, ChannelId::Type.index()), 9);
     }
 }
+
+#[cfg(test)]
+mod graph_edge_cases_parity {
+    use voxel_core::generators::graph::{
+        CompiledGraph, CompiledScratch, Graph, GraphInputs, GraphOutput, GraphPort, NodeKind,
+    };
+
+    fn run(g: &Graph) -> f32 {
+        let c = CompiledGraph::compile(g).expect("compile");
+        let xs = [0.0f32];
+        let zs = [0.0f32];
+        let i = GraphInputs {
+            x: &xs,
+            y: 0.0,
+            z: &zs,
+        };
+        let mut s = CompiledScratch::new();
+        let mut o = Vec::new();
+        c.generate_slice(&i, 1, &mut s, &mut o, false);
+        o.into_iter()
+            .find(|(k, _)| *k == GraphOutput::Sdf)
+            .and_then(|(_, v)| v.into_iter().next())
+            .unwrap()
+    }
+
+    #[test]
+    fn graph_divide_by_zero_yields_zero() {
+        let mut g = Graph::new();
+        let na = g.push(NodeKind::Constant(10.0));
+        let nb = g.push(NodeKind::Constant(0.0));
+        let d = g.push(NodeKind::Divide {
+            a: Some(GraphPort {
+                node: na,
+                output: 0,
+            }),
+            b: Some(GraphPort {
+                node: nb,
+                output: 0,
+            }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: d, output: 0 }),
+        });
+        assert_eq!(run(&g), 0.0, "divide by zero should yield 0");
+    }
+
+    #[test]
+    fn graph_sqrt_negative_is_finite() {
+        let mut g = Graph::new();
+        let na = g.push(NodeKind::Constant(-4.0));
+        let s = g.push(NodeKind::Sqrt {
+            a: Some(GraphPort {
+                node: na,
+                output: 0,
+            }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: s, output: 0 }),
+        });
+        let v = run(&g);
+        assert!(v.is_finite(), "sqrt(-4) should be finite, got {v}");
+    }
+
+    #[test]
+    fn graph_abs_of_negative() {
+        let mut g = Graph::new();
+        let na = g.push(NodeKind::Constant(-3.5));
+        let a = g.push(NodeKind::Abs {
+            a: Some(GraphPort {
+                node: na,
+                output: 0,
+            }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: a, output: 0 }),
+        });
+        assert!((run(&g) - 3.5).abs() < 1e-5, "abs(-3.5)");
+    }
+
+    #[test]
+    fn graph_multiply_by_zero() {
+        let mut g = Graph::new();
+        let na = g.push(NodeKind::Constant(42.0));
+        let nb = g.push(NodeKind::Constant(0.0));
+        let m = g.push(NodeKind::Multiply {
+            a: Some(GraphPort {
+                node: na,
+                output: 0,
+            }),
+            b: Some(GraphPort {
+                node: nb,
+                output: 0,
+            }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: m, output: 0 }),
+        });
+        assert_eq!(run(&g), 0.0, "42 * 0 should be 0");
+    }
+
+    #[test]
+    fn graph_without_output_produces_no_sdf() {
+        let mut g = Graph::new();
+        g.push(NodeKind::Constant(5.0));
+        let compiled = CompiledGraph::compile(&g).expect("compile");
+        let xs = [0.0f32];
+        let zs = [0.0f32];
+        let i = GraphInputs {
+            x: &xs,
+            y: 0.0,
+            z: &zs,
+        };
+        let mut s = CompiledScratch::new();
+        let mut o = Vec::new();
+        compiled.generate_slice(&i, 1, &mut s, &mut o, false);
+        assert!(
+            o.iter().all(|(k, _)| *k != GraphOutput::Sdf),
+            "no OutputSdf → no SDF output"
+        );
+    }
+}
+
+#[cfg(test)]
+mod transvoxel_boundary_parity {
+    use voxel_core::math::Vector3i;
+    use voxel_core::meshers::{MesherInput, MesherOutput, TransvoxelMesher, VoxelMesher};
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
+
+    #[test]
+    fn centered_sphere_transition_does_not_lose_geometry() {
+        let mesher = TransvoxelMesher::new();
+        let mut voxels = VoxelBuffer::with_size(Vector3i::splat(16));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+        fmt.configure_buffer(&mut voxels);
+        let c = 8.0f32;
+        for z in 0..16 {
+            for y in 0..16 {
+                for x in 0..16 {
+                    let d =
+                        ((x as f32 - c).powi(2) + (y as f32 - c).powi(2) + (z as f32 - c).powi(2))
+                            .sqrt()
+                            - 7.0;
+                    voxels.set_voxel_f(d, x, y, z, ChannelId::Sdf.index());
+                }
+            }
+        }
+        let mut out_no = MesherOutput::default();
+        let mut inp = MesherInput::new(&voxels, Vector3i::zero(), 0);
+        inp.lod_hint = false;
+        mesher.build(&mut out_no, &inp);
+        let mut out_lod = MesherOutput::default();
+        let mut inp2 = MesherInput::new(&voxels, Vector3i::zero(), 0);
+        inp2.lod_hint = true;
+        mesher.build(&mut out_lod, &inp2);
+        assert!(out_lod.total_vertex_count() >= out_no.total_vertex_count());
+        assert!(out_no.total_vertex_count() > 0, "should have geometry");
+    }
+
+    #[test]
+    fn plane_at_boundary_runs_without_panic() {
+        let mesher = TransvoxelMesher::new();
+        let mut voxels = VoxelBuffer::with_size(Vector3i::splat(16));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+        fmt.configure_buffer(&mut voxels);
+        for z in 0..16 {
+            for y in 0..16 {
+                for x in 0..16 {
+                    voxels.set_voxel_f(y as f32, x, y, z, ChannelId::Sdf.index());
+                }
+            }
+        }
+        let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+        let mut out = MesherOutput::default();
+        mesher.build(&mut out, &input);
+        let _ = out.total_vertex_count();
+    }
+
+    #[test]
+    fn inverted_sphere_shell_produces_geometry() {
+        let mesher = TransvoxelMesher::new();
+        let mut voxels = VoxelBuffer::with_size(Vector3i::splat(16));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+        fmt.configure_buffer(&mut voxels);
+        let c = 8.0f32;
+        for z in 0..16 {
+            for y in 0..16 {
+                for x in 0..16 {
+                    let d = 5.0
+                        - ((x as f32 - c).powi(2)
+                            + (y as f32 - c).powi(2)
+                            + (z as f32 - c).powi(2))
+                        .sqrt();
+                    voxels.set_voxel_f(d, x, y, z, ChannelId::Sdf.index());
+                }
+            }
+        }
+        let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+        let mut out = MesherOutput::default();
+        mesher.build(&mut out, &input);
+        assert!(
+            out.total_vertex_count() > 0,
+            "inverted sphere shell should produce geometry"
+        );
+    }
+}
+
+#[cfg(test)]
+mod multi_library_scatter_parity {
+    use voxel_core::instancing::library::{InstanceLibrary, InstanceLibraryItem};
+    use voxel_core::instancing::scatter::{InstanceGenerator, RandomScatterGenerator};
+    use voxel_core::instancing::ScatterConfig;
+    use voxel_core::math::Vector3f;
+
+    #[test]
+    fn library_scatter_assigns_correct_item_indices() {
+        let mut lib = InstanceLibrary::default();
+        lib.items.push(InstanceLibraryItem {
+            name: "trees".into(),
+            density: 1.0,
+            min_scale: 1.0,
+            max_scale: 1.0,
+            snap_to_normal: false,
+            ..Default::default()
+        });
+        lib.items.push(InstanceLibraryItem {
+            name: "rocks".into(),
+            density: 0.5,
+            min_scale: 0.5,
+            max_scale: 1.0,
+            snap_to_normal: false,
+            ..Default::default()
+        });
+        assert_eq!(lib.items.len(), 2);
+        let positions: Vec<_> = (0..20).map(|i| Vector3f::new(i as f32, 0.0, 0.0)).collect();
+        let normals = vec![Vector3f::new(0.0, 1.0, 0.0); 20];
+        let config = ScatterConfig::default();
+        for (idx, item) in lib.items.iter().enumerate() {
+            let gen = RandomScatterGenerator {
+                density: item.density,
+                min_scale: item.min_scale,
+                max_scale: item.max_scale,
+                snap_to_normal: item.snap_to_normal,
+            };
+            let result = gen.generate(&positions, &normals, idx as u32, &config);
+            for inst in &result {
+                assert_eq!(inst.item_index as usize, idx, "item_index mismatch");
+            }
+        }
+    }
+
+    #[test]
+    fn library_items_with_different_density_differ() {
+        let positions: Vec<_> = (0..100)
+            .map(|i| Vector3f::new(i as f32, 0.0, 0.0))
+            .collect();
+        let normals = vec![Vector3f::new(0.0, 1.0, 0.0); 100];
+        let config = ScatterConfig::default();
+        let high = RandomScatterGenerator {
+            density: 0.9,
+            min_scale: 1.0,
+            max_scale: 1.0,
+            snap_to_normal: false,
+        }
+        .generate(&positions, &normals, 0, &config)
+        .len();
+        let low = RandomScatterGenerator {
+            density: 0.1,
+            min_scale: 1.0,
+            max_scale: 1.0,
+            snap_to_normal: false,
+        }
+        .generate(&positions, &normals, 1, &config)
+        .len();
+        assert!(
+            high > low,
+            "higher density item should produce more: {high} vs {low}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod block_serializer_v4_parity {
+    use voxel_core::math::Vector3i;
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
+    use voxel_core::streams::block_serializer;
+    use voxel_core::streams::compressed_data::Compression;
+    use voxel_core::streams::decode_limits::DecodeLimits;
+
+    #[test]
+    fn block_v4_lz4_round_trips_sdf() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(16));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+        fmt.configure_buffer(&mut buf);
+        buf.clear_channel_f(ChannelId::Sdf.index(), -1.5);
+        let mut payload = Vec::new();
+        block_serializer::serialize_and_compress(&buf, &mut payload, Compression::Lz4).unwrap();
+        assert!(!payload.is_empty());
+        let mut buf2 = VoxelBuffer::with_size(Vector3i::splat(16));
+        fmt.configure_buffer(&mut buf2);
+        let status = block_serializer::decompress_and_deserialize_with_limits(
+            &payload,
+            &mut buf2,
+            DecodeLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(status, block_serializer::DeserializeStatus::Complete);
+        let val = buf2.get_voxel_f(4, 4, 4, ChannelId::Sdf.index());
+        assert!((val - (-1.5)).abs() < 1e-5, "v4 LZ4 SDF round-trip: {val}");
+    }
+
+    #[test]
+    fn block_format_version_is_4() {
+        assert_eq!(block_serializer::BLOCK_FORMAT_VERSION, 4);
+    }
+
+    #[test]
+    fn block_v4_none_round_trips() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        buf.fill(7, ChannelId::Type.index());
+        let mut payload = Vec::new();
+        block_serializer::serialize_and_compress(&buf, &mut payload, Compression::None).unwrap();
+        let mut buf2 = VoxelBuffer::with_size(Vector3i::splat(8));
+        fmt.configure_buffer(&mut buf2);
+        block_serializer::decompress_and_deserialize_with_limits(
+            &payload,
+            &mut buf2,
+            DecodeLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(buf2.get_voxel(0, 0, 0, ChannelId::Type.index()), 7);
+    }
+
+    #[test]
+    fn block_v4_lz4be_round_trips() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        buf.fill(3, ChannelId::Type.index());
+        let mut payload = Vec::new();
+        block_serializer::serialize_and_compress(&buf, &mut payload, Compression::Lz4Be).unwrap();
+        let mut buf2 = VoxelBuffer::with_size(Vector3i::splat(8));
+        fmt.configure_buffer(&mut buf2);
+        block_serializer::decompress_and_deserialize_with_limits(
+            &payload,
+            &mut buf2,
+            DecodeLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(buf2.get_voxel(3, 3, 3, ChannelId::Type.index()), 3);
+    }
+}

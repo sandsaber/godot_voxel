@@ -535,11 +535,16 @@ impl VoxelBlockSerializerGD {
 // VoxelCompressedDataGD — RefCounted for LZ4/ZSTD payloads
 // ---------------------------------------------------------------------------
 /// Compressed voxel data envelope (LZ4/ZSTD). Used by region files.
+///
+/// The functional API runs real compression/decompression via
+/// [`voxel_core::streams::compressed_data`]: `compress_bytes` LZ4-compresses a
+/// byte array and `decompress_bytes` restores it.
 #[derive(GodotClass)]
 #[class(base = RefCounted, tool)]
 pub struct VoxelCompressedDataGD {
     base: Base<RefCounted>,
-    #[var]
+    /// Compression mode: 0=None, 1=Lz4Be, 2=Lz4. Plain field exposed via
+    /// `get/set_compression_mode` #[func]s.
     compression_mode: i32,
 }
 #[godot_api]
@@ -547,8 +552,64 @@ impl IRefCounted for VoxelCompressedDataGD {
     fn init(base: Base<RefCounted>) -> Self {
         Self {
             base,
-            compression_mode: 0,
+            compression_mode: 2,
         }
+    }
+}
+
+#[godot_api]
+impl VoxelCompressedDataGD {
+    /// Compression mode getter.
+    #[func]
+    fn get_compression_mode(&self) -> i32 {
+        self.compression_mode
+    }
+
+    #[func]
+    fn set_compression_mode(&mut self, mode: i32) {
+        self.compression_mode = mode;
+    }
+
+    /// Compress a byte array with the configured mode and return the
+    /// compressed bytes. Returns an empty array on error.
+    #[func]
+    fn compress_bytes(&self, data: PackedByteArray) -> PackedByteArray {
+        let comp = compression_from_mode(self.compression_mode);
+        let mut out = Vec::new();
+        match voxel_core::streams::compressed_data::compress(data.as_slice(), &mut out, comp) {
+            Ok(()) => PackedByteArray::from(out.as_slice()),
+            Err(_) => PackedByteArray::new(),
+        }
+    }
+
+    /// Decompress a byte array (compressed with the configured mode) and
+    /// return the original bytes. Returns an empty array on error.
+    #[func]
+    fn decompress_bytes(&self, data: PackedByteArray) -> PackedByteArray {
+        let comp = compression_from_mode(self.compression_mode);
+        let mut out = Vec::new();
+        let limits = voxel_core::streams::decode_limits::DecodeLimits::default();
+        match voxel_core::streams::compressed_data::decompress_with_limits(
+            data.as_slice(),
+            &mut out,
+            limits,
+        ) {
+            Ok(()) if comp != compression_from_mode(self.compression_mode) => {
+                PackedByteArray::new()
+            }
+            Ok(()) => PackedByteArray::from(out.as_slice()),
+            Err(_) => PackedByteArray::new(),
+        }
+    }
+}
+
+/// Map an integer mode to a `Compression` variant.
+fn compression_from_mode(mode: i32) -> voxel_core::streams::compressed_data::Compression {
+    use voxel_core::streams::compressed_data::Compression;
+    match mode {
+        0 => Compression::None,
+        1 => Compression::Lz4Be,
+        _ => Compression::Lz4,
     }
 }
 
