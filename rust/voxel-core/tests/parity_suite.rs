@@ -583,3 +583,225 @@ mod edition_parity {
         assert_eq!(h.normal, Vector3i::new(-1, 0, 0));
     }
 }
+
+#[cfg(test)]
+mod streams_parity {
+    use voxel_core::math::Vector3i;
+    use voxel_core::storage::{ChannelId, VoxelBuffer, VoxelFormat};
+
+    #[test]
+    #[test]
+    fn block_serializer_compressed_round_trip() {
+        use voxel_core::streams::block_serializer;
+        let mut buf = VoxelBuffer::with_size(Vector3i::new(8, 8, 8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Sdf.index()] = voxel_core::storage::ChannelDepth::Bit32;
+        fmt.configure_buffer(&mut buf);
+        buf.clear_channel_f(ChannelId::Sdf.index(), -3.0);
+
+        let mut compressed = Vec::new();
+        block_serializer::serialize_and_compress(
+            &buf,
+            &mut compressed,
+            voxel_core::streams::compressed_data::Compression::Lz4,
+        )
+        .unwrap();
+        assert!(!compressed.is_empty());
+
+        let mut buf2 = VoxelBuffer::with_size(Vector3i::new(8, 8, 8));
+        fmt.configure_buffer(&mut buf2);
+        let status = block_serializer::decompress_and_deserialize_with_limits(
+            &compressed,
+            &mut buf2,
+            voxel_core::streams::decode_limits::DecodeLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(status, block_serializer::DeserializeStatus::Complete);
+
+        let val = buf2.get_voxel_f(4, 4, 4, ChannelId::Sdf.index());
+        assert!(
+            (val - (-3.0)).abs() < 1e-5,
+            "compressed round-trip: expected -3.0, got {val}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod terrain_parity {
+    use std::sync::Arc;
+    use voxel_core::engine::MeshingDependency;
+    use voxel_core::generators::simple::Flat;
+    use voxel_core::math::{Box3i, Vector3i};
+    use voxel_core::meshers::TransvoxelMesher;
+    use voxel_core::storage::VoxelData;
+    use voxel_core::terrain::{ViewerUpdate, VoxelTerrainCore};
+
+    #[test]
+    fn single_lod_terrain_paging_converges_with_viewer() {
+        let mut data = VoxelData::new();
+        data.set_bounds(Box3i::new(Vector3i::splat(-512), Vector3i::splat(2048)));
+        data.set_streaming_enabled(false);
+        data.set_full_load_completed(true);
+        let gen: voxel_core::storage::SharedVoxelGenerator = Arc::new(Flat::default());
+        data.set_generator(Some(gen));
+        let mesher = Arc::new(TransvoxelMesher::new());
+        let dep = MeshingDependency::new(mesher, None);
+        let mut core = VoxelTerrainCore::new_generator_only(data, dep);
+
+        // Run several ticks with a viewer at origin.
+        let viewers = vec![ViewerUpdate {
+            id: 0,
+            world_position_voxels: Vector3i::zero(),
+            horizontal_view_distance_voxels: 48,
+            vertical_view_distance_voxels: 48,
+            requires_meshes: true,
+        }];
+        for _ in 0..20 {
+            core.process(&viewers);
+        }
+
+        // Should have mesh blocks loaded.
+        assert!(
+            core.mesh_blocks().len() > 0,
+            "terrain should have loaded mesh blocks after convergence"
+        );
+    }
+
+    #[test]
+    fn multi_lod_terrain_produces_blocks_at_both_lods() {
+        let mut data = VoxelData::new();
+        data.set_bounds(Box3i::new(Vector3i::splat(-512), Vector3i::splat(2048)));
+        data.set_streaming_enabled(false);
+        data.set_full_load_completed(true);
+        let gen: voxel_core::storage::SharedVoxelGenerator = Arc::new(Flat::default());
+        data.set_generator(Some(gen));
+        let mesher = Arc::new(TransvoxelMesher::new());
+        let dep = MeshingDependency::new(mesher, None);
+        let stream: Arc<dyn voxel_core::streams::VoxelStream> =
+            Arc::new(voxel_core::streams::MemoryStream::new());
+        let mut core = VoxelTerrainCore::new_with_lod_count(data, stream, dep, 2);
+
+        let viewers = vec![ViewerUpdate {
+            id: 0,
+            world_position_voxels: Vector3i::zero(),
+            horizontal_view_distance_voxels: 48,
+            vertical_view_distance_voxels: 48,
+            requires_meshes: true,
+        }];
+        for _ in 0..20 {
+            core.process(&viewers);
+        }
+
+        let lod0 = core.mesh_blocks_at_lod(0).len();
+        let lod1 = core.mesh_blocks_at_lod(1).len();
+        assert!(lod0 > 0, "LOD 0 should have blocks: {lod0}");
+        assert!(lod1 > 0, "LOD 1 should have blocks: {lod1}");
+    }
+}
+
+#[cfg(test)]
+mod lod_transition_parity {
+    use voxel_core::math::Vector3i;
+    use voxel_core::meshers::{MesherInput, MesherOutput, TransvoxelMesher, VoxelMesher};
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
+
+    #[test]
+    fn lod_hint_produces_more_vertices_than_without() {
+        // A large sphere that intersects block boundaries — transition
+        // meshes should add extra geometry on the LOD seam faces.
+        let mesher = TransvoxelMesher::new();
+
+        // Create a large sphere SDF.
+        let mut voxels = VoxelBuffer::with_size(Vector3i::splat(16));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+        fmt.configure_buffer(&mut voxels);
+        let cx = 8.0f32;
+        for z in 0..16 {
+            for y in 0..16 {
+                for x in 0..16 {
+                    let d = ((x as f32 - cx).powi(2)
+                        + (y as f32 - cx).powi(2)
+                        + (z as f32 - cx).powi(2))
+                    .sqrt()
+                        - 12.0;
+                    voxels.set_voxel_f(d, x, y, z, ChannelId::Sdf.index());
+                }
+            }
+        }
+
+        // Without lod_hint.
+        let mut input_no_lod = MesherInput::new(&voxels, Vector3i::zero(), 0);
+        input_no_lod.lod_hint = false;
+        let mut out_no_lod = MesherOutput::default();
+        mesher.build(&mut out_no_lod, &input_no_lod);
+        let verts_no_lod = out_no_lod.total_vertex_count();
+
+        // With lod_hint.
+        let mut input_lod = MesherInput::new(&voxels, Vector3i::zero(), 0);
+        input_lod.lod_hint = true;
+        let mut out_lod = MesherOutput::default();
+        mesher.build(&mut out_lod, &input_lod);
+        let verts_lod = out_lod.total_vertex_count();
+
+        assert!(
+            verts_lod > verts_no_lod,
+            "lod_hint should produce more vertices (transition geometry): {verts_lod} vs {verts_no_lod}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod instancing_parity {
+    use voxel_core::instancing::scatter::{InstanceGenerator, RandomScatterGenerator};
+    use voxel_core::instancing::ScatterConfig;
+    use voxel_core::math::Vector3f;
+
+    #[test]
+    fn scatter_output_has_valid_transforms() {
+        let gen = RandomScatterGenerator {
+            density: 1.0,
+            min_scale: 0.5,
+            max_scale: 1.5,
+            snap_to_normal: true,
+        };
+        let positions: Vec<_> = (0..20)
+            .map(|i| Vector3f::new(i as f32 * 2.0, 10.0, 0.0))
+            .collect();
+        let normals = vec![Vector3f::new(0.0, 1.0, 0.0); 20];
+        let config = ScatterConfig::default();
+        let result = gen.generate(&positions, &normals, 0, &config);
+
+        assert!(result.len() > 0, "should produce instances");
+        for instance in &result {
+            assert!(
+                instance.scale >= 0.5 && instance.scale <= 1.5,
+                "scale out of range: {}",
+                instance.scale
+            );
+            assert_eq!(instance.item_index, 0, "item_index should be 0");
+            // Rotation quaternion should be normalized (w² + x² + y² + z² ≈ 1).
+            let r = &instance.rotation;
+            let len_sq = r[0] * r[0] + r[1] * r[1] + r[2] * r[2] + r[3] * r[3];
+            assert!(
+                (len_sq - 1.0).abs() < 0.01,
+                "quaternion not normalized: len_sq={len_sq}"
+            );
+        }
+    }
+
+    #[test]
+    fn scatter_respects_density() {
+        let gen = RandomScatterGenerator {
+            density: 0.0, // Accept nothing
+            min_scale: 1.0,
+            max_scale: 1.0,
+            snap_to_normal: false,
+        };
+        let positions = vec![Vector3f::new(0.0, 0.0, 0.0); 100];
+        let normals = vec![Vector3f::new(0.0, 1.0, 0.0); 100];
+        let config = ScatterConfig::default();
+        let result = gen.generate(&positions, &normals, 0, &config);
+        assert_eq!(result.len(), 0, "density=0 should produce no instances");
+    }
+}
