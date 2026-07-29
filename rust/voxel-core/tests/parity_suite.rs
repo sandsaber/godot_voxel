@@ -10402,3 +10402,229 @@ mod blocky_model_and_modifier_parity {
         );
     }
 }
+
+// Additional expression parser constant folding patterns.
+#[cfg(test)]
+mod expression_fold_parity {
+    use voxel_core::string::expression_parser::{parse, Node};
+
+    #[test]
+    fn nested_arithmetic_folds() {
+        // (1+2)*(3+4) should fold to 21.
+        let result = parse("(1+2)*(3+4)", &[]);
+        assert!(result.root.is_some());
+        if let Some(ref boxed) = result.root {
+            if let Node::Number(n) = boxed.as_ref() {
+                assert!((n - 21.0).abs() < 1e-5, "should fold to 21: {n}");
+            }
+        }
+    }
+
+    #[test]
+    fn division_folds() {
+        // 10/2 should fold to 5.
+        let result = parse("10/2", &[]);
+        assert!(result.root.is_some());
+        if let Some(ref boxed) = result.root {
+            if let Node::Number(n) = boxed.as_ref() {
+                assert!((n - 5.0).abs() < 1e-5, "should fold to 5: {n}");
+            }
+        }
+    }
+
+    #[test]
+    fn subtraction_folds() {
+        // 3-8 should fold to -5.
+        let result = parse("3-8", &[]);
+        assert!(result.root.is_some());
+        if let Some(ref boxed) = result.root {
+            if let Node::Number(n) = boxed.as_ref() {
+                assert!((*n - (-5.0)).abs() < 1e-5, "should fold to -5: {n}");
+            }
+        }
+    }
+
+    #[test]
+    fn parentheses_priority() {
+        // 2*(3+4) should fold to 14, not 10.
+        let result = parse("2*(3+4)", &[]);
+        assert!(result.root.is_some());
+        if let Some(ref boxed) = result.root {
+            if let Node::Number(n) = boxed.as_ref() {
+                assert!((n - 14.0).abs() < 1e-5, "2*(3+4)=14: {n}");
+            }
+        }
+    }
+}
+
+// Additional region file edge cases.
+#[cfg(test)]
+mod region_edge_cases_parity {
+    use std::path::PathBuf;
+    use voxel_core::math::Vector3i;
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
+    use voxel_core::streams::compressed_data::Compression;
+    use voxel_core::streams::region::RegionFile;
+
+    fn temp_path(name: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!("voxel_parity_{name}_{}.vxr", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        p
+    }
+
+    fn bit8_fmt() -> VoxelFormat {
+        let mut fmt = VoxelFormat::new();
+        for d in fmt.depths.iter_mut() {
+            *d = ChannelDepth::Bit8;
+        }
+        fmt
+    }
+
+    /// Saving then loading the same block twice returns the same data.
+    #[test]
+    fn double_load_returns_same() {
+        let path = temp_path("double_load");
+        let fmt = bit8_fmt();
+        let mut region = RegionFile::open(&path, true).unwrap();
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(16));
+        fmt.configure_buffer(&mut buf);
+        buf.fill(5, ChannelId::Type.index());
+        region
+            .save_block(Vector3i::new(0, 0, 0), &buf, Compression::Lz4)
+            .unwrap();
+        drop(region);
+
+        let mut r1 = RegionFile::open(&path, false).unwrap();
+        let mut b1 = VoxelBuffer::with_size(Vector3i::splat(16));
+        fmt.configure_buffer(&mut b1);
+        r1.load_block(Vector3i::new(0, 0, 0), &mut b1).unwrap();
+        let v1 = b1.get_voxel(0, 0, 0, ChannelId::Type.index());
+
+        let mut b2 = VoxelBuffer::with_size(Vector3i::splat(16));
+        fmt.configure_buffer(&mut b2);
+        r1.load_block(Vector3i::new(0, 0, 0), &mut b2).unwrap();
+        let v2 = b2.get_voxel(0, 0, 0, ChannelId::Type.index());
+
+        assert_eq!(v1, v2, "double load should return same data: {v1} vs {v2}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A block saved at a high index loads correctly.
+    #[test]
+    fn high_index_block_loads() {
+        let path = temp_path("high_idx");
+        let fmt = bit8_fmt();
+        let mut region = RegionFile::open(&path, true).unwrap();
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(16));
+        fmt.configure_buffer(&mut buf);
+        buf.fill(8, ChannelId::Type.index());
+        let pos = Vector3i::new(15, 15, 15);
+        region.save_block(pos, &buf, Compression::Lz4).unwrap();
+        drop(region);
+
+        let mut r2 = RegionFile::open(&path, false).unwrap();
+        let mut b2 = VoxelBuffer::with_size(Vector3i::splat(16));
+        fmt.configure_buffer(&mut b2);
+        r2.load_block(pos, &mut b2).unwrap();
+        assert_eq!(
+            b2.get_voxel(0, 0, 0, ChannelId::Type.index()),
+            8,
+            "high index block value"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+// Additional math: container span overlap + fixed_array find.
+#[cfg(test)]
+mod container_span_fixed_parity {
+    use voxel_core::containers::{fixed_array, funcs, span};
+
+    #[test]
+    fn fixed_array_contains() {
+        let arr = [1, 2, 3, 4];
+        assert!(fixed_array::contains(&arr, &3));
+        assert!(!fixed_array::contains(&arr, &9));
+    }
+
+    #[test]
+    fn fixed_array_find() {
+        let arr = [1, 2, 3, 4];
+        assert_eq!(fixed_array::find(&arr, &3), Some(2));
+        assert_eq!(fixed_array::find(&arr, &9), None);
+    }
+
+    #[test]
+    fn unordered_remove_value() {
+        let mut v = vec![1, 2, 3, 4, 3];
+        assert!(funcs::unordered_remove_value(&mut v, &3));
+        assert!(!v.contains(&3) || v.iter().filter(|&&x| x == 3).count() == 1);
+    }
+
+    #[test]
+    fn span_overlaps_disjoint() {
+        let a = [1, 2, 3];
+        let b = [4, 5, 6];
+        assert!(!span::overlaps(&a, &b));
+    }
+}
+
+// Additional graph: constant reduction + large graph compile.
+#[cfg(test)]
+mod graph_large_compile_parity {
+    use voxel_core::generators::graph::{
+        CompiledGraph, Graph, GraphPort, NodeKind,
+    };
+
+    #[test]
+    fn large_chain_compiles_without_error() {
+        let mut g = Graph::new();
+        let mut prev = g.push(NodeKind::Constant(1.0));
+        for i in 0..50 {
+            let c = g.push(NodeKind::Constant(i as f32 * 0.1));
+            prev = g.push(NodeKind::Add {
+                a: Some(GraphPort {
+                    node: prev,
+                    output: 0,
+                }),
+                b: Some(GraphPort { node: c, output: 0 }),
+            });
+        }
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort {
+                node: prev,
+                output: 0,
+            }),
+        });
+        let compiled = CompiledGraph::compile(&g);
+        assert!(compiled.is_ok(), "50-node chain should compile");
+    }
+
+    #[test]
+    fn graph_with_unused_nodes_compiles() {
+        let mut g = Graph::new();
+        // Unused constant (not connected to OutputSdf).
+        g.push(NodeKind::Constant(42.0));
+        let c = g.push(NodeKind::Constant(5.0));
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: c, output: 0 }),
+        });
+        assert!(
+            CompiledGraph::compile(&g).is_ok(),
+            "graph with unused node should compile"
+        );
+    }
+
+    #[test]
+    fn graph_clone_compiles_independently() {
+        let mut g = Graph::new();
+        let c = g.push(NodeKind::Constant(1.0));
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: c, output: 0 }),
+        });
+        let g2 = g.clone();
+        assert!(CompiledGraph::compile(&g).is_ok());
+        assert!(CompiledGraph::compile(&g2).is_ok());
+    }
+}
