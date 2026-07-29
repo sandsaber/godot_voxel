@@ -109,16 +109,23 @@ pub enum NodeKind {
     Floor { a: Option<GraphPort> },
     /// `fract(a)` (returns the fractional part).
     Fract { a: Option<GraphPort> },
-    /// Euclidean distance from the origin in 2D: `sqrt(x*x + y*y)`.
+    /// Euclidean distance between two 2D points: `sqrt((x1-x0)² + (y1-y0)²)`.
+    /// Matches C++ `NODE_DISTANCE_2D`.
     Distance2D {
-        x: Option<GraphPort>,
-        y: Option<GraphPort>,
+        x0: Option<GraphPort>,
+        y0: Option<GraphPort>,
+        x1: Option<GraphPort>,
+        y1: Option<GraphPort>,
     },
-    /// Euclidean distance from the origin in 3D: `sqrt(x*x + y*y + z*z)`.
+    /// Euclidean distance between two 3D points:
+    /// `sqrt((x1-x0)² + (y1-y0)² + (z1-z0)²)`. Matches C++ `NODE_DISTANCE_3D`.
     Distance3D {
-        x: Option<GraphPort>,
-        y: Option<GraphPort>,
-        z: Option<GraphPort>,
+        x0: Option<GraphPort>,
+        y0: Option<GraphPort>,
+        z0: Option<GraphPort>,
+        x1: Option<GraphPort>,
+        y1: Option<GraphPort>,
+        z1: Option<GraphPort>,
     },
     /// Normalize a 3D direction `(x, y, z)` to unit length.
     Normalize3D {
@@ -246,8 +253,15 @@ impl NodeKind {
             | NodeKind::Fract { a } => vec![*a],
             NodeKind::Remap { a, .. } => vec![*a],
             NodeKind::Pow { a, b } => vec![*a, *b],
-            NodeKind::Distance2D { x, y } => vec![*x, *y],
-            NodeKind::Distance3D { x, y, z } => vec![*x, *y, *z],
+            NodeKind::Distance2D { x0, y0, x1, y1, .. } => vec![*x0, *y0, *x1, *y1],
+            NodeKind::Distance3D {
+                x0,
+                y0,
+                z0,
+                x1,
+                y1,
+                z1,
+            } => vec![*x0, *y0, *z0, *x1, *y1, *z1],
             NodeKind::Normalize3D { x, y, z } => vec![*x, *y, *z],
             NodeKind::Mix { a, b, t } => vec![*a, *b, *t],
             NodeKind::Clamp { a, min_v, max_v } => vec![*a, *min_v, *max_v],
@@ -505,17 +519,30 @@ impl Graph {
                     let r = binop(scratch, a, b, slice_size, f32::powf);
                     scratch.put(id, r);
                 }
-                NodeKind::Distance2D { x, y } => {
-                    let r = binop(scratch, x, y, slice_size, |x, y| (x * x + y * y).sqrt());
-                    scratch.put(id, r);
-                }
-                NodeKind::Distance3D { x, y, z } => {
+                NodeKind::Distance2D { x0, y0, x1, y1, .. } => {
                     let r: Vec<f32> = (0..slice_size)
                         .map(|i| {
-                            let xv = value_at(scratch, x, i, 0.0);
-                            let yv = value_at(scratch, y, i, 0.0);
-                            let zv = value_at(scratch, z, i, 0.0);
-                            (xv * xv + yv * yv + zv * zv).sqrt()
+                            let dx = value_at(scratch, x1, i, 0.0) - value_at(scratch, x0, i, 0.0);
+                            let dy = value_at(scratch, y1, i, 0.0) - value_at(scratch, y0, i, 0.0);
+                            (dx * dx + dy * dy).sqrt()
+                        })
+                        .collect();
+                    scratch.put(id, r);
+                }
+                NodeKind::Distance3D {
+                    x0,
+                    y0,
+                    z0,
+                    x1,
+                    y1,
+                    z1,
+                } => {
+                    let r: Vec<f32> = (0..slice_size)
+                        .map(|i| {
+                            let dx = value_at(scratch, x1, i, 0.0) - value_at(scratch, x0, i, 0.0);
+                            let dy = value_at(scratch, y1, i, 0.0) - value_at(scratch, y0, i, 0.0);
+                            let dz = value_at(scratch, z1, i, 0.0) - value_at(scratch, z0, i, 0.0);
+                            (dx * dx + dy * dy + dz * dz).sqrt()
                         })
                         .collect();
                     scratch.put(id, r);
@@ -850,13 +877,21 @@ impl CompiledGraph {
                     let te = iv::Interval::single(*to_end);
                     iv::lerp(ts, te, (resolve(&ranges, a) - fs) / (fe - fs))
                 }
-                NodeKind::Distance2D { x, y } => {
-                    iv::get_length2(resolve(&ranges, x), resolve(&ranges, y))
-                }
-                NodeKind::Distance3D { x, y, z } => iv::get_length3(
-                    resolve(&ranges, x),
-                    resolve(&ranges, y),
-                    resolve(&ranges, z),
+                NodeKind::Distance2D { x0, y0, x1, y1, .. } => iv::get_length2(
+                    resolve(&ranges, x1) - resolve(&ranges, x0),
+                    resolve(&ranges, y1) - resolve(&ranges, y0),
+                ),
+                NodeKind::Distance3D {
+                    x0,
+                    y0,
+                    z0,
+                    x1,
+                    y1,
+                    z1,
+                } => iv::get_length3(
+                    resolve(&ranges, x1) - resolve(&ranges, x0),
+                    resolve(&ranges, y1) - resolve(&ranges, y0),
+                    resolve(&ranges, z1) - resolve(&ranges, z0),
                 ),
                 NodeKind::Normalize3D { .. } => inf,
                 NodeKind::Mix { a, b, t } => iv::lerp(
@@ -1077,23 +1112,30 @@ impl CompiledGraph {
                         .collect(),
                 );
             }
-            NodeKind::Distance2D { x, y } => scratch.set(
+            NodeKind::Distance2D { x0, y0, x1, y1, .. } => scratch.set(
                 node_index,
                 (0..slice_size)
                     .map(|i| {
-                        let dx = self.val(scratch, x, i);
-                        let dy = self.val(scratch, y, i);
+                        let dx = self.val(scratch, x1, i) - self.val(scratch, x0, i);
+                        let dy = self.val(scratch, y1, i) - self.val(scratch, y0, i);
                         (dx * dx + dy * dy).sqrt()
                     })
                     .collect(),
             ),
-            NodeKind::Distance3D { x, y, z } => scratch.set(
+            NodeKind::Distance3D {
+                x0,
+                y0,
+                z0,
+                x1,
+                y1,
+                z1,
+            } => scratch.set(
                 node_index,
                 (0..slice_size)
                     .map(|i| {
-                        let dx = self.val(scratch, x, i);
-                        let dy = self.val(scratch, y, i);
-                        let dz = self.val(scratch, z, i);
+                        let dx = self.val(scratch, x1, i) - self.val(scratch, x0, i);
+                        let dy = self.val(scratch, y1, i) - self.val(scratch, y0, i);
+                        let dz = self.val(scratch, z1, i) - self.val(scratch, z0, i);
                         (dx * dx + dy * dy + dz * dz).sqrt()
                     })
                     .collect(),
@@ -2488,34 +2530,41 @@ mod tests {
     }
 
     #[test]
-    fn distance_3d_node_computes_euclidean_length() {
+    fn distance_3d_node_computes_distance_between_two_points() {
+        // GRAPH-2 parity: C++ Distance3D takes 6 inputs (two points).
         let mut graph = Graph::new();
-        let x = graph.push(NodeKind::InputX);
-        let y = graph.push(NodeKind::InputY);
-        let z = graph.push(NodeKind::InputZ);
+        let x0 = graph.push(NodeKind::Constant(0.0));
+        let y0 = graph.push(NodeKind::Constant(0.0));
+        let z0 = graph.push(NodeKind::Constant(0.0));
+        let x1 = graph.push(NodeKind::Constant(3.0));
+        let y1 = graph.push(NodeKind::Constant(4.0));
+        let z1 = graph.push(NodeKind::Constant(3.0));
         let d = graph.push(NodeKind::Distance3D {
-            x: Some(GraphPort::new(x)),
-            y: Some(GraphPort::new(y)),
-            z: Some(GraphPort::new(z)),
+            x0: Some(GraphPort::new(x0)),
+            y0: Some(GraphPort::new(y0)),
+            z0: Some(GraphPort::new(z0)),
+            x1: Some(GraphPort::new(x1)),
+            y1: Some(GraphPort::new(y1)),
+            z1: Some(GraphPort::new(z1)),
         });
         graph.push(NodeKind::OutputSdf {
             a: Some(GraphPort::new(d)),
         });
 
-        let xs = vec![3.0, 0.0];
+        let xs = vec![0.0];
         let inputs = GraphInputs {
             x: &xs,
-            y: 4.0,
+            y: 0.0,
             z: &xs,
         };
         let mut scratch = GraphScratch::new();
         let mut outputs = Vec::new();
         graph
-            .generate(&inputs, 2, &mut scratch, &mut outputs)
+            .generate(&inputs, 1, &mut scratch, &mut outputs)
             .unwrap();
         let (_, data) = &outputs[0];
-        // (3,4,3): sqrt(9+16+9) = sqrt(34) ≈ 5.83.
-        assert!((data[0] - (3.0f32 * 3.0 + 4.0 * 4.0 + 3.0 * 3.0).sqrt()).abs() < 1e-5);
+        // Distance from (0,0,0) to (3,4,3): sqrt(9+16+9) = sqrt(34) ≈ 5.83.
+        assert!((data[0] - 34.0f32.sqrt()).abs() < 1e-5);
     }
 
     #[test]
