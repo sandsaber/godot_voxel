@@ -10573,9 +10573,7 @@ mod container_span_fixed_parity {
 // Additional graph: constant reduction + large graph compile.
 #[cfg(test)]
 mod graph_large_compile_parity {
-    use voxel_core::generators::graph::{
-        CompiledGraph, Graph, GraphPort, NodeKind,
-    };
+    use voxel_core::generators::graph::{CompiledGraph, Graph, GraphPort, NodeKind};
 
     #[test]
     fn large_chain_compiles_without_error() {
@@ -10626,5 +10624,195 @@ mod graph_large_compile_parity {
         let g2 = g.clone();
         assert!(CompiledGraph::compile(&g).is_ok());
         assert!(CompiledGraph::compile(&g2).is_ok());
+    }
+}
+
+// Additional math funcs edge cases.
+#[cfg(test)]
+mod math_funcs_edge_parity {
+    use voxel_core::math::funcs;
+
+    #[test]
+    fn clamp_float_bounds() {
+        assert!((funcs::clampf(0.5, 0.0, 1.0) - 0.5).abs() < 1e-5);
+        assert!((funcs::clampf(-1.0, 0.0, 1.0)).abs() < 1e-5);
+    }
+
+    #[test]
+    fn lerp_midpoint() {
+        assert!((funcs::lerp_f32(0.0, 10.0, 0.5) - 5.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn lerp_extrapolation() {
+        // t > 1 extrapolates beyond b.
+        assert!((funcs::lerp_f32(0.0, 10.0, 2.0) - 20.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn wrap_modulo() {
+        assert_eq!(funcs::wrap_i32(12, 5), 2);
+        assert_eq!(funcs::wrap_i32(-3, 5), 2);
+    }
+
+    #[test]
+    fn sign_nonzero_i32() {
+        assert_eq!(funcs::sign_nonzero_i32(5), 1);
+        assert_eq!(funcs::sign_nonzero_i32(-5), -1);
+        assert_eq!(funcs::sign_nonzero_i32(0), 1); // nonzero variant defaults to 1
+    }
+
+    #[test]
+    fn ceildiv_u32_basic() {
+        assert_eq!(funcs::ceildiv_u32(10, 3), 4);
+        assert_eq!(funcs::ceildiv_u32(9, 3), 3);
+    }
+}
+
+// Additional VoxelDataMap set_voxel_f + get_voxel_f parity.
+#[cfg(test)]
+mod data_map_float_parity {
+    use voxel_core::math::Vector3i;
+    use voxel_core::storage::{ChannelDepth, VoxelDataMap, VoxelFormat};
+
+    #[test]
+    fn set_get_voxel_f_round_trips() {
+        let mut map = VoxelDataMap::new(0);
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[1] = ChannelDepth::Bit32; // SDF channel
+        map.set_format(fmt);
+        for v in &[-2.0f32, -0.5, 0.0, 0.5, 2.0] {
+            map.set_voxel_f(*v, Vector3i::new(0, 0, 0), 1);
+            let got = map.get_voxel_f(Vector3i::new(0, 0, 0), 1);
+            assert!((got - v).abs() < 1e-5, "map SDF round-trip {v}: {got}");
+        }
+    }
+
+    #[test]
+    fn different_positions_independent() {
+        let mut map = VoxelDataMap::new(0);
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[0] = ChannelDepth::Bit8;
+        map.set_format(fmt);
+        map.set_voxel(5, Vector3i::new(0, 0, 0), 0);
+        map.set_voxel(9, Vector3i::new(1, 0, 0), 0);
+        assert_eq!(map.get_voxel(Vector3i::new(0, 0, 0), 0), 5);
+        assert_eq!(map.get_voxel(Vector3i::new(1, 0, 0), 0), 9);
+        assert_eq!(map.get_voxel(Vector3i::new(2, 0, 0), 0), 0);
+    }
+}
+
+// Additional Curve from_points patterns.
+#[cfg(test)]
+mod curve_patterns_parity {
+    use voxel_core::generators::simple::Curve;
+
+    #[test]
+    fn two_point_curve_endpoints() {
+        let c = Curve::from_points(vec![0.0, 10.0]);
+        assert!((c.sample(0.0) - 0.0).abs() < 1e-5);
+        assert!((c.sample(1.0) - 10.0).abs() < 1e-5);
+        assert!((c.sample(0.5) - 5.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn three_point_curve_quarter() {
+        let c = Curve::from_points(vec![0.0, 10.0, 20.0]);
+        // At t=0.25, between points[0]=0 and points[1]=10 at 50% → 5.
+        assert!(
+            (c.sample(0.25) - 5.0).abs() < 1e-5,
+            "curve 3-point at 0.25: {}",
+            c.sample(0.25)
+        );
+    }
+
+    #[test]
+    fn curve_clamps_t_above_1() {
+        let c = Curve::identity(2);
+        // t > 1 clamps to 1.0.
+        assert!((c.sample(1.5) - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn curve_clamps_t_below_0() {
+        let c = Curve::identity(2);
+        // t < 0 clamps to 0.0.
+        assert!((c.sample(-0.5) - 0.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn curve_default_is_identity_256() {
+        let c = Curve::default();
+        assert!(
+            (c.sample(0.5) - 0.5).abs() < 1e-5,
+            "default curve should be identity"
+        );
+    }
+}
+
+// Additional graph SdfSmoothSubtract commutativity check.
+#[cfg(test)]
+mod graph_smooth_subtract_parity {
+    use voxel_core::generators::graph::{
+        CompiledGraph, CompiledScratch, Graph, GraphInputs, GraphOutput, GraphPort, NodeKind,
+    };
+
+    fn run(a: f32, b: f32, smoothness: f32) -> f32 {
+        let mut g = Graph::new();
+        let na = g.push(NodeKind::Constant(a));
+        let nb = g.push(NodeKind::Constant(b));
+        let s = g.push(NodeKind::SdfSmoothSubtract {
+            a: Some(GraphPort {
+                node: na,
+                output: 0,
+            }),
+            b: Some(GraphPort {
+                node: nb,
+                output: 0,
+            }),
+            smoothness,
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: s, output: 0 }),
+        });
+        let c = CompiledGraph::compile(&g).expect("compile");
+        let xs = [0.0f32];
+        let zs = [0.0f32];
+        let i = GraphInputs {
+            x: &xs,
+            y: 0.0,
+            z: &zs,
+        };
+        let mut sc = CompiledScratch::new();
+        let mut o = Vec::new();
+        c.generate_slice(&i, 1, &mut sc, &mut o, false);
+        o.into_iter()
+            .find(|(k, _)| *k == GraphOutput::Sdf)
+            .and_then(|(_, v)| v.into_iter().next())
+            .unwrap()
+    }
+
+    #[test]
+    fn smooth_subtract_zero_smoothness_equals_hard() {
+        let v = run(2.0, 5.0, 0.0);
+        // Hard subtract: max(2, -5) = 2.
+        assert!((v - 2.0).abs() < 1e-5, "smooth_subtract(0) = hard: {v}");
+    }
+
+    #[test]
+    fn smooth_subtract_nonzero_finite() {
+        let v = run(2.0, 5.0, 1.0);
+        assert!(v.is_finite(), "smooth_subtract(1) should be finite: {v}");
+    }
+
+    #[test]
+    fn smooth_subtract_not_commutative() {
+        // subtract(a,b) ≠ subtract(b,a) in general.
+        let v1 = run(1.0, 3.0, 0.0);
+        let v2 = run(3.0, 1.0, 0.0);
+        assert!(
+            (v1 - v2).abs() > 1e-5,
+            "subtract should not be commutative: {v1} vs {v2}"
+        );
     }
 }
