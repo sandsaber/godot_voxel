@@ -19,6 +19,7 @@ pub mod engine;
 pub mod format;
 pub mod generators;
 pub mod hash;
+pub mod instancing;
 pub mod io;
 pub mod math;
 pub mod memory;
