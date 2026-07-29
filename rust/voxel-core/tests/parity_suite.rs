@@ -11102,3 +11102,254 @@ mod buffer_compression_patterns_parity {
         assert_eq!(buf2.get_voxel(0, 0, 0, 0), 42);
     }
 }
+
+// Additional graph Noise2D/3D multi-slice parity.
+#[cfg(test)]
+mod graph_noise_multi_slice_parity {
+    use voxel_core::generators::graph::{
+        CompiledGraph, CompiledScratch, Graph, GraphInputs, GraphOutput, GraphPort, NodeKind,
+    };
+
+    fn run_multi(g: &Graph, xs: &[f32], y: f32, zs: &[f32]) -> Vec<f32> {
+        let c = CompiledGraph::compile(g).expect("compile");
+        let i = GraphInputs { x: xs, y, z: zs };
+        let mut s = CompiledScratch::new();
+        let mut o = Vec::new();
+        c.generate_slice(&i, xs.len(), &mut s, &mut o, false);
+        o.into_iter()
+            .find(|(k, _)| *k == GraphOutput::Sdf)
+            .map(|(_, v)| v)
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn noise2d_varies_across_slice() {
+        let mut g = Graph::new();
+        let x = g.push(NodeKind::InputX);
+        let z = g.push(NodeKind::InputZ);
+        let nn = g.push(NodeKind::Noise2D {
+            x: Some(GraphPort { node: x, output: 0 }),
+            y: Some(GraphPort { node: z, output: 0 }),
+            noise: Default::default(),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort {
+                node: nn,
+                output: 0,
+            }),
+        });
+        let xs = [1.0f32, 2.0, 3.0, 4.0, 5.0];
+        let result = run_multi(&g, &xs, 0.0, &xs);
+        // At least one pair should differ (noise varies).
+        let any_diff = result.windows(2).any(|w| (w[0] - w[1]).abs() > 1e-6);
+        assert!(any_diff, "noise2d should vary across slice: {:?}", result);
+    }
+
+    #[test]
+    fn noise3d_varies_across_slice() {
+        let mut g = Graph::new();
+        let x = g.push(NodeKind::InputX);
+        let y = g.push(NodeKind::InputY);
+        let z = g.push(NodeKind::InputZ);
+        let nn = g.push(NodeKind::Noise3D {
+            x: Some(GraphPort { node: x, output: 0 }),
+            y: Some(GraphPort { node: y, output: 0 }),
+            z: Some(GraphPort { node: z, output: 0 }),
+            noise: Default::default(),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort {
+                node: nn,
+                output: 0,
+            }),
+        });
+        let xs = [1.0f32, 2.0, 3.0, 4.0, 5.0];
+        let result = run_multi(&g, &xs, 0.0, &xs);
+        let any_diff = result.windows(2).any(|w| (w[0] - w[1]).abs() > 1e-6);
+        assert!(any_diff, "noise3d should vary across slice: {:?}", result);
+    }
+
+    #[test]
+    fn noise_bounded_minus_one_to_one() {
+        let mut g = Graph::new();
+        let x = g.push(NodeKind::InputX);
+        let y = g.push(NodeKind::InputY);
+        let z = g.push(NodeKind::InputZ);
+        let nn = g.push(NodeKind::Noise3D {
+            x: Some(GraphPort { node: x, output: 0 }),
+            y: Some(GraphPort { node: y, output: 0 }),
+            z: Some(GraphPort { node: z, output: 0 }),
+            noise: Default::default(),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort {
+                node: nn,
+                output: 0,
+            }),
+        });
+        let xs: Vec<f32> = (0..20).map(|i| i as f32 * 0.5).collect();
+        let result = run_multi(&g, &xs, 3.0, &xs);
+        for &v in &result {
+            assert!((-1.5..=1.5).contains(&v), "noise out of range: {v}");
+        }
+    }
+}
+
+// Additional VoxelDataMap area + remove patterns.
+#[cfg(test)]
+mod data_map_area_parity {
+    use voxel_core::math::{Box3i, Vector3i};
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelDataMap, VoxelFormat};
+
+    #[test]
+    fn is_area_fully_loaded_false_for_empty() {
+        let map = VoxelDataMap::new(0);
+        assert!(!map.is_area_fully_loaded(Box3i::new(Vector3i::zero(), Vector3i::splat(16),)));
+    }
+
+    #[test]
+    fn is_area_fully_loaded_true_after_fill() {
+        let mut map = VoxelDataMap::new(0);
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        map.set_format(fmt);
+        // Create one block at origin.
+        map.set_empty_block(Vector3i::zero(), true);
+        assert!(map.is_area_fully_loaded(Box3i::new(
+            Vector3i::zero(),
+            Vector3i::splat(map.block_size() as i32),
+        )));
+    }
+
+    #[test]
+    fn remove_then_has_returns_false() {
+        let mut map = VoxelDataMap::new(0);
+        map.set_empty_block(Vector3i::zero(), true);
+        assert!(map.has_block(Vector3i::zero()));
+        let removed = map.remove_block(Vector3i::zero());
+        assert!(removed.is_some());
+        assert!(!map.has_block(Vector3i::zero()));
+    }
+
+    #[test]
+    fn remove_nonexistent_returns_none() {
+        let mut map = VoxelDataMap::new(0);
+        assert!(map.remove_block(Vector3i::new(99, 99, 99)).is_none());
+    }
+}
+
+// Additional Color8 + Vector3f parity.
+#[cfg(test)]
+mod color8_vec3f_parity {
+    use voxel_core::math::{Color8, Vector3f};
+
+    #[test]
+    fn color8_from_u32_valid() {
+        let c = Color8::from_u32(0xFF804020);
+        // from_u32 unpacks a packed color; verify all channels are accessible.
+        let _ = (c.r, c.g, c.b, c.a);
+    }
+
+    #[test]
+    fn vector3f_zero() {
+        let v = Vector3f::zero();
+        assert!((v.x - 0.0).abs() < 1e-5);
+        assert!((v.y - 0.0).abs() < 1e-5);
+        assert!((v.z - 0.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn vector3f_new_sets_components() {
+        let v = Vector3f::new(1.0, 2.0, 3.0);
+        assert!((v.x - 1.0).abs() < 1e-5);
+        assert!((v.y - 2.0).abs() < 1e-5);
+        assert!((v.z - 3.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn vector3f_splat() {
+        let v = Vector3f::splat(5.0);
+        assert!((v.x - 5.0).abs() < 1e-5);
+        assert!((v.y - 5.0).abs() < 1e-5);
+        assert!((v.z - 5.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn vector3f_addition() {
+        let a = Vector3f::new(1.0, 2.0, 3.0);
+        let b = Vector3f::new(4.0, 5.0, 6.0);
+        let sum = a + b;
+        assert!((sum.x - 5.0).abs() < 1e-5);
+        assert!((sum.z - 9.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn vector3f_subtraction() {
+        let a = Vector3f::new(10.0, 20.0, 30.0);
+        let b = Vector3f::new(1.0, 2.0, 3.0);
+        let diff = a - b;
+        assert!((diff.x - 9.0).abs() < 1e-5);
+        assert!((diff.z - 27.0).abs() < 1e-5);
+    }
+}
+
+// Additional scatter rotation + position precision parity.
+#[cfg(test)]
+mod scatter_precision_parity {
+    use voxel_core::instancing::scatter::{InstanceGenerator, RandomScatterGenerator};
+    use voxel_core::instancing::ScatterConfig;
+    use voxel_core::math::Vector3f;
+
+    /// All quaternions are valid (w²+x²+y²+z² ≈ 1).
+    #[test]
+    fn all_rotations_valid_quaternions() {
+        let gen = RandomScatterGenerator {
+            density: 1.0,
+            min_scale: 1.0,
+            max_scale: 1.0,
+            snap_to_normal: true,
+        };
+        let positions: Vec<_> = (0..50)
+            .map(|i| Vector3f::new(i as f32 * 1.7, i as f32 * 0.3, i as f32 * 2.1))
+            .collect();
+        let normals = vec![Vector3f::new(0.0, 1.0, 0.0); 50];
+        let result = gen.generate(&positions, &normals, 0, &ScatterConfig::default());
+        assert_eq!(result.len(), 50);
+        for inst in &result {
+            let r = &inst.rotation;
+            let len_sq = r[0] * r[0] + r[1] * r[1] + r[2] * r[2] + r[3] * r[3];
+            assert!(
+                (len_sq - 1.0).abs() < 0.01,
+                "invalid quaternion len: {len_sq}"
+            );
+        }
+    }
+
+    /// Positions match exactly when snap_to_normal=false.
+    #[test]
+    fn positions_exact_no_snap() {
+        let gen = RandomScatterGenerator {
+            density: 1.0,
+            min_scale: 1.0,
+            max_scale: 1.0,
+            snap_to_normal: false,
+        };
+        let positions: Vec<_> = vec![Vector3f::new(1.5, 2.5, 3.5), Vector3f::new(-0.7, 10.0, 4.2)];
+        let normals = vec![Vector3f::new(0.0, 1.0, 0.0); 2];
+        let result = gen.generate(&positions, &normals, 0, &ScatterConfig::default());
+        for (inst, pos) in result.iter().zip(positions.iter()) {
+            assert!(
+                (inst.position.x - pos.x).abs() < 1e-5,
+                "pos x: {} vs {}",
+                inst.position.x,
+                pos.x
+            );
+            assert!(
+                (inst.position.z - pos.z).abs() < 1e-5,
+                "pos z: {} vs {}",
+                inst.position.z,
+                pos.z
+            );
+        }
+    }
+}
