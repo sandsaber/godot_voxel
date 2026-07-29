@@ -195,8 +195,8 @@ impl IResource for VoxelFormatGD {
 // VoxelEngineGD — Object singleton for task orchestration
 // ---------------------------------------------------------------------------
 
-/// The voxel engine singleton. In C++ this is the main-thread task
-/// orchestrator. Here it's a thin Object for API parity.
+/// The voxel engine singleton. Wraps a ThreadedTaskRunner for
+/// background task processing. Manages real task drain loop.
 #[derive(GodotClass)]
 #[class(base = Object, tool)]
 pub struct VoxelEngineGD {
@@ -204,6 +204,7 @@ pub struct VoxelEngineGD {
     /// Number of background threads.
     #[var]
     thread_count: i32,
+    runner: Option<voxel_core::tasks::ThreadedTaskRunner>,
 }
 
 #[godot_api]
@@ -212,6 +213,55 @@ impl IObject for VoxelEngineGD {
         Self {
             base,
             thread_count: 4,
+            runner: None,
+        }
+    }
+}
+
+#[godot_api]
+impl VoxelEngineGD {
+    /// Initialize the task runner with the configured thread count.
+    #[func]
+    fn start(&mut self) {
+        let count = self.thread_count.max(1) as usize;
+        self.runner = Some(voxel_core::tasks::ThreadedTaskRunner::new(count));
+    }
+
+    /// Stop the task runner (waits for all tasks, then shuts down).
+    #[func]
+    fn stop(&mut self) {
+        if let Some(mut runner) = self.runner.take() {
+            runner.wait_for_all_tasks();
+            runner.shutdown();
+        }
+    }
+
+    /// Drain completed tasks. Returns the count drained this tick.
+    #[func]
+    fn process(&mut self) -> i32 {
+        if let Some(runner) = &mut self.runner {
+            let completed = runner.drain_completed_tasks();
+            completed.len() as i32
+        } else {
+            0
+        }
+    }
+
+    /// Get the number of remaining (pending + running) tasks.
+    #[func]
+    fn get_pending_count(&self) -> i32 {
+        if let Some(runner) = &self.runner {
+            runner.remaining_task_count() as i32
+        } else {
+            0
+        }
+    }
+
+    /// Block until all queued tasks complete.
+    #[func]
+    fn wait_for_all(&mut self) {
+        if let Some(runner) = &mut self.runner {
+            runner.wait_for_all_tasks();
         }
     }
 }

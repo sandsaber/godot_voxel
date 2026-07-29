@@ -139,14 +139,65 @@ impl VoxelInstancerGD {
         self.config.seed = seed as u32;
     }
 
-    /// Generate instances from surface positions (debug/test).
+    /// Generate instances from a VoxelBufferGD's surface.
+    /// Extracts surface points where solid meets air, runs the scatter
+    /// generator for each library item, returns total instance count.
+    #[func]
+    fn scatter_from_buffer(&mut self, buffer: Gd<RefCounted>) -> i32 {
+        if self.library.is_empty() {
+            return 0;
+        }
+        // Try to cast to VoxelBufferGD for direct field access.
+        if let Ok(buf_gd) = buffer.clone().try_cast::<VoxelBufferGD>() {
+            let bound = buf_gd.bind();
+            let sx = bound.get_size_x();
+            let sy = bound.get_size_y();
+            let sz = bound.get_size_z();
+
+            let mut positions = Vec::new();
+            let mut normals = Vec::new();
+            for z in 1..sz {
+                for y in 1..sy {
+                    for x in 1..sx {
+                        let vt = bound.get_voxel(x, y, z, 0);
+                        let vt_below = bound.get_voxel(x, y - 1, z, 0);
+                        if vt != 0 && vt_below == 0 {
+                            positions.push(Vector3f::new(x as f32, y as f32, z as f32));
+                            normals.push(Vector3f::new(0.0, 1.0, 0.0));
+                        }
+                    }
+                }
+            }
+            drop(bound);
+            drop(buf_gd);
+
+            if positions.is_empty() {
+                return 0;
+            }
+
+            let mut total = 0;
+            for (idx, item) in self.library.items.iter().enumerate() {
+                let gen = RandomScatterGenerator {
+                    density: item.density * self.density_multiplier,
+                    min_scale: item.min_scale,
+                    max_scale: item.max_scale,
+                    snap_to_normal: item.snap_to_normal,
+                };
+                let result = gen.generate(&positions, &normals, idx as u32, &self.config);
+                total += result.len();
+            }
+            return total as i32;
+        }
+        0
+    }
+
+    /// Generate instances from dummy surface positions (test/debug).
     /// Returns the total instance count.
     #[func]
     fn scatter_test(&self, count: i32) -> i32 {
         if self.library.is_empty() {
             return 0;
         }
-        // Generate dummy surface positions for testing.
         let positions: Vec<Vector3f> = (0..count)
             .map(|i| Vector3f::new(i as f32, 0.0, 0.0))
             .collect();
