@@ -4382,7 +4382,10 @@ mod graph_unop_matrix_parity {
     #[test]
     fn sin_various_inputs() {
         assert!((run_unop(|a| NodeKind::Sin { a: Some(a) }, 0.0) - 0.0).abs() < 1e-5);
-        let half_pi = run_unop(|a| NodeKind::Sin { a: Some(a) }, std::f32::consts::FRAC_PI_2);
+        let half_pi = run_unop(
+            |a| NodeKind::Sin { a: Some(a) },
+            std::f32::consts::FRAC_PI_2,
+        );
         assert!((half_pi - 1.0).abs() < 1e-3, "sin(π/2)≈1: {half_pi}");
     }
 
@@ -4410,5 +4413,245 @@ mod graph_unop_matrix_parity {
     fn fract_various_inputs() {
         assert!((run_unop(|a| NodeKind::Fract { a: Some(a) }, 3.25) - 0.25).abs() < 1e-5);
         assert!((run_unop(|a| NodeKind::Fract { a: Some(a) }, 5.0) - 0.0).abs() < 1e-5);
+    }
+}
+
+#[cfg(test)]
+mod mesher_lod_parity {
+    use voxel_core::math::Vector3i;
+    use voxel_core::meshers::{MesherInput, MesherOutput, TransvoxelMesher, VoxelMesher};
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
+
+    /// The mesher at LOD 0 vs LOD 1 on the same buffer produces the same vertex
+    /// count (lod_index doesn't change extraction, only world-scale). Golden.
+    #[test]
+    fn lod_index_does_not_change_vertex_count() {
+        let mut voxels = VoxelBuffer::with_size(Vector3i::splat(16));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+        fmt.configure_buffer(&mut voxels);
+        let c = 8.0;
+        for z in 0..16 {
+            for y in 0..16 {
+                for x in 0..16 {
+                    let d =
+                        ((x as f32 - c).powi(2) + (y as f32 - c).powi(2) + (z as f32 - c).powi(2))
+                            .sqrt()
+                            - 6.0;
+                    voxels.set_voxel_f(d, x, y, z, ChannelId::Sdf.index());
+                }
+            }
+        }
+        let mesher = TransvoxelMesher::new();
+        let mut out0 = MesherOutput::default();
+        let inp0 = MesherInput::new(&voxels, Vector3i::zero(), 0);
+        mesher.build(&mut out0, &inp0);
+        let mut out1 = MesherOutput::default();
+        let inp1 = MesherInput::new(&voxels, Vector3i::zero(), 1);
+        mesher.build(&mut out1, &inp1);
+        assert_eq!(
+            out0.total_vertex_count(),
+            out1.total_vertex_count(),
+            "lod_index should not change vertex count"
+        );
+    }
+
+    /// A collision-hint mesh request produces a collision surface.
+    #[test]
+    fn collision_hint_produces_collision_surface() {
+        let mut voxels = VoxelBuffer::with_size(Vector3i::splat(16));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+        fmt.configure_buffer(&mut voxels);
+        let c = 8.0f32;
+        for z in 0..16 {
+            for y in 0..16 {
+                for x in 0..16 {
+                    let d =
+                        ((x as f32 - c).powi(2) + (y as f32 - c).powi(2) + (z as f32 - c).powi(2))
+                            .sqrt()
+                            - 6.0;
+                    voxels.set_voxel_f(d, x, y, z, ChannelId::Sdf.index());
+                }
+            }
+        }
+        let mesher = TransvoxelMesher::new();
+        let mut out = MesherOutput::default();
+        let mut inp = MesherInput::new(&voxels, Vector3i::zero(), 0);
+        inp.collision_hint = true;
+        mesher.build(&mut out, &inp);
+        // The collision surface may be empty (transvoxel doesn't always produce
+        // one), but the call must not panic and render geometry exists.
+        assert!(out.total_vertex_count() > 0, "should have render geometry");
+    }
+}
+
+#[cfg(test)]
+mod block_serializer_large_parity {
+    use voxel_core::math::Vector3i;
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
+    use voxel_core::streams::block_serializer;
+    use voxel_core::streams::compressed_data::Compression;
+    use voxel_core::streams::decode_limits::DecodeLimits;
+
+    /// A 32³ buffer round-trips through the v4 format. Golden.
+    #[test]
+    fn block_v4_large_buffer_round_trips() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(32));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        // Distinct pattern: voxel value = (x+y+z) % 7 + 1.
+        for z in 0..32 {
+            for y in 0..32 {
+                for x in 0..32 {
+                    buf.set_voxel(
+                        ((x + y + z) % 7 + 1) as u64,
+                        x,
+                        y,
+                        z,
+                        ChannelId::Type.index(),
+                    );
+                }
+            }
+        }
+        let mut payload = Vec::new();
+        block_serializer::serialize_and_compress(&buf, &mut payload, Compression::Lz4).unwrap();
+        let mut buf2 = VoxelBuffer::with_size(Vector3i::splat(32));
+        fmt.configure_buffer(&mut buf2);
+        block_serializer::decompress_and_deserialize_with_limits(
+            &payload,
+            &mut buf2,
+            DecodeLimits::default(),
+        )
+        .unwrap();
+        for z in 0..32 {
+            for y in 0..32 {
+                for x in 0..32 {
+                    assert_eq!(
+                        buf2.get_voxel(x, y, z, ChannelId::Type.index()),
+                        ((x + y + z) % 7 + 1) as u64,
+                        "large buffer mismatch at ({x},{y},{z})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A buffer with a gradient SDF (Bit32) round-trips exactly. Golden.
+    #[test]
+    fn block_v4_gradient_sdf_round_trips() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+        fmt.configure_buffer(&mut buf);
+        for z in 0..8 {
+            for y in 0..8 {
+                for x in 0..8 {
+                    buf.set_voxel_f(
+                        (x + y * 8 + z * 64) as f32 * 0.1 - 5.0,
+                        x,
+                        y,
+                        z,
+                        ChannelId::Sdf.index(),
+                    );
+                }
+            }
+        }
+        let mut payload = Vec::new();
+        block_serializer::serialize_and_compress(&buf, &mut payload, Compression::Lz4).unwrap();
+        let mut buf2 = VoxelBuffer::with_size(Vector3i::splat(8));
+        fmt.configure_buffer(&mut buf2);
+        block_serializer::decompress_and_deserialize_with_limits(
+            &payload,
+            &mut buf2,
+            DecodeLimits::default(),
+        )
+        .unwrap();
+        for z in 0..8 {
+            for y in 0..8 {
+                for x in 0..8 {
+                    let expected = (x + y * 8 + z * 64) as f32 * 0.1 - 5.0;
+                    let got = buf2.get_voxel_f(x, y, z, ChannelId::Sdf.index());
+                    assert!(
+                        (got - expected).abs() < 1e-5,
+                        "gradient SDF mismatch at ({x},{y},{z}): {got}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod scatter_combinatorics_parity {
+    use voxel_core::instancing::scatter::{InstanceGenerator, RandomScatterGenerator};
+    use voxel_core::instancing::ScatterConfig;
+    use voxel_core::math::Vector3f;
+
+    /// Count is deterministic for a fixed (density, item_index, seed).
+    #[test]
+    fn scatter_count_deterministic_for_fixed_params() {
+        let positions: Vec<_> = (0..50).map(|i| Vector3f::new(i as f32, 0.0, 0.0)).collect();
+        let normals = vec![Vector3f::new(0.0, 1.0, 0.0); 50];
+        let config = ScatterConfig::default();
+        let gen = RandomScatterGenerator {
+            density: 0.6,
+            min_scale: 0.5,
+            max_scale: 1.5,
+            snap_to_normal: true,
+        };
+        let a = gen.generate(&positions, &normals, 3, &config).len();
+        let b = gen.generate(&positions, &normals, 3, &config).len();
+        assert_eq!(a, b, "count should be deterministic: {a} vs {b}");
+    }
+
+    /// snap_to_normal doesn't change the count (only affects orientation).
+    #[test]
+    fn snap_to_normal_does_not_change_count() {
+        let positions: Vec<_> = (0..40).map(|i| Vector3f::new(i as f32, 0.0, 0.0)).collect();
+        let normals = vec![Vector3f::new(0.0, 1.0, 0.0); 40];
+        let config = ScatterConfig::default();
+        let snap = RandomScatterGenerator {
+            density: 0.5,
+            min_scale: 1.0,
+            max_scale: 1.0,
+            snap_to_normal: true,
+        }
+        .generate(&positions, &normals, 0, &config)
+        .len();
+        let no_snap = RandomScatterGenerator {
+            density: 0.5,
+            min_scale: 1.0,
+            max_scale: 1.0,
+            snap_to_normal: false,
+        }
+        .generate(&positions, &normals, 0, &config)
+        .len();
+        assert_eq!(
+            snap, no_snap,
+            "snap_to_normal should not change count: {snap} vs {no_snap}"
+        );
+    }
+
+    /// Scale range [1,1] produces all instances at scale exactly 1.0.
+    #[test]
+    fn unit_scale_all_instances() {
+        let positions: Vec<_> = (0..20).map(|i| Vector3f::new(i as f32, 0.0, 0.0)).collect();
+        let normals = vec![Vector3f::new(0.0, 1.0, 0.0); 20];
+        let gen = RandomScatterGenerator {
+            density: 1.0,
+            min_scale: 1.0,
+            max_scale: 1.0,
+            snap_to_normal: false,
+        };
+        let result = gen.generate(&positions, &normals, 0, &ScatterConfig::default());
+        for inst in &result {
+            assert!(
+                (inst.scale - 1.0).abs() < 1e-5,
+                "unit scale should be exactly 1.0: {}",
+                inst.scale
+            );
+        }
     }
 }

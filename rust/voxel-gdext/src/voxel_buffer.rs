@@ -362,6 +362,21 @@ impl INode3D for VoxelNodeGD {
     }
 }
 
+#[godot_api]
+impl VoxelNodeGD {
+    /// Whether this node is currently streaming blocks.
+    #[func]
+    fn is_streaming(&self) -> bool {
+        self.auto_load
+    }
+
+    /// The effective view distance in blocks (max_view_distance / 16, min 1).
+    #[func]
+    fn get_view_distance_blocks(&self) -> i64 {
+        (self.max_view_distance / 16).max(1)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // VoxelGeneratorGraphGD — Resource wrapper for GraphGenerator
 // ---------------------------------------------------------------------------

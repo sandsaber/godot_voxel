@@ -484,6 +484,21 @@ impl IRefCounted for VoxelBlockRaycastResultGD {
     }
 }
 
+#[godot_api]
+impl VoxelBlockRaycastResultGD {
+    /// Whether this result hit a non-air voxel.
+    #[func]
+    fn did_hit(&self) -> bool {
+        self.voxel_id != 0
+    }
+
+    /// The hit position as a packed array [x, y, z].
+    #[func]
+    fn get_hit_position(&self) -> PackedInt32Array {
+        PackedInt32Array::from(&[self.hit_x, self.hit_y, self.hit_z][..])
+    }
+}
+
 // ---------------------------------------------------------------------------
 // VoxelBlockSerializerGD — RefCounted for block save/load
 // ---------------------------------------------------------------------------

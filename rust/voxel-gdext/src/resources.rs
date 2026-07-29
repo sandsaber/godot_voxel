@@ -109,6 +109,39 @@ impl IResource for VoxelMesherBlockyGD {
     }
 }
 
+#[godot_api]
+impl VoxelMesherBlockyGD {
+    /// Whether ambient occlusion baking is enabled.
+    #[func]
+    fn is_baking_occlusion(&self) -> bool {
+        self.bake_occlusion
+    }
+
+    /// The configured type channel index.
+    #[func]
+    fn type_channel_index(&self) -> i32 {
+        self.type_channel
+    }
+
+    /// Build a real `BlockyMesher` from this config and return the vertex
+    /// count it produces for a `VoxelBufferGD` (empty library → 0 verts).
+    /// Returns -1 if `buffer` is not a `VoxelBufferGD`.
+    #[func]
+    fn build_vertex_count(&self, buffer: Gd<RefCounted>) -> i64 {
+        let Ok(buf) = buffer.try_cast::<crate::voxel_buffer::VoxelBufferGD>() else {
+            return -1;
+        };
+        let bound = buf.bind();
+        let lib = std::sync::Arc::new(voxel_core::meshers::blocky::BakedLibrary::default());
+        let mesher = voxel_core::meshers::BlockyMesher::new(lib)
+            .with_type_channel(self.type_channel.max(0) as usize);
+        let input = voxel_core::meshers::MesherInput::new(bound.core_buffer(), Vector3i::zero(), 0);
+        let mut output = voxel_core::meshers::MesherOutput::default();
+        voxel_core::meshers::VoxelMesher::build(&mesher, &mut output, &input);
+        output.total_vertex_count() as i64
+    }
+}
+
 // ---------------------------------------------------------------------------
 // VoxelMesherCubesGD — Resource wrapper for CubesMesher config
 // ---------------------------------------------------------------------------
@@ -134,6 +167,37 @@ impl IResource for VoxelMesherCubesGD {
             greedy: true,
             color_channel: 4,
         }
+    }
+}
+
+#[godot_api]
+impl VoxelMesherCubesGD {
+    /// Whether greedy rectangle merging is enabled.
+    #[func]
+    fn is_greedy(&self) -> bool {
+        self.greedy
+    }
+
+    /// The configured color channel index.
+    #[func]
+    fn color_channel_index(&self) -> i32 {
+        self.color_channel
+    }
+
+    /// Build a real `CubesMesher` from this config and return the vertex count
+    /// it produces for a `VoxelBufferGD`. Returns -1 if `buffer` is not a
+    /// `VoxelBufferGD`.
+    #[func]
+    fn build_vertex_count(&self, buffer: Gd<RefCounted>) -> i64 {
+        let Ok(buf) = buffer.try_cast::<crate::voxel_buffer::VoxelBufferGD>() else {
+            return -1;
+        };
+        let bound = buf.bind();
+        let mesher = voxel_core::meshers::CubesMesher::new();
+        let input = voxel_core::meshers::MesherInput::new(bound.core_buffer(), Vector3i::zero(), 0);
+        let mut output = voxel_core::meshers::MesherOutput::default();
+        voxel_core::meshers::VoxelMesher::build(&mesher, &mut output, &input);
+        output.total_vertex_count() as i64
     }
 }
 
@@ -198,15 +262,16 @@ impl VoxelColorPaletteGD {
 // VoxelBlockyLibraryGD — Resource for blocky model library
 // ---------------------------------------------------------------------------
 
-/// A library of baked blocky models. In the C++ version this holds
-/// `BakedLibrary`; here it's a configuration holder.
+/// A library of baked blocky models. The functional API maintains a real
+/// [`voxel_core::meshers::blocky::BakedLibrary`] model table.
 #[derive(GodotClass)]
 #[class(base = Resource, tool)]
 pub struct VoxelBlockyLibraryGD {
     base: Base<Resource>,
-    /// Number of models in the library.
-    #[var]
+    /// Number of models (plain field; exposed via get_model_count #[func]).
     model_count: i32,
+    /// The real baked model table.
+    library: voxel_core::meshers::blocky::BakedLibrary,
 }
 
 #[godot_api]
@@ -215,7 +280,38 @@ impl IResource for VoxelBlockyLibraryGD {
         Self {
             base,
             model_count: 0,
+            library: voxel_core::meshers::blocky::BakedLibrary::default(),
         }
+    }
+}
+
+#[godot_api]
+impl VoxelBlockyLibraryGD {
+    /// Append a solid-color model and return its index.
+    #[func]
+    fn add_solid_model(&mut self, r: f32, g: f32, b: f32) -> i32 {
+        let model = voxel_core::meshers::blocky::BakedModel {
+            color: voxel_core::math::Color::from_rgb(r, g, b),
+            empty: false,
+            culls_neighbors: true,
+            ..voxel_core::meshers::blocky::BakedModel::default()
+        };
+        let idx = self.library.models.len() as i32;
+        self.library.models.push(model);
+        self.model_count = self.library.models.len() as i32;
+        idx
+    }
+
+    /// Number of models in the library.
+    #[func]
+    fn get_model_count(&self) -> i32 {
+        self.model_count
+    }
+
+    /// Whether the library is empty.
+    #[func]
+    fn is_empty(&self) -> bool {
+        self.library.models.is_empty()
     }
 }
 
