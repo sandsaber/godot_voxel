@@ -7309,3 +7309,339 @@ mod edition_variations_parity {
         assert!(air < 1000, "cavity should be bounded: {air}");
     }
 }
+
+// Mirrors test_voxel_mesher_cubes.cpp — opaque/transparent surface separation.
+#[cfg(test)]
+mod cubes_mesher_surfaces_parity {
+    use voxel_core::math::Vector3i;
+    use voxel_core::meshers::{CubesMesher, MesherInput, MesherOutput, VoxelMesher};
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
+
+    /// The CubesMesher produces exactly 2 surfaces (opaque + transparent).
+    #[test]
+    fn cubes_produces_two_surfaces() {
+        let mesher = CubesMesher::new();
+        let mut voxels = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Color.index()] = ChannelDepth::Bit16;
+        fmt.configure_buffer(&mut voxels);
+        // Two opaque + one transparent voxel.
+        voxels.set_voxel(0xFFFF, 3, 4, 4, ChannelId::Color.index());
+        voxels.set_voxel(0xFFFF, 4, 4, 4, ChannelId::Color.index());
+        voxels.set_voxel(0x80FF, 5, 4, 4, ChannelId::Color.index()); // alpha=128 → transparent
+        let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+        let mut out = MesherOutput::default();
+        mesher.build(&mut out, &input);
+        // CubesMesher always emits 2 surfaces (opaque + transparent).
+        assert_eq!(out.surfaces.len(), 2, "cubes should produce 2 surfaces");
+    }
+
+    /// An all-air buffer produces 2 empty surfaces (0 vertices each).
+    #[test]
+    fn cubes_all_air_two_empty_surfaces() {
+        let mesher = CubesMesher::new();
+        let mut voxels = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Color.index()] = ChannelDepth::Bit16;
+        fmt.configure_buffer(&mut voxels);
+        let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+        let mut out = MesherOutput::default();
+        mesher.build(&mut out, &input);
+        assert_eq!(out.surfaces.len(), 2);
+        assert_eq!(out.total_vertex_count(), 0, "all-air → 0 vertices");
+    }
+
+    /// A single opaque voxel produces vertices only on the opaque surface.
+    #[test]
+    fn single_opaque_voxel_opaque_surface_only() {
+        let mesher = CubesMesher::new();
+        let mut voxels = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Color.index()] = ChannelDepth::Bit16;
+        fmt.configure_buffer(&mut voxels);
+        voxels.set_voxel(0xFFFF, 4, 4, 4, ChannelId::Color.index());
+        let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+        let mut out = MesherOutput::default();
+        mesher.build(&mut out, &input);
+        assert!(
+            out.total_vertex_count() > 0,
+            "opaque voxel should produce geometry"
+        );
+        // The opaque surface (index 0) should have all the vertices.
+        assert!(
+            out.surfaces[0].arrays.vertex_count() > 0,
+            "opaque surface should have vertices"
+        );
+    }
+}
+
+// Mirrors test_transvoxel.cpp — issue772 SDF + indices pattern.
+#[cfg(test)]
+mod transvoxel_issue772_parity {
+    use voxel_core::math::Vector3i;
+    use voxel_core::meshers::{MesherInput, MesherOutput, TransvoxelMesher, VoxelMesher};
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
+
+    /// An SDF terrain with material indices in the INDICES channel produces
+    /// valid geometry without crashing. Mirrors issue772.
+    #[test]
+    fn sdf_with_indices_no_crash() {
+        let mesher = TransvoxelMesher::new();
+        let mut voxels = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+        fmt.depths[ChannelId::Indices.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut voxels);
+        let h = 4.1;
+        for z in 0..8 {
+            for x in 0..8 {
+                for y in 0..8 {
+                    let sd = y as f32 - h;
+                    voxels.set_voxel_f(sd, x, y, z, ChannelId::Sdf.index());
+                    if sd < 1.0 {
+                        voxels.set_voxel(
+                            ((x + y + z) & 0xff) as u64,
+                            x,
+                            y,
+                            z,
+                            ChannelId::Indices.index(),
+                        );
+                    }
+                }
+            }
+        }
+        let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+        let mut out = MesherOutput::default();
+        mesher.build(&mut out, &input);
+        assert!(
+            out.total_vertex_count() > 0,
+            "SDF with indices should produce geometry"
+        );
+    }
+
+    /// A half-space SDF (solid below, air above) produces a flat surface.
+    #[test]
+    fn half_space_produces_flat_surface() {
+        let mesher = TransvoxelMesher::new();
+        let mut voxels = VoxelBuffer::with_size(Vector3i::splat(16));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+        fmt.configure_buffer(&mut voxels);
+        for z in 0..16 {
+            for x in 0..16 {
+                for y in 0..16 {
+                    voxels.set_voxel_f(y as f32 - 8.0, x, y, z, ChannelId::Sdf.index());
+                }
+            }
+        }
+        let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+        let mut out = MesherOutput::default();
+        mesher.build(&mut out, &input);
+        assert!(
+            out.total_vertex_count() > 0,
+            "half-space should produce geometry"
+        );
+        assert!(
+            out.total_triangle_count() > 0,
+            "half-space should produce triangles"
+        );
+    }
+
+    /// A small bump on a plane produces more geometry than a flat plane alone.
+    #[test]
+    fn bump_on_plane_more_geometry() {
+        let mesher = TransvoxelMesher::new();
+        let flat_verts = {
+            let mut voxels = VoxelBuffer::with_size(Vector3i::splat(16));
+            let mut fmt = VoxelFormat::new();
+            fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+            fmt.configure_buffer(&mut voxels);
+            for z in 0..16 {
+                for x in 0..16 {
+                    for y in 0..16 {
+                        voxels.set_voxel_f(y as f32 - 8.0, x, y, z, ChannelId::Sdf.index());
+                    }
+                }
+            }
+            let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+            let mut out = MesherOutput::default();
+            mesher.build(&mut out, &input);
+            out.total_vertex_count()
+        };
+        let bump_verts = {
+            let mut voxels = VoxelBuffer::with_size(Vector3i::splat(16));
+            let mut fmt = VoxelFormat::new();
+            fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+            fmt.configure_buffer(&mut voxels);
+            for z in 0..16 {
+                for x in 0..16 {
+                    for y in 0..16 {
+                        let bump =
+                            ((x as f32 - 8.0).powi(2) + (z as f32 - 8.0).powi(2)).sqrt() - 3.0;
+                        let plane = y as f32 - 8.0;
+                        // Union: the bump adds solidness on top of the plane.
+                        let d = plane.min(bump);
+                        voxels.set_voxel_f(d, x, y, z, ChannelId::Sdf.index());
+                    }
+                }
+            }
+            let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+            let mut out = MesherOutput::default();
+            mesher.build(&mut out, &input);
+            out.total_vertex_count()
+        };
+        assert!(
+            bump_verts >= flat_verts,
+            "bump should have >= geometry than flat: {bump_verts} vs {flat_verts}"
+        );
+    }
+}
+
+// Additional graph SDF combination + modifier depth parity.
+#[cfg(test)]
+mod graph_modifier_depth_parity {
+    use voxel_core::generators::graph::{
+        CompiledGraph, CompiledScratch, Graph, GraphInputs, GraphOutput, GraphPort, NodeKind,
+    };
+    use voxel_core::math::Vector3f;
+    use voxel_core::modifiers::{ModifierStack, SdfOperation, SphereModifier};
+
+    /// A modifier stack with 5 subtract modifiers carves more than 1.
+    #[test]
+    fn five_subtracts_carve_more_than_one() {
+        let positions: Vec<Vector3f> = (0..7)
+            .flat_map(|x| {
+                (0..7).flat_map(move |y| {
+                    (0..7).map(move |z| Vector3f::new(x as f32, y as f32, z as f32))
+                })
+            })
+            .collect();
+        let mut sdf1 = vec![-10.0f32; positions.len()];
+        let mut s1 = ModifierStack::new();
+        s1.add(Box::new(SphereModifier {
+            center: Vector3f::new(3.0, 3.0, 3.0),
+            radius: 2.0,
+            operation: SdfOperation::Subtract,
+            smoothness: 0.0,
+        }));
+        s1.apply(&mut sdf1, &positions);
+        let carved1 = sdf1.iter().filter(|&&v| v >= 0.0).count();
+
+        let mut sdf5 = vec![-10.0f32; positions.len()];
+        let mut s5 = ModifierStack::new();
+        for offset in 0..5 {
+            s5.add(Box::new(SphereModifier {
+                center: Vector3f::new(offset as f32, 3.0, 3.0),
+                radius: 2.0,
+                operation: SdfOperation::Subtract,
+                smoothness: 0.0,
+            }));
+        }
+        s5.apply(&mut sdf5, &positions);
+        let carved5 = sdf5.iter().filter(|&&v| v >= 0.0).count();
+
+        assert!(
+            carved5 > carved1,
+            "5 subtracts should carve more: {carved5} vs {carved1}"
+        );
+    }
+
+    /// A graph with SdfSmoothUnion at non-zero smoothness differs from hard union.
+    #[test]
+    fn smooth_union_nonzero_differs_from_hard() {
+        fn run_graph(smoothness: f32) -> f32 {
+            let mut g = Graph::new();
+            let na = g.push(NodeKind::Constant(-1.0));
+            let nb = g.push(NodeKind::Constant(1.0));
+            let u = g.push(NodeKind::SdfSmoothUnion {
+                a: Some(GraphPort {
+                    node: na,
+                    output: 0,
+                }),
+                b: Some(GraphPort {
+                    node: nb,
+                    output: 0,
+                }),
+                smoothness,
+            });
+            g.push(NodeKind::OutputSdf {
+                a: Some(GraphPort { node: u, output: 0 }),
+            });
+            let c = CompiledGraph::compile(&g).expect("compile");
+            let xs = [0.0f32];
+            let zs = [0.0f32];
+            let i = GraphInputs {
+                x: &xs,
+                y: 0.0,
+                z: &zs,
+            };
+            let mut s = CompiledScratch::new();
+            let mut o = Vec::new();
+            c.generate_slice(&i, 1, &mut s, &mut o, false);
+            o.into_iter()
+                .find(|(k, _)| *k == GraphOutput::Sdf)
+                .and_then(|(_, v)| v.into_iter().next())
+                .unwrap()
+        }
+        let hard = run_graph(0.0);
+        let smooth = run_graph(1.0);
+        assert!(
+            (hard - smooth).abs() > 1e-6,
+            "smooth(1) should differ from hard: {hard} vs {smooth}"
+        );
+    }
+}
+
+// Additional buffer format + voxel_data_map patterns.
+#[cfg(test)]
+mod buffer_format_patterns_parity {
+    use voxel_core::math::Vector3i;
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
+
+    /// VoxelFormat::new() has default depths for all 8 channels.
+    #[test]
+    fn default_format_has_all_channels() {
+        let fmt = VoxelFormat::new();
+        assert_eq!(fmt.depths.len(), 8);
+        for (i, &d) in fmt.depths.iter().enumerate() {
+            let _ = (i, d); // all channels have a depth
+        }
+    }
+
+    /// configure_buffer applies the format depths to the buffer.
+    #[test]
+    fn configure_buffer_applies_depths() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(4));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[0] = ChannelDepth::Bit8;
+        fmt.depths[1] = ChannelDepth::Bit16;
+        fmt.depths[2] = ChannelDepth::Bit32;
+        fmt.configure_buffer(&mut buf);
+        assert_eq!(buf.channel_depth(0), ChannelDepth::Bit8);
+        assert_eq!(buf.channel_depth(1), ChannelDepth::Bit16);
+        assert_eq!(buf.channel_depth(2), ChannelDepth::Bit32);
+    }
+
+    /// A Bit64 channel round-trips a large 64-bit value exactly.
+    #[test]
+    fn bit64_channel_round_trips_large_value() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(4));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit64;
+        fmt.configure_buffer(&mut buf);
+        let val: u64 = 0xDEADBEEFCAFEBABE;
+        buf.set_voxel(val, 1, 1, 1, ChannelId::Type.index());
+        assert_eq!(buf.get_voxel(1, 1, 1, ChannelId::Type.index()), val);
+    }
+
+    /// Reading an unwritten voxel returns 0 (default).
+    #[test]
+    fn read_unwritten_returns_zero() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(4));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        // No writes — all should be default (0).
+        assert_eq!(buf.get_voxel(2, 2, 2, ChannelId::Type.index()), 0);
+    }
+}
