@@ -13883,3 +13883,213 @@ mod cubes_palette_topology_parity {
         );
     }
 }
+
+// Mirrors test_edition_funcs.cpp — box_blur comparison (slow_ref vs optimized).
+#[cfg(test)]
+mod box_blur_parity {
+    use voxel_core::edition::ops::box_blur;
+    use voxel_core::math::{Vector3f, Vector3i};
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
+
+    /// box_blur on a uniform SDF produces the same uniform value (no change).
+    #[test]
+    fn box_blur_uniform_unchanged() {
+        let mut src = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+        fmt.configure_buffer(&mut src);
+        src.clear_channel_f(ChannelId::Sdf.index(), -5.0);
+
+        let mut dst = VoxelBuffer::with_size(Vector3i::splat(8));
+        fmt.configure_buffer(&mut dst);
+
+        box_blur(&src, &mut dst, 2, Vector3f::new(4.0, 4.0, 4.0), 10.0);
+
+        // Averaging a uniform value should return the same value.
+        assert!((dst.get_voxel_f(4, 4, 4, ChannelId::Sdf.index()) - (-5.0)).abs() < 1e-5);
+        assert!((dst.get_voxel_f(0, 0, 0, ChannelId::Sdf.index()) - (-5.0)).abs() < 1e-5);
+    }
+
+    /// box_blur smooths a sharp boundary: the center value moves toward the average.
+    #[test]
+    fn box_blur_smooths_boundary() {
+        let mut src = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+        fmt.configure_buffer(&mut src);
+        // Half solid (-10), half air (+10).
+        for z in 0..8 {
+            for y in 0..8 {
+                for x in 0..8 {
+                    let v = if x < 4 { -10.0 } else { 10.0 };
+                    src.set_voxel_f(v, x, y, z, ChannelId::Sdf.index());
+                }
+            }
+        }
+        let mut dst = VoxelBuffer::with_size(Vector3i::splat(8));
+        fmt.configure_buffer(&mut dst);
+
+        box_blur(&src, &mut dst, 1, Vector3f::new(4.0, 4.0, 4.0), 20.0);
+
+        // At x=3 (near boundary), the blurred value should be between -10 and +10.
+        let v = dst.get_voxel_f(3, 4, 4, ChannelId::Sdf.index());
+        assert!(
+            v > -10.0,
+            "boundary should be smoothed (less negative): {v}"
+        );
+    }
+
+    /// box_blur outside the sphere copies source unchanged.
+    #[test]
+    fn box_blur_outside_sphere_copies_source() {
+        let mut src = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+        fmt.configure_buffer(&mut src);
+        src.clear_channel_f(ChannelId::Sdf.index(), 3.0);
+
+        let mut dst = VoxelBuffer::with_size(Vector3i::splat(8));
+        fmt.configure_buffer(&mut dst);
+
+        // Small sphere radius — corner voxels should be outside.
+        box_blur(&src, &mut dst, 1, Vector3f::new(4.0, 4.0, 4.0), 2.0);
+
+        // Corner (0,0,0) is far from center (4,4,4): dist = sqrt(48) ≈ 6.9 > 2.
+        assert!(
+            (dst.get_voxel_f(0, 0, 0, ChannelId::Sdf.index()) - 3.0).abs() < 1e-5,
+            "outside sphere should copy source: {}",
+            dst.get_voxel_f(0, 0, 0, ChannelId::Sdf.index())
+        );
+    }
+
+    /// box_blur is deterministic: same input → same output.
+    #[test]
+    fn box_blur_deterministic() {
+        let mut src = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+        fmt.configure_buffer(&mut src);
+        for z in 0..8 {
+            for y in 0..8 {
+                for x in 0..8 {
+                    src.set_voxel_f(
+                        (x as f32 - 4.0).cos() + (y as f32 - 4.0).sin(),
+                        x,
+                        y,
+                        z,
+                        ChannelId::Sdf.index(),
+                    );
+                }
+            }
+        }
+
+        let mut dst1 = VoxelBuffer::with_size(Vector3i::splat(8));
+        fmt.configure_buffer(&mut dst1);
+        box_blur(&src, &mut dst1, 2, Vector3f::new(4.0, 4.0, 4.0), 10.0);
+
+        let mut dst2 = VoxelBuffer::with_size(Vector3i::splat(8));
+        fmt.configure_buffer(&mut dst2);
+        box_blur(&src, &mut dst2, 2, Vector3f::new(4.0, 4.0, 4.0), 10.0);
+
+        // Every voxel should be identical.
+        for z in 0..8 {
+            for y in 0..8 {
+                for x in 0..8 {
+                    let v1 = dst1.get_voxel_f(x, y, z, ChannelId::Sdf.index());
+                    let v2 = dst2.get_voxel_f(x, y, z, ChannelId::Sdf.index());
+                    assert!(
+                        (v1 - v2).abs() < 1e-6,
+                        "box_blur not deterministic at ({x},{y},{z}): {v1} vs {v2}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+// Mirrors test_edition_funcs.cpp — run_blocky_random_tick.
+#[cfg(test)]
+mod random_tick_parity {
+    use voxel_core::edition::ops::run_blocky_random_tick;
+    use voxel_core::math::{Box3i, Vector3i};
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
+
+    #[test]
+    fn random_tick_finds_tickable_voxels() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        // Fill with tickable id=1 in a region.
+        for z in 0..4 {
+            for y in 0..4 {
+                for x in 0..4 {
+                    buf.set_voxel(1, x, y, z, ChannelId::Type.index());
+                }
+            }
+        }
+
+        let mut ticked = Vec::new();
+        run_blocky_random_tick(
+            &buf,
+            Box3i::new(Vector3i::zero(), Vector3i::splat(8)),
+            1,
+            ChannelId::Type.index(),
+            10,
+            |pos| ticked.push(pos),
+        );
+
+        assert!(!ticked.is_empty(), "should tick at least one voxel");
+        // All ticked positions should have tickable_id.
+        for &pos in &ticked {
+            assert_eq!(
+                buf.get_voxel(pos.x, pos.y, pos.z, ChannelId::Type.index()),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn random_tick_empty_region_no_ticks() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        // All air (id=0), looking for tickable id=1 → no candidates.
+
+        let mut count = 0;
+        run_blocky_random_tick(
+            &buf,
+            Box3i::new(Vector3i::zero(), Vector3i::splat(8)),
+            1,
+            ChannelId::Type.index(),
+            10,
+            |_| count += 1,
+        );
+
+        assert_eq!(count, 0, "no tickable voxels → no ticks");
+    }
+
+    #[test]
+    fn random_tick_respects_batch_count() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        // Fill entire region with tickable id=1 (512 voxels).
+        buf.fill(1, ChannelId::Type.index());
+
+        let mut count = 0;
+        run_blocky_random_tick(
+            &buf,
+            Box3i::new(Vector3i::zero(), Vector3i::splat(8)),
+            1,
+            ChannelId::Type.index(),
+            5, // batch_count
+            |_| count += 1,
+        );
+
+        assert!(count <= 5, "should not exceed batch_count: {count}");
+        assert!(count > 0, "should tick at least one");
+    }
+}

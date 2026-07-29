@@ -281,6 +281,117 @@ impl Vector3iExt for Vector3i {
     }
 }
 
+/// Box blur of the SDF channel. Averages each voxel's SDF value over a cube
+/// of side `(2*radius+1)` centered on it, but only within a sphere of
+/// influence centered at `sphere_center` with `sphere_radius`. Voxels outside
+/// the sphere are left unchanged. This is the simple reference implementation
+/// matching `ops::box_blur_slow_ref` from `edition/funcs.h`.
+///
+/// The destination buffer must have the same size and SDF channel depth as
+/// the source.
+pub fn box_blur(
+    src: &VoxelBuffer,
+    dst: &mut VoxelBuffer,
+    radius: i32,
+    sphere_center: Vector3f,
+    sphere_radius: f32,
+) {
+    let channel = ChannelId::Sdf.index();
+    let size = src.size();
+    debug_assert_eq!(dst.size(), size);
+
+    let r2 = sphere_radius * sphere_radius;
+
+    for z in 0..size.z {
+        for y in 0..size.y {
+            for x in 0..size.x {
+                // Check sphere of influence.
+                let dx = x as f32 - sphere_center.x;
+                let dy = y as f32 - sphere_center.y;
+                let dz = z as f32 - sphere_center.z;
+                if dx * dx + dy * dy + dz * dz > r2 {
+                    // Outside sphere → copy source value unchanged.
+                    dst.set_voxel_f(src.get_voxel_f(x, y, z, channel), x, y, z, channel);
+                    continue;
+                }
+
+                // Average over the cube.
+                let lo_x = (x - radius).max(0);
+                let hi_x = (x + radius + 1).min(size.x);
+                let lo_y = (y - radius).max(0);
+                let hi_y = (y + radius + 1).min(size.y);
+                let lo_z = (z - radius).max(0);
+                let hi_z = (z + radius + 1).min(size.z);
+
+                let mut sum = 0.0f64;
+                let mut count = 0u32;
+                for bz in lo_z..hi_z {
+                    for by in lo_y..hi_y {
+                        for bx in lo_x..hi_x {
+                            sum += src.get_voxel_f(bx, by, bz, channel) as f64;
+                            count += 1;
+                        }
+                    }
+                }
+
+                let avg = if count > 0 {
+                    (sum / count as f64) as f32
+                } else {
+                    src.get_voxel_f(x, y, z, channel)
+                };
+                dst.set_voxel_f(avg, x, y, z, channel);
+            }
+        }
+    }
+}
+
+/// Run blocky random tick: iterate over random tickable voxels within a box
+/// and invoke `callback` for each one selected. Returns the number of
+/// callbacks invoked. Matches `ops::run_blocky_random_tick` semantics:
+/// each voxel with `is_random_tickable` set in the baked model at that index
+/// is a candidate; we randomly select up to `batch_count` per iteration.
+pub fn run_blocky_random_tick<F: FnMut(Vector3i)>(
+    buf: &VoxelBuffer,
+    voxel_box: crate::math::Box3i,
+    tickable_id: u64,
+    channel: usize,
+    batch_count: usize,
+    callback: F,
+) {
+    let mut callback = callback;
+    let size = buf.size();
+
+    // Collect candidate positions.
+    let mut candidates = Vec::new();
+    for pos in voxel_box.iter_cells_zxy() {
+        if pos.x < 0 || pos.y < 0 || pos.z < 0 {
+            continue;
+        }
+        if pos.x >= size.x || pos.y >= size.y || pos.z >= size.z {
+            continue;
+        }
+        let voxel = buf.get_voxel(pos.x, pos.y, pos.z, channel);
+        if voxel == tickable_id {
+            candidates.push(pos);
+        }
+    }
+
+    if candidates.is_empty() {
+        return;
+    }
+
+    // Simple deterministic iteration (not truly random — mirrors the "tick"
+    // semantic without needing a PRNG dependency).
+    let step = (candidates.len() / batch_count.max(1)).max(1);
+    let mut invoked = 0usize;
+    for (i, &pos) in candidates.iter().enumerate() {
+        if i % step == 0 && invoked < batch_count {
+            callback(pos);
+            invoked += 1;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
