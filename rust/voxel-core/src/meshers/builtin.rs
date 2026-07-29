@@ -243,6 +243,17 @@ impl VoxelMesher for TransvoxelMesher {
     }
 }
 
+/// Color mode for [`CubesMesher`]. Matches C++ `VoxelMesherCubes::ColorMode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CubesColorMode {
+    /// Interpret each voxel value as packed RGBA at the channel's native width.
+    /// This is the C++ default (`COLOR_RAW`).
+    #[default]
+    Raw,
+    /// Look up each voxel value (low 8 bits) in a [`ColorPalette`].
+    Palette,
+}
+
 /// Blocky colored-cube mesher wrapping the existing greedy-cubes free
 /// function. Reads the `Color` channel as 32-bit voxel ids, looks up each
 /// id in a [`ColorPalette`], and emits two surfaces (opaque + transparent)
@@ -250,6 +261,7 @@ impl VoxelMesher for TransvoxelMesher {
 pub struct CubesMesher {
     type_channel: usize,
     palette: crate::meshers::cubes::palette::ColorPalette,
+    color_mode: CubesColorMode,
     /// When `true`, uses the greedy rectangle-merging path. When `false`,
     /// emits one quad per face (the simpler reference path). Greedy is the
     /// C++ default.
@@ -267,12 +279,18 @@ impl CubesMesher {
         Self {
             type_channel: ChannelId::Color.index(),
             palette: crate::meshers::cubes::palette::ColorPalette::default(),
+            color_mode: CubesColorMode::default(),
             greedy: true,
         }
     }
 
     pub fn with_palette(mut self, palette: crate::meshers::cubes::palette::ColorPalette) -> Self {
         self.palette = palette;
+        self
+    }
+
+    pub fn with_color_mode(mut self, mode: CubesColorMode) -> Self {
+        self.color_mode = mode;
         self
     }
 
@@ -320,8 +338,20 @@ impl VoxelMesher for CubesMesher {
         let voxels = Self::extract_voxel_slice(input.voxels, self.type_channel);
         let size = input.voxels.size();
         let block_size = [size.x, size.y, size.z];
+
+        // CUBES-1 parity: dispatch color function by color_mode. C++ defaults
+        // to COLOR_RAW which interprets the voxel value as packed RGBA.
+        let depth = input.voxels.channel_depth(self.type_channel);
         let palette = self.palette.clone();
-        let color_func = move |raw: u32| palette.get_color8(raw as u8);
+        let color_mode = self.color_mode;
+        let color_func = move |raw: u32| match color_mode {
+            CubesColorMode::Raw => match depth {
+                crate::storage::ChannelDepth::Bit8 => crate::math::Color8::from_u8(raw as u8),
+                crate::storage::ChannelDepth::Bit16 => crate::math::Color8::from_u16(raw as u16),
+                _ => crate::math::Color8::from_u32(raw),
+            },
+            CubesColorMode::Palette => palette.get_color8(raw as u8),
+        };
 
         let mut arrays: [crate::meshers::cubes::arrays::CubesArrays; MATERIAL_COUNT] =
             Default::default();
@@ -609,7 +639,9 @@ fn build_blocky_into(
 
 #[cfg(test)]
 mod tests {
-    use super::{BlockyMesher, CubesMesher, TransvoxelMesher, TRANSVOXEL_SAMPLE_COUNT};
+    use super::{
+        BlockyMesher, CubesColorMode, CubesMesher, TransvoxelMesher, TRANSVOXEL_SAMPLE_COUNT,
+    };
     use crate::constants::cube_tables::{Side, CORNER_POSITION, SIDE_CORNERS, SIDE_QUAD_TRIANGLES};
     use crate::math::{Vector2f, Vector3f, Vector3i};
     use crate::meshers::blocky::baked_library::{BakedLibrary, BakedModel};
@@ -814,7 +846,9 @@ mod tests {
 
     #[test]
     fn cubes_mesher_produces_two_surfaces_for_a_solid_block() {
-        let mesher = CubesMesher::new();
+        // Use Palette mode (the pre-CUBES-1 behavior) so the test voxel value
+        // maps to opaque white via the default palette.
+        let mesher = CubesMesher::new().with_color_mode(CubesColorMode::Palette);
         let voxels = cubes_input_buffer();
         let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
 
