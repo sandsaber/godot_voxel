@@ -474,15 +474,47 @@ impl VoxelBlockyModelFluidGD {
     }
 }
 
+/// A fluid type for blocky terrain. The functional API reports flow state.
 #[derive(GodotClass)]
 #[class(base = Resource, tool)]
 pub struct VoxelBlockyFluidGD {
     base: Base<Resource>,
+    flowing: bool,
+    flow_level: i32,
 }
 #[godot_api]
 impl IResource for VoxelBlockyFluidGD {
     fn init(base: Base<Resource>) -> Self {
-        Self { base }
+        Self {
+            base,
+            flowing: false,
+            flow_level: 8,
+        }
+    }
+}
+
+#[godot_api]
+impl VoxelBlockyFluidGD {
+    /// Whether this fluid is currently flowing (spreading).
+    #[func]
+    fn is_flowing(&self) -> bool {
+        self.flowing
+    }
+
+    #[func]
+    fn set_flowing(&mut self, flowing: bool) {
+        self.flowing = flowing;
+    }
+
+    /// The flow level (0-8, 8 = full block).
+    #[func]
+    fn get_flow_level(&self) -> i32 {
+        self.flow_level
+    }
+
+    #[func]
+    fn set_flow_level(&mut self, level: i32) {
+        self.flow_level = level.clamp(0, 8);
     }
 }
 
@@ -846,6 +878,8 @@ impl VoxelInstanceComponentGD {
 
 // === Editor inspector plugins (3) ===
 
+/// Inspector plugin handle for VoxelTerrain. The functional API reports the
+/// node type name it handles.
 #[derive(GodotClass)]
 #[class(base = Resource, tool)]
 pub struct VoxelTerrainEditorPluginGD {
@@ -858,6 +892,16 @@ impl IResource for VoxelTerrainEditorPluginGD {
     }
 }
 
+#[godot_api]
+impl VoxelTerrainEditorPluginGD {
+    /// The node type this plugin handles.
+    #[func]
+    fn get_handled_type(&self) -> GString {
+        "VoxelTerrain".to_godot()
+    }
+}
+
+/// Inspector plugin handle for the instancer.
 #[derive(GodotClass)]
 #[class(base = Resource, tool)]
 pub struct VoxelInstancerEditorPluginGD {
@@ -870,6 +914,16 @@ impl IResource for VoxelInstancerEditorPluginGD {
     }
 }
 
+#[godot_api]
+impl VoxelInstancerEditorPluginGD {
+    /// The node type this plugin handles.
+    #[func]
+    fn get_handled_type(&self) -> GString {
+        "VoxelInstancer".to_godot()
+    }
+}
+
+/// Inspector plugin handle for the graph editor.
 #[derive(GodotClass)]
 #[class(base = Resource, tool)]
 pub struct VoxelGraphEditorPluginGD {
@@ -879,6 +933,15 @@ pub struct VoxelGraphEditorPluginGD {
 impl IResource for VoxelGraphEditorPluginGD {
     fn init(base: Base<Resource>) -> Self {
         Self { base }
+    }
+}
+
+#[godot_api]
+impl VoxelGraphEditorPluginGD {
+    /// The node type this plugin handles.
+    #[func]
+    fn get_handled_type(&self) -> GString {
+        "VoxelGeneratorGraph".to_godot()
     }
 }
 

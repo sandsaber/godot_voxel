@@ -4283,3 +4283,132 @@ mod scatter_multiconfig_parity {
         assert_eq!(result.len(), 0, "empty surface → no instances");
     }
 }
+
+#[cfg(test)]
+mod sdf_function_matrix_parity {
+    use voxel_core::math::{sdf, Vector3f};
+
+    /// sdf_sphere at center is -radius. Golden.
+    #[test]
+    fn sdf_sphere_at_center_is_negative_radius() {
+        let d = sdf::sdf_sphere(Vector3f::zero(), Vector3f::zero(), 5.0);
+        assert!((d - (-5.0)).abs() < 1e-5, "sphere center: {d}");
+    }
+
+    /// sdf_sphere outside is dist - radius. Golden.
+    #[test]
+    fn sdf_sphere_outside() {
+        let d = sdf::sdf_sphere(Vector3f::new(10.0, 0.0, 0.0), Vector3f::zero(), 3.0);
+        assert!((d - 7.0).abs() < 1e-5, "sphere outside: {d}");
+    }
+
+    /// sdf_torus at center (in the ring plane) is negative (inside tube).
+    #[test]
+    fn sdf_torus_center_inside() {
+        let d = sdf::sdf_torus(Vector3f::new(3.0, 0.0, 0.0), 3.0, 1.0);
+        // At the ring (r0=3), inside the tube (r1=1): sdf = -1.
+        assert!(d < 0.0, "torus at ring should be inside: {d}");
+    }
+
+    /// sdf_torus far outside is positive.
+    #[test]
+    fn sdf_torus_far_outside() {
+        let d = sdf::sdf_torus(Vector3f::new(10.0, 10.0, 10.0), 3.0, 1.0);
+        assert!(d > 0.0, "torus far should be outside: {d}");
+    }
+
+    /// sdf_smooth_subtract produces a finite value for any smoothness.
+    #[test]
+    fn sdf_smooth_subtract_finite() {
+        let v = sdf::sdf_smooth_subtract(3.0, 1.0, 0.5);
+        assert!(v.is_finite(), "smooth subtract should be finite: {v}");
+    }
+
+    /// sdf_round_cone produces a finite value. Golden.
+    #[test]
+    fn sdf_round_cone_finite() {
+        let cone = sdf::SdfRoundConePrecalc::new(
+            Vector3f::new(0.0, 0.0, 0.0),
+            Vector3f::new(0.0, 5.0, 0.0),
+            1.0,
+            2.0,
+        );
+        let d = cone.eval(Vector3f::new(0.0, 2.5, 0.0));
+        assert!(d.is_finite(), "round cone should be finite: {d}");
+    }
+
+    /// sdf_plane returns dot(pos, normal) - d.
+    #[test]
+    fn sdf_plane_formula() {
+        let d = sdf::sdf_plane(
+            Vector3f::new(1.0, 2.0, 3.0),
+            Vector3f::new(0.0, 1.0, 0.0),
+            5.0,
+        );
+        assert!((d - (-3.0)).abs() < 1e-5, "sdf_plane: {d}");
+    }
+}
+
+#[cfg(test)]
+mod graph_unop_matrix_parity {
+    use voxel_core::generators::graph::{
+        CompiledGraph, CompiledScratch, Graph, GraphInputs, GraphOutput, GraphPort, NodeKind,
+    };
+
+    fn run_unop(make: impl FnOnce(GraphPort) -> NodeKind, input: f32) -> f32 {
+        let mut g = Graph::new();
+        let a = g.push(NodeKind::Constant(input));
+        let n = g.push(make(GraphPort { node: a, output: 0 }));
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: n, output: 0 }),
+        });
+        let c = CompiledGraph::compile(&g).expect("compile");
+        let xs = [0.0f32];
+        let zs = [0.0f32];
+        let i = GraphInputs {
+            x: &xs,
+            y: 0.0,
+            z: &zs,
+        };
+        let mut s = CompiledScratch::new();
+        let mut o = Vec::new();
+        c.generate_slice(&i, 1, &mut s, &mut o, false);
+        o.into_iter()
+            .find(|(k, _)| *k == GraphOutput::Sdf)
+            .and_then(|(_, v)| v.into_iter().next())
+            .unwrap()
+    }
+
+    #[test]
+    fn sin_various_inputs() {
+        assert!((run_unop(|a| NodeKind::Sin { a: Some(a) }, 0.0) - 0.0).abs() < 1e-5);
+        let half_pi = run_unop(|a| NodeKind::Sin { a: Some(a) }, std::f32::consts::FRAC_PI_2);
+        assert!((half_pi - 1.0).abs() < 1e-3, "sin(π/2)≈1: {half_pi}");
+    }
+
+    #[test]
+    fn cos_various_inputs() {
+        assert!((run_unop(|a| NodeKind::Cos { a: Some(a) }, 0.0) - 1.0).abs() < 1e-5);
+        let pi = run_unop(|a| NodeKind::Cos { a: Some(a) }, std::f32::consts::PI);
+        assert!((pi - (-1.0)).abs() < 1e-3, "cos(π)≈-1: {pi}");
+    }
+
+    #[test]
+    fn abs_various_inputs() {
+        assert!((run_unop(|a| NodeKind::Abs { a: Some(a) }, 0.0) - 0.0).abs() < 1e-5);
+        assert!((run_unop(|a| NodeKind::Abs { a: Some(a) }, -7.5) - 7.5).abs() < 1e-5);
+        assert!((run_unop(|a| NodeKind::Abs { a: Some(a) }, 7.5) - 7.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn floor_various_inputs() {
+        assert!((run_unop(|a| NodeKind::Floor { a: Some(a) }, 3.9) - 3.0).abs() < 1e-5);
+        assert!((run_unop(|a| NodeKind::Floor { a: Some(a) }, -2.1) - (-3.0)).abs() < 1e-5);
+    }
+
+    #[test]
+    fn fract_various_inputs() {
+        assert!((run_unop(|a| NodeKind::Fract { a: Some(a) }, 3.25) - 0.25).abs() < 1e-5);
+        assert!((run_unop(|a| NodeKind::Fract { a: Some(a) }, 5.0) - 0.0).abs() < 1e-5);
+    }
+}

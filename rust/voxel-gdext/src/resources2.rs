@@ -21,6 +21,15 @@ impl IResource for VoxelGeneratorGD {
     }
 }
 
+#[godot_api]
+impl VoxelGeneratorGD {
+    /// The generator category name (base type).
+    #[func]
+    fn get_category(&self) -> GString {
+        "generator".to_godot()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // VoxelStreamGD — abstract base Resource for all streams
 // ---------------------------------------------------------------------------
@@ -34,6 +43,15 @@ pub struct VoxelStreamGD {
 impl IResource for VoxelStreamGD {
     fn init(base: Base<Resource>) -> Self {
         Self { base }
+    }
+}
+
+#[godot_api]
+impl VoxelStreamGD {
+    /// The stream category name (base type).
+    #[func]
+    fn get_category(&self) -> GString {
+        "stream".to_godot()
     }
 }
 
@@ -52,6 +70,15 @@ pub struct VoxelMesherGD {
 impl IResource for VoxelMesherGD {
     fn init(base: Base<Resource>) -> Self {
         Self { base, padding: 1 }
+    }
+}
+
+#[godot_api]
+impl VoxelMesherGD {
+    /// The mesher category name (base type).
+    #[func]
+    fn get_category(&self) -> GString {
+        "mesher".to_godot()
     }
 }
 
@@ -76,6 +103,15 @@ impl INode3D for VoxelModifierGD {
             operation: 0,
             smoothness: 0.0,
         }
+    }
+}
+
+#[godot_api]
+impl VoxelModifierGD {
+    /// The modifier category name (base type).
+    #[func]
+    fn get_category(&self) -> GString {
+        "modifier".to_godot()
     }
 }
 
@@ -905,83 +941,180 @@ impl IResource for VoxelBlockyModelGD {
     }
 }
 
+#[godot_api]
+impl VoxelBlockyModelGD {
+    /// Whether this model has a material assigned (material_index > 0).
+    #[func]
+    fn has_material(&self) -> bool {
+        self.material_index >= 0
+    }
+}
+
 // ---------------------------------------------------------------------------
 // VoxelBlockyAttributeGD — Resource base for blocky attributes
 // ---------------------------------------------------------------------------
 /// Base for blocky type attributes (axis, rotation, direction, custom).
+/// The functional API reports the attribute kind name.
 #[derive(GodotClass)]
 #[class(base = Resource, tool)]
 pub struct VoxelBlockyAttributeGD {
     base: Base<Resource>,
+    attr_name: GString,
 }
 #[godot_api]
 impl IResource for VoxelBlockyAttributeGD {
     fn init(base: Base<Resource>) -> Self {
-        Self { base }
+        Self {
+            base,
+            attr_name: "base".to_godot(),
+        }
+    }
+}
+
+#[godot_api]
+impl VoxelBlockyAttributeGD {
+    /// The attribute's display name.
+    #[func]
+    fn get_attribute_name(&self) -> GString {
+        self.attr_name.clone()
     }
 }
 
 // ---------------------------------------------------------------------------
 // VoxelBlockyAttributeAxisGD
 // ---------------------------------------------------------------------------
-/// Axis attribute for blocky types.
+/// Axis attribute for blocky types (X/Y/Z). The functional API reports the
+/// axis as an integer (0=X, 1=Y, 2=Z).
 #[derive(GodotClass)]
 #[class(base = Resource, tool)]
 pub struct VoxelBlockyAttributeAxisGD {
     base: Base<Resource>,
+    axis: i32,
 }
 #[godot_api]
 impl IResource for VoxelBlockyAttributeAxisGD {
     fn init(base: Base<Resource>) -> Self {
-        Self { base }
+        Self { base, axis: 0 }
+    }
+}
+
+#[godot_api]
+impl VoxelBlockyAttributeAxisGD {
+    /// Get the axis (0=X, 1=Y, 2=Z).
+    #[func]
+    fn get_axis(&self) -> i32 {
+        self.axis
+    }
+
+    /// Set the axis (clamped 0-2).
+    #[func]
+    fn set_axis(&mut self, axis: i32) {
+        self.axis = axis.clamp(0, 2);
     }
 }
 
 // ---------------------------------------------------------------------------
 // VoxelBlockyAttributeRotationGD
 // ---------------------------------------------------------------------------
-/// Rotation attribute for blocky types.
+/// Rotation attribute for blocky types (0-360 degrees). The functional API
+/// normalizes the rotation to [0, 360).
 #[derive(GodotClass)]
 #[class(base = Resource, tool)]
 pub struct VoxelBlockyAttributeRotationGD {
     base: Base<Resource>,
+    rotation_degrees: i32,
 }
 #[godot_api]
 impl IResource for VoxelBlockyAttributeRotationGD {
     fn init(base: Base<Resource>) -> Self {
-        Self { base }
+        Self {
+            base,
+            rotation_degrees: 0,
+        }
+    }
+}
+
+#[godot_api]
+impl VoxelBlockyAttributeRotationGD {
+    /// Get the rotation in degrees (normalized to [0, 360)).
+    #[func]
+    fn get_rotation(&self) -> i32 {
+        self.rotation_degrees.rem_euclid(360)
+    }
+
+    /// Set the rotation in degrees.
+    #[func]
+    fn set_rotation(&mut self, degrees: i32) {
+        self.rotation_degrees = degrees;
     }
 }
 
 // ---------------------------------------------------------------------------
 // VoxelBlockyAttributeDirectionGD
 // ---------------------------------------------------------------------------
-/// Direction attribute for blocky types.
+/// Direction attribute for blocky types (cardinal direction). The functional
+/// API reports the direction name.
 #[derive(GodotClass)]
 #[class(base = Resource, tool)]
 pub struct VoxelBlockyAttributeDirectionGD {
     base: Base<Resource>,
+    direction: i32,
 }
 #[godot_api]
 impl IResource for VoxelBlockyAttributeDirectionGD {
     fn init(base: Base<Resource>) -> Self {
-        Self { base }
+        Self { base, direction: 0 }
+    }
+}
+
+#[godot_api]
+impl VoxelBlockyAttributeDirectionGD {
+    /// Get the direction name (0=North, 1=East, 2=South, 3=West).
+    #[func]
+    fn get_direction_name(&self) -> GString {
+        match self.direction {
+            0 => "North".to_godot(),
+            1 => "East".to_godot(),
+            2 => "South".to_godot(),
+            3 => "West".to_godot(),
+            _ => "Unknown".to_godot(),
+        }
     }
 }
 
 // ---------------------------------------------------------------------------
 // VoxelBlockyAttributeCustomGD
 // ---------------------------------------------------------------------------
-/// Custom attribute for blocky types.
+/// Custom attribute for blocky types (user-defined data). The functional API
+/// stores/retrieves a custom integer value.
 #[derive(GodotClass)]
 #[class(base = Resource, tool)]
 pub struct VoxelBlockyAttributeCustomGD {
     base: Base<Resource>,
+    custom_value: i64,
 }
 #[godot_api]
 impl IResource for VoxelBlockyAttributeCustomGD {
     fn init(base: Base<Resource>) -> Self {
-        Self { base }
+        Self {
+            base,
+            custom_value: 0,
+        }
+    }
+}
+
+#[godot_api]
+impl VoxelBlockyAttributeCustomGD {
+    /// Get the custom value.
+    #[func]
+    fn get_custom_value(&self) -> i64 {
+        self.custom_value
+    }
+
+    /// Set the custom value.
+    #[func]
+    fn set_custom_value(&mut self, value: i64) {
+        self.custom_value = value;
     }
 }
 
