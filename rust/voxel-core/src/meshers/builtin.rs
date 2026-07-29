@@ -410,7 +410,8 @@ impl BlockyMesher {
 
     pub fn with_occlusion(mut self, enabled: bool, darkness: f32) -> Self {
         self.bake_occlusion = enabled;
-        self.baked_occlusion_darkness = darkness;
+        // BLOCKY-1 parity: clamp to [0,1] like C++ setter.
+        self.baked_occlusion_darkness = darkness.clamp(0.0, 1.0);
         self
     }
 

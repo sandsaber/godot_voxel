@@ -554,8 +554,11 @@ fn generate_mesh_impl<T>(
                                 for j in 0..4usize {
                                     let corner = SIDE_CORNERS[side][j];
                                     if shaded_corner[corner] != 0 {
-                                        let s =
-                                            baked_occlusion_darkness * shaded_corner[corner] as f32;
+                                        // BLOCKY-1 parity: C++ divides darkness by 3.0
+                                        // (so max shade = darkness, not 3*darkness) and
+                                        // clamps to [0,1].
+                                        let s = (baked_occlusion_darkness / 3.0).clamp(0.0, 1.0)
+                                            * shaded_corner[corner] as f32;
                                         // k = 1 - distance_squared(corner_pos, vertex_pos).
                                         let dx = CORNER_POSITION[corner].x - vertex_pos.x;
                                         let dy = CORNER_POSITION[corner].y - vertex_pos.y;
