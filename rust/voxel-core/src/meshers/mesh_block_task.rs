@@ -199,12 +199,16 @@ impl ThreadedTask for MeshBlockTask {
     }
 
     fn priority(&mut self) -> TaskPriority {
-        // Mesh tasks are higher-priority than stream tasks but lower than
-        // main-thread work; the C++ side uses TASK_PRIORITY_MESH_BAND2 in
-        // band 2 via PriorityDependency. The bare constant lives in
-        // constants::voxel_constants; we keep a sensible default here until
-        // the priority-dependency wiring moves into this task.
-        TaskPriority::new(0, 0, 0, 0)
+        // TASK-1 parity: use the same band-2 base as C++
+        // (TASK_PRIORITY_MESH_BAND2 = 10) instead of the previous minimum
+        // (0,0,0,0). This lets load and mesh tasks compete on equal footing
+        // in the runner's priority queue rather than mesh being starved.
+        TaskPriority::new(
+            0,
+            0,
+            crate::constants::voxel_constants::TASK_PRIORITY_MESH_BAND2,
+            0,
+        )
     }
 
     fn is_cancelled(&mut self) -> bool {

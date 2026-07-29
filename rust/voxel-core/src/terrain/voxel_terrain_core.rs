@@ -764,8 +764,20 @@ impl VoxelTerrainCore {
         match output.kind {
             BlockDataOutputKind::Loaded | BlockDataOutputKind::NeedsGeneration => {
                 if output.dropped {
-                    if self.loading_blocks[lod].contains_key(&bpos) {
-                        self.blocks_pending_load[lod].push(bpos);
+                    // TASK-1 parity: limit retry storms. Only requeue if the
+                    // block is still wanted AND we haven't retried too many
+                    // times. C++ uses a time-spread queue; we use a simple
+                    // attempt cap stored in the loading_blocks refcount.
+                    if let Some(count) = self.loading_blocks[lod].get_mut(&bpos) {
+                        // The refcount doubles as a retry counter: high bits
+                        // track retries, low bits track viewers. If refcount
+                        // is very high (>1000), it's been retried many times.
+                        if *count < 1000 {
+                            *count += 100;
+                            self.blocks_pending_load[lod].push(bpos);
+                        }
+                        // If count >= 1000, silently drop — prevents infinite
+                        // retry storms from a persistently broken stream.
                     }
                     return;
                 }
@@ -1136,6 +1148,18 @@ impl ThreadedTask for LoadBlockForTerrainTask {
 
     fn debug_name(&self) -> &'static str {
         "LoadBlockForTerrain"
+    }
+
+    fn priority(&mut self) -> crate::tasks::TaskPriority {
+        // TASK-1 parity: use TASK_PRIORITY_LOAD_BAND2 (= 10) instead of
+        // inheriting the trait default TaskPriority::max() which starves mesh
+        // tasks. Both load and mesh now share band 2 at the same base level.
+        crate::tasks::TaskPriority::new(
+            0,
+            0,
+            crate::constants::voxel_constants::TASK_PRIORITY_LOAD_BAND2,
+            0,
+        )
     }
 }
 
