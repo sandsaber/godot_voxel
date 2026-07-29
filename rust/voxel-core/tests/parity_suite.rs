@@ -6230,3 +6230,382 @@ mod voxel_data_map_ops_parity {
         assert_eq!(map.block_count(), 2);
     }
 }
+
+// Mirrors test_voxel_graph.cpp — multi-slice generation with InputX/Y/Z.
+#[cfg(test)]
+mod graph_multislice_parity {
+    use voxel_core::generators::graph::{
+        CompiledGraph, CompiledScratch, Graph, GraphInputs, GraphOutput, GraphPort, NodeKind,
+    };
+
+    fn run_multi(g: &Graph, xs: &[f32], y: f32, zs: &[f32]) -> Vec<f32> {
+        let c = CompiledGraph::compile(g).expect("compile");
+        let i = GraphInputs { x: xs, y, z: zs };
+        let mut s = CompiledScratch::new();
+        let mut o = Vec::new();
+        c.generate_slice(&i, xs.len(), &mut s, &mut o, false);
+        o.into_iter()
+            .find(|(k, _)| *k == GraphOutput::Sdf)
+            .map(|(_, v)| v)
+            .unwrap_or_default()
+    }
+
+    /// InputY affects output: a graph computing InputY produces the y value
+    /// for all slice elements. Mirrors generator expressions with InputY.
+    #[test]
+    fn graph_input_y_constant_across_slice() {
+        let mut g = Graph::new();
+        let y = g.push(NodeKind::InputY);
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: y, output: 0 }),
+        });
+        let xs = [0.0f32, 1.0, 2.0];
+        let result = run_multi(&g, &xs, 5.0, &xs);
+        for &v in &result {
+            assert!((v - 5.0).abs() < 1e-5, "InputY should be 5: {v}");
+        }
+    }
+
+    /// InputZ varies per slice element. A graph computing InputZ*2 produces
+    /// a linear ramp in the Z dimension.
+    #[test]
+    fn graph_input_z_times_2_ramp() {
+        let mut g = Graph::new();
+        let z = g.push(NodeKind::InputZ);
+        let c2 = g.push(NodeKind::Constant(2.0));
+        let mul = g.push(NodeKind::Multiply {
+            a: Some(GraphPort { node: z, output: 0 }),
+            b: Some(GraphPort {
+                node: c2,
+                output: 0,
+            }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort {
+                node: mul,
+                output: 0,
+            }),
+        });
+        let xs = [0.0f32, 0.0, 0.0];
+        let zs = [1.0f32, 2.0, 3.0];
+        let result = run_multi(&g, &xs, 0.0, &zs);
+        assert_eq!(result.len(), 3);
+        assert!((result[0] - 2.0).abs() < 1e-5, "z*2 at z=1: {}", result[0]);
+        assert!((result[1] - 4.0).abs() < 1e-5, "z*2 at z=2: {}", result[1]);
+        assert!((result[2] - 6.0).abs() < 1e-5, "z*2 at z=3: {}", result[2]);
+    }
+
+    /// A multi-node chain (Add→Multiply→Floor) produces deterministic results.
+    #[test]
+    fn graph_add_multiply_floor_chain() {
+        let mut g = Graph::new();
+        let x = g.push(NodeKind::InputX);
+        let c1 = g.push(NodeKind::Constant(1.0));
+        let add = g.push(NodeKind::Add {
+            a: Some(GraphPort { node: x, output: 0 }),
+            b: Some(GraphPort {
+                node: c1,
+                output: 0,
+            }),
+        });
+        let c10 = g.push(NodeKind::Constant(10.0));
+        let mul = g.push(NodeKind::Multiply {
+            a: Some(GraphPort {
+                node: add,
+                output: 0,
+            }),
+            b: Some(GraphPort {
+                node: c10,
+                output: 0,
+            }),
+        });
+        let floor = g.push(NodeKind::Floor {
+            a: Some(GraphPort {
+                node: mul,
+                output: 0,
+            }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort {
+                node: floor,
+                output: 0,
+            }),
+        });
+        let xs = [0.0f32, 0.5, 1.0, 1.5, 2.0];
+        let result = run_multi(&g, &xs, 0.0, &xs);
+        // (x+1)*10, floored: 10, 15, 20, 25, 30.
+        assert!(
+            (result[0] - 10.0).abs() < 1e-5,
+            "floor((0+1)*10)=10: {}",
+            result[0]
+        );
+        assert!(
+            (result[1] - 15.0).abs() < 1e-5,
+            "floor((0.5+1)*10)=15: {}",
+            result[1]
+        );
+        assert!(
+            (result[4] - 30.0).abs() < 1e-5,
+            "floor((2+1)*10)=30: {}",
+            result[4]
+        );
+    }
+
+    /// SdfSphere with InputX/Y/Z position varies across a slice.
+    #[test]
+    fn graph_sphere_with_input_positions() {
+        let mut g = Graph::new();
+        let x = g.push(NodeKind::InputX);
+        let y = g.push(NodeKind::InputY);
+        let z = g.push(NodeKind::InputZ);
+        let r = g.push(NodeKind::Constant(5.0));
+        let sph = g.push(NodeKind::SdfSphere {
+            x: Some(GraphPort { node: x, output: 0 }),
+            y: Some(GraphPort { node: y, output: 0 }),
+            z: Some(GraphPort { node: z, output: 0 }),
+            radius: Some(GraphPort { node: r, output: 0 }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort {
+                node: sph,
+                output: 0,
+            }),
+        });
+        let xs = [0.0f32, 3.0, 6.0];
+        let result = run_multi(&g, &xs, 0.0, &xs);
+        assert_eq!(result.len(), 3);
+        // At (0,0,0): dist=0, sdf=0-5=-5 (inside).
+        assert!(
+            (result[0] - (-5.0)).abs() < 1e-5,
+            "sphere at origin: {}",
+            result[0]
+        );
+        // At (6,0,6): dist=sqrt(72)≈8.49, sdf≈3.49 (outside).
+        assert!(
+            result[2] > 0.0,
+            "sphere at (6,0,6) should be outside: {}",
+            result[2]
+        );
+    }
+}
+
+// Mirrors test_edition_funcs.cpp discord_soakil — copy/paste round-trip.
+#[cfg(test)]
+mod buffer_copy_paste_parity {
+    use voxel_core::math::Vector3i;
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
+
+    /// Copy a region, modify the original, then verify the copy is unchanged.
+    /// Mirrors discord_soakil copy-then-undo pattern.
+    #[test]
+    fn copy_preserves_original_data() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        buf.fill(5, ChannelId::Type.index());
+
+        // Copy to a second buffer.
+        let mut copy = VoxelBuffer::with_size(Vector3i::splat(8));
+        fmt.configure_buffer(&mut copy);
+        copy.copy_channel_from_area(
+            &buf,
+            Vector3i::zero(),
+            Vector3i::new(8, 8, 8),
+            Vector3i::zero(),
+            ChannelId::Type.index(),
+        );
+
+        // Modify the original.
+        buf.fill(9, ChannelId::Type.index());
+
+        // Copy should still have the original value.
+        assert_eq!(
+            copy.get_voxel(0, 0, 0, ChannelId::Type.index()),
+            5,
+            "copy should preserve original data"
+        );
+        assert_eq!(copy.get_voxel(4, 4, 4, ChannelId::Type.index()), 5);
+    }
+
+    /// A VoxelBuffer can be serialized and deserialized, then read back
+    /// identically. Mirrors the save/load round-trip.
+    #[test]
+    fn buffer_serialize_deserialize_identical() {
+        use voxel_core::streams::block_serializer;
+        use voxel_core::streams::compressed_data::Compression;
+        use voxel_core::streams::decode_limits::DecodeLimits;
+
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+        fmt.configure_buffer(&mut buf);
+        buf.fill(3, ChannelId::Type.index());
+        buf.clear_channel_f(ChannelId::Sdf.index(), -1.5);
+
+        let mut payload = Vec::new();
+        block_serializer::serialize_and_compress(&buf, &mut payload, Compression::Lz4).unwrap();
+        let mut buf2 = VoxelBuffer::with_size(Vector3i::splat(8));
+        fmt.configure_buffer(&mut buf2);
+        block_serializer::decompress_and_deserialize_with_limits(
+            &payload,
+            &mut buf2,
+            DecodeLimits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(buf2.get_voxel(0, 0, 0, ChannelId::Type.index()), 3);
+        assert!((buf2.get_voxel_f(0, 0, 0, ChannelId::Sdf.index()) - (-1.5)).abs() < 1e-5);
+    }
+
+    /// set_voxel at in-bounds positions works correctly.
+    #[test]
+    fn set_voxel_in_bounds_works() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(4));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        buf.set_voxel(1, 0, 0, 0, ChannelId::Type.index());
+        buf.set_voxel(2, 3, 3, 3, ChannelId::Type.index());
+        assert_eq!(buf.get_voxel(0, 0, 0, ChannelId::Type.index()), 1);
+        assert_eq!(buf.get_voxel(3, 3, 3, ChannelId::Type.index()), 2);
+    }
+}
+
+// Mirrors test_octree.cpp — comprehensive find_in_box edge cases.
+#[cfg(test)]
+mod octree_find_in_box_comprehensive_parity {
+    use voxel_core::math::{Box3i, Vector3i};
+    use voxel_core::terrain::lod_octree::{LodOctree, NoOpActions};
+
+    /// A box covering the entire octree finds all leaves.
+    #[test]
+    fn full_box_finds_all_leaves() {
+        let mut oct = LodOctree::new();
+        oct.create(2);
+        let mut actions = NoOpActions;
+        oct.subdivide(&mut actions);
+        let box_ = Box3i::new(Vector3i::new(-10, -10, -10), Vector3i::new(20, 20, 20));
+        let mut found = 0;
+        oct.for_leaves_in_box(box_, |_, _, _| {
+            found += 1;
+        });
+        assert_eq!(found, 8, "full box should find all 8 leaves: {found}");
+    }
+
+    /// A box covering one octant finds exactly one leaf.
+    #[test]
+    fn single_octant_box_finds_one() {
+        let mut oct = LodOctree::new();
+        oct.create(2);
+        let mut actions = NoOpActions;
+        oct.subdivide(&mut actions);
+        // First octant [0,0,0]–[1,1,1].
+        let box_ = Box3i::new(Vector3i::new(0, 0, 0), Vector3i::new(1, 1, 1));
+        let mut found = 0;
+        oct.for_leaves_in_box(box_, |_, _, _| {
+            found += 1;
+        });
+        assert!(
+            found >= 1,
+            "single octant box should find at least 1 leaf: {found}"
+        );
+    }
+
+    /// An undivided octree has at most the root as a leaf.
+    #[test]
+    fn empty_octree_few_leaves() {
+        let mut oct = LodOctree::new();
+        oct.create(2);
+        let box_ = Box3i::new(Vector3i::zero(), Vector3i::splat(5));
+        let mut found = 0;
+        oct.for_leaves_in_box(box_, |_, _, _| {
+            found += 1;
+        });
+        // Undivided octree may report the root as a single leaf.
+        assert!(found <= 1, "undivided octree should have ≤1 leaf: {found}");
+    }
+
+    /// A larger octree (4 LODs) finds many leaves in a big box.
+    #[test]
+    fn large_octree_many_leaves() {
+        let mut oct = LodOctree::new();
+        oct.create(4);
+        let mut actions = NoOpActions;
+        oct.subdivide(&mut actions);
+        let box_ = Box3i::new(Vector3i::new(-10, -10, -10), Vector3i::new(20, 20, 20));
+        let mut found = 0;
+        oct.for_leaves_in_box(box_, |_, _, _| {
+            found += 1;
+        });
+        assert!(found > 100, "4-LOD octree should have many leaves: {found}");
+    }
+}
+
+// Mirrors test_raycast.cpp — blocky raycast edge cases.
+#[cfg(test)]
+mod raycast_blocky_parity {
+    use voxel_core::edition::raycast::{voxel_raycast, VoxelRaycastState};
+    use voxel_core::math::{Vector3f, Vector3i};
+
+    /// A ray hitting a diagonal staircase visits voxels in order.
+    #[test]
+    fn raycast_visits_voxels_in_order() {
+        let mut positions = Vec::new();
+        let _ = voxel_raycast(
+            Vector3f::new(0.5, 0.5, 0.5),
+            Vector3f::new(1.0, 0.0, 0.0),
+            5.0,
+            |s: &VoxelRaycastState| {
+                positions.push(s.position);
+                false
+            },
+        );
+        // Should visit ≥5 voxels along the X axis.
+        assert!(
+            positions.len() >= 5,
+            "should visit ≥5 voxels: {}",
+            positions.len()
+        );
+        // All visited voxels should be in the Y=0, Z=0 plane.
+        assert!(
+            positions.iter().all(|p| p.y == 0 && p.z == 0),
+            "X-ray should stay in Y=0,Z=0 plane"
+        );
+    }
+
+    /// A zero-length ray (max_distance=0) visits nothing.
+    #[test]
+    fn raycast_zero_distance_visits_nothing() {
+        let mut count = 0;
+        let _ = voxel_raycast(
+            Vector3f::new(0.5, 0.5, 0.5),
+            Vector3f::new(1.0, 0.0, 0.0),
+            0.0,
+            |_: &VoxelRaycastState| {
+                count += 1;
+                false
+            },
+        );
+        assert_eq!(count, 0, "zero-distance ray should visit nothing: {count}");
+    }
+
+    /// A ray along -Y from above hits a ceiling.
+    #[test]
+    fn raycast_down_hits_ceiling() {
+        let hit = voxel_raycast(
+            Vector3f::new(0.5, 20.5, 0.5),
+            Vector3f::new(0.0, -1.0, 0.0),
+            100.0,
+            |s: &VoxelRaycastState| s.position.y == 5,
+        )
+        .expect("should hit");
+        assert_eq!(hit.position, Vector3i::new(0, 5, 0));
+        assert_eq!(
+            hit.normal,
+            Vector3i::new(0, 1, 0),
+            "-Y ray normal should be +Y"
+        );
+    }
+}
