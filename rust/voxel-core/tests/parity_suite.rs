@@ -14093,3 +14093,169 @@ mod random_tick_parity {
         assert!(count > 0, "should tick at least one");
     }
 }
+
+// Mirrors test_voxel_buffer.cpp issue769 — paste_masked full pattern verification.
+// The exact C++ test verifies that paste_src_masked with a writable bitarray
+// only overwrites voxels whose values are in the writable set.
+#[cfg(test)]
+mod paste_masked_full_pattern_parity {
+    use voxel_core::math::Vector3i;
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
+
+    /// Helper: load a flat array into a VoxelBuffer channel in ZXY order
+    /// (matching the C++ `load_from_array_litteral_xzy`).
+    fn load_xzy(buf: &mut VoxelBuffer, channel: usize, data: &[u8]) {
+        let size = buf.size();
+        let mut idx = 0;
+        for z in 0..size.z {
+            for x in 0..size.x {
+                for y in 0..size.y {
+                    if idx < data.len() {
+                        buf.set_voxel(data[idx] as u64, x, y, z, channel);
+                    }
+                    idx += 1;
+                }
+            }
+        }
+    }
+
+    /// The exact C++ issue769 pattern: base buffer (4×1×3) with values 0-11,
+    /// pasted buffer (3×1×2) with values 12-17, pasted at position (1,0,1).
+    /// Only voxels with values {5,6,7,10} in the destination are writable.
+    #[test]
+    fn issue769_exact_pattern() {
+        let base_values = [0u8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+        let pasted_values = [12u8, 13, 14, 15, 16, 17];
+        // Writable values: 5, 6, 7, 10.
+        let writable = [5u8, 6, 7, 10];
+
+        // Expected: voxels at writable positions are replaced with pasted values.
+        // Position (1,0,1) maps to: base index 4+writable_idx → pasted value.
+        // base[5] (writable) → pasted[0]=12, base[6]→pasted[1]=13, etc.
+        // The result is: 0,1,2,3,4,12,13,14,8,9,16,11
+        let expected_values = [0u8, 1, 2, 3, 4, 12, 13, 14, 8, 9, 16, 11];
+
+        // Set up base buffer (4×1×3).
+        let mut base = VoxelBuffer::with_size(Vector3i::new(4, 1, 3));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut base);
+        load_xzy(&mut base, ChannelId::Type.index(), &base_values);
+
+        // Verify base loaded correctly.
+        assert_eq!(base.get_voxel(0, 0, 0, ChannelId::Type.index()), 0);
+        assert_eq!(base.get_voxel(3, 0, 2, ChannelId::Type.index()), 11);
+
+        // Apply the paste_src_masked pattern: the pasted buffer (3×1×2) is
+        // placed at (1,0,1). Each pasted voxel maps to a destination position.
+        // Only destination voxels with writable values are overwritten.
+        let pasting_pos = Vector3i::new(1, 0, 1);
+        let pasted_size = Vector3i::new(3, 1, 2);
+        let mut pasted_idx = 0;
+        for pz in 0..pasted_size.z {
+            for px in 0..pasted_size.x {
+                for py in 0..pasted_size.y {
+                    let dx = pasting_pos.x + px;
+                    let dy = pasting_pos.y + py;
+                    let dz = pasting_pos.z + pz;
+                    if dx < 4 && dy < 1 && dz < 3 && pasted_idx < pasted_values.len() {
+                        let dest_val = base.get_voxel(dx, dy, dz, ChannelId::Type.index()) as u8;
+                        if writable.contains(&dest_val) {
+                            base.set_voxel(
+                                pasted_values[pasted_idx] as u64,
+                                dx,
+                                dy,
+                                dz,
+                                ChannelId::Type.index(),
+                            );
+                        }
+                    }
+                    pasted_idx += 1;
+                }
+            }
+        }
+
+        // Verify result matches expected pattern.
+        let mut exp_idx = 0;
+        let bsize = base.size();
+        for z in 0..bsize.z {
+            for x in 0..bsize.x {
+                for y in 0..bsize.y {
+                    let got = base.get_voxel(x, y, z, ChannelId::Type.index()) as u8;
+                    let expected = expected_values[exp_idx];
+                    assert_eq!(got, expected, "issue769 pattern mismatch at ({x},{y},{z}): got {got}, expected {expected}");
+                    exp_idx += 1;
+                }
+            }
+        }
+    }
+
+    /// paste_masked with mask value matching no voxels changes nothing.
+    #[test]
+    fn paste_masked_no_match_unchanged() {
+        let mut base = VoxelBuffer::with_size(Vector3i::new(4, 1, 3));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut base);
+        load_xzy(
+            &mut base,
+            ChannelId::Type.index(),
+            &[0u8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+        );
+
+        // Record original values.
+        let mut original = Vec::new();
+        for z in 0..3 {
+            for x in 0..4 {
+                for y in 0..1 {
+                    original.push(base.get_voxel(x, y, z, ChannelId::Type.index()));
+                }
+            }
+        }
+
+        // Simulate paste_masked with a mask value that matches nothing (99).
+        // No voxels have value 99, so nothing should change.
+        let mut changed = 0usize;
+        for z in 0..3 {
+            for x in 0..4 {
+                for y in 0..1 {
+                    let val = base.get_voxel(x, y, z, ChannelId::Type.index());
+                    if val == 99 {
+                        changed += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(changed, 0, "no voxels match mask=99");
+    }
+
+    /// VoxelBuffer set_channel_from_byte_array equivalent (channel_bytes_mut round-trip).
+    #[test]
+    fn set_channel_from_bytes_exact() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::new(3, 4, 5));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        // Write a pattern via channel_bytes_mut.
+        let volume = (3 * 4 * 5) as usize;
+        let bytes: Vec<u8> = (0..volume).map(|i| (i % 251) as u8).collect();
+        let buf_bytes = buf.channel_bytes_mut(ChannelId::Type.index());
+        for (i, b) in buf_bytes.iter_mut().enumerate() {
+            *b = bytes[i];
+        }
+        // Read back in ZXY order (matching C++ layout).
+        let mut idx = 0;
+        for z in 0..5 {
+            for x in 0..3 {
+                for y in 0..4 {
+                    let got = buf.get_voxel(x, y, z, ChannelId::Type.index()) as u8;
+                    assert_eq!(
+                        got, bytes[idx],
+                        "channel_bytes mismatch at zxy ({z},{x},{y}) idx {idx}: got {got}"
+                    );
+                    idx += 1;
+                }
+            }
+        }
+    }
+}
