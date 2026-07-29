@@ -31,7 +31,7 @@ and Android aarch64 GDExtension smoke when triggered by hand.
 |---|---|---|
 | **M1** | Долг по ревью кода (§9 + §7): TSan, D7, волна 3 (B1/B3/B4/B5/C1/C3), H2-MT бенч, cargo-fuzz, CI, риски §7 | ✅ **ПОЛНОСТЬЮ ЗАКРЫТ 2026-07-12** — M1.A (TSan) + M1.B (D7) + M1.C (волна 3) + M1.D (graph C1+C3) + M1.E (cargo-fuzz + OOM fix + §7 риски + H2-MT bench). CI auto-trigger (item 11) отложено до стабилизации пилота. |
 | **M2** | Фаза 4 до GO: multi-LOD paging (`VoxelLodTerrain`), остаток `VoxelEngine`, `VoxelDataGrid`, сквозной TSan | ✅ **GO-критерий закрыт:** M2.1 (multi-LOD paging) + M2.2 (transition cells) + TSan (M1.A). Clipbox/fading/VoxelEngine residual — deferred polish. |
-| **M3** | Фаза 5: Godot binding 75+ классов + editor/edition/modifiers/instancing/terrain-root | 🟡 в работе: VoxelTerrain (Node3D) + VoxelViewer (Node3D) + 4 generators (Waves/Flat/Noise/Heightmap) + edition (set/get_voxel_sdf, raycast) + lod_count + dirty re-upload + material_override + generate_collision |
+| **M3** | Фаза 5: Godot binding 75+ классов + editor/edition/modifiers/instancing/terrain-root | 🟡 в работе: 9 Godot classes (terrain+viewer+4 generators+2 streams+VoxelToolBufferGD) + edition/ (ops+raycast) + modifiers/ (trait+sphere+stack). Остаются: instancing (~9.2k), editor plugins (~12.8k) |
 | **M4** | Паритет и удаление C++ из `master`; форк — чистый Rust-проект | ⏳ |
 
 **Текущий фокус:** **M1 полностью закрыт.** Все основные пункты выполнены: TSan (0 data race),
