@@ -12319,3 +12319,241 @@ mod cubes_palette_parity {
         }
     }
 }
+
+// Additional graph: XZ-prefix cache + multi-output patterns.
+#[cfg(test)]
+mod graph_cache_multi_output_parity {
+    use voxel_core::generators::graph::{
+        CompiledGraph, CompiledScratch, Graph, GraphInputs, GraphOutput, GraphPort, NodeKind,
+    };
+
+    #[test]
+    fn xz_prefix_cache_produces_finite() {
+        let mut g = Graph::new();
+        let x = g.push(NodeKind::InputX);
+        let c = g.push(NodeKind::Constant(3.0));
+        let mul = g.push(NodeKind::Multiply {
+            a: Some(GraphPort { node: x, output: 0 }),
+            b: Some(GraphPort { node: c, output: 0 }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort {
+                node: mul,
+                output: 0,
+            }),
+        });
+        let compiled = CompiledGraph::compile(&g).unwrap();
+        let xs = [0.0f32, 1.0, 2.0];
+        let zs = [0.0f32, 0.0, 0.0];
+        let i = GraphInputs {
+            x: &xs,
+            y: 0.0,
+            z: &zs,
+        };
+        let mut s = CompiledScratch::new();
+        let mut o = Vec::new();
+        compiled.generate_slice(&i, 3, &mut s, &mut o, true);
+        let r: Vec<f32> = o
+            .into_iter()
+            .find(|(k, _)| *k == GraphOutput::Sdf)
+            .map(|(_, v)| v)
+            .unwrap_or_default();
+        for &v in &r {
+            assert!(v.is_finite(), "cached result should be finite: {v}");
+        }
+    }
+
+    #[test]
+    fn normalize3d_z_output_zero() {
+        let mut g = Graph::new();
+        let x = g.push(NodeKind::Constant(3.0));
+        let y = g.push(NodeKind::Constant(0.0));
+        let z = g.push(NodeKind::Constant(0.0));
+        let n = g.push(NodeKind::Normalize3D {
+            x: Some(GraphPort { node: x, output: 0 }),
+            y: Some(GraphPort { node: y, output: 0 }),
+            z: Some(GraphPort { node: z, output: 0 }),
+        });
+        // Output 2 = z/|v| = 0/3 = 0.
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: n, output: 2 }),
+        });
+        let compiled = CompiledGraph::compile(&g).unwrap();
+        let xs = [0.0f32];
+        let zs = [0.0f32];
+        let i = GraphInputs {
+            x: &xs,
+            y: 0.0,
+            z: &zs,
+        };
+        let mut s = CompiledScratch::new();
+        let mut o = Vec::new();
+        compiled.generate_slice(&i, 1, &mut s, &mut o, false);
+        let v: f32 = o
+            .into_iter()
+            .find(|(k, _)| *k == GraphOutput::Sdf)
+            .and_then(|(_, v)| v.into_iter().next())
+            .unwrap_or(f32::NAN);
+        assert!((v - 0.0).abs() < 1e-5, "normalize z output: {v}");
+    }
+}
+
+// Additional modifier: stack ordering independence.
+#[cfg(test)]
+mod modifier_ordering_parity {
+    use voxel_core::math::Vector3f;
+    use voxel_core::modifiers::{ModifierStack, SdfOperation, SphereModifier};
+
+    #[test]
+    fn subtract_same_sphere_twice_no_more_change() {
+        let positions = vec![Vector3f::new(2.0, 2.0, 2.0)];
+        let mut sdf1 = vec![-10.0f32];
+        let mut s1 = ModifierStack::new();
+        s1.add(Box::new(SphereModifier {
+            center: Vector3f::new(2.0, 2.0, 2.0),
+            radius: 2.0,
+            operation: SdfOperation::Subtract,
+            smoothness: 0.0,
+        }));
+        s1.apply(&mut sdf1, &positions);
+
+        let mut sdf2 = vec![-10.0f32];
+        let mut s2 = ModifierStack::new();
+        s2.add(Box::new(SphereModifier {
+            center: Vector3f::new(2.0, 2.0, 2.0),
+            radius: 2.0,
+            operation: SdfOperation::Subtract,
+            smoothness: 0.0,
+        }));
+        s2.add(Box::new(SphereModifier {
+            center: Vector3f::new(2.0, 2.0, 2.0),
+            radius: 2.0,
+            operation: SdfOperation::Subtract,
+            smoothness: 0.0,
+        }));
+        s2.apply(&mut sdf2, &positions);
+
+        // Subtracting the same sphere twice should produce the same result
+        // (subtract is idempotent for same position/radius with hard blend).
+        assert!(
+            (sdf1[0] - sdf2[0]).abs() < 1e-5,
+            "double subtract same sphere should be idempotent: {} vs {}",
+            sdf1[0],
+            sdf2[0]
+        );
+    }
+
+    #[test]
+    fn add_then_subtract_different_spheres() {
+        let positions = vec![Vector3f::new(3.0, 3.0, 3.0)];
+        let mut sdf = vec![10.0f32];
+        let mut stack = ModifierStack::new();
+        stack.add(Box::new(SphereModifier {
+            center: Vector3f::new(3.0, 3.0, 3.0),
+            radius: 5.0,
+            operation: SdfOperation::Add,
+            smoothness: 0.0,
+        }));
+        stack.add(Box::new(SphereModifier {
+            center: Vector3f::new(0.0, 0.0, 0.0),
+            radius: 2.0,
+            operation: SdfOperation::Subtract,
+            smoothness: 0.0,
+        }));
+        stack.apply(&mut sdf, &positions);
+        // After add (sphere at 3,3,3 r=5) then subtract (sphere at 0,0,0 r=2):
+        // at (3,3,3), add makes it -5, subtract from 0,0,0 doesn't reach.
+        assert!(
+            sdf[0] < 0.0,
+            "center should be solid after add+subtract: {}",
+            sdf[0]
+        );
+    }
+}
+
+// Additional mesher: TransvoxelMesher minimum_padding + BlockyMesher config.
+#[cfg(test)]
+mod mesher_config_parity {
+    use std::sync::Arc;
+    use voxel_core::meshers::blocky::BakedLibrary;
+    use voxel_core::meshers::{BlockyMesher, CubesMesher, TransvoxelMesher, VoxelMesher};
+
+    #[test]
+    fn transvoxel_padding_positive() {
+        assert!(TransvoxelMesher::new().minimum_padding() > 0);
+    }
+
+    #[test]
+    fn cubes_padding_positive() {
+        assert!(CubesMesher::new().minimum_padding() > 0);
+    }
+
+    #[test]
+    fn blocky_padding_positive() {
+        let lib = Arc::new(BakedLibrary::default());
+        assert!(BlockyMesher::new(lib).minimum_padding() > 0);
+    }
+
+    #[test]
+    fn cubes_with_palette_config() {
+        let pal = voxel_core::meshers::cubes::palette::ColorPalette::default();
+        let mesher = CubesMesher::new().with_palette(pal);
+        assert!(mesher.minimum_padding() > 0);
+    }
+}
+
+// Additional storage: VoxelBuffer fill_area corner cases.
+#[cfg(test)]
+mod buffer_fill_area_corner_parity {
+    use voxel_core::math::Vector3i;
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
+
+    #[test]
+    fn fill_area_single_voxel() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(4));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        buf.fill_area(
+            5,
+            Vector3i::new(1, 1, 1),
+            Vector3i::new(2, 2, 2),
+            ChannelId::Type.index(),
+        );
+        assert_eq!(buf.get_voxel(1, 1, 1, ChannelId::Type.index()), 5);
+        assert_eq!(buf.get_voxel(0, 0, 0, ChannelId::Type.index()), 0);
+        assert_eq!(buf.get_voxel(2, 2, 2, ChannelId::Type.index()), 0);
+    }
+
+    #[test]
+    fn fill_area_full_buffer() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(4));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        buf.fill_area(
+            7,
+            Vector3i::zero(),
+            Vector3i::splat(4),
+            ChannelId::Type.index(),
+        );
+        for z in 0..4 {
+            for y in 0..4 {
+                for x in 0..4 {
+                    assert_eq!(buf.get_voxel(x, y, z, ChannelId::Type.index()), 7);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fill_then_refill_different_value() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(4));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        buf.fill(3, ChannelId::Type.index());
+        buf.fill(9, ChannelId::Type.index());
+        assert_eq!(buf.get_voxel(0, 0, 0, ChannelId::Type.index()), 9);
+    }
+}
