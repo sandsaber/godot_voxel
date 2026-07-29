@@ -13,6 +13,7 @@ mod editor;
 mod generators;
 mod streams;
 mod terrain;
+mod voxel_buffer;
 mod voxel_tool;
 
 use godot::init::{gdextension, ExtensionLibrary, InitStage};
