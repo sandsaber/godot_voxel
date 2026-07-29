@@ -9647,3 +9647,269 @@ mod sdf_smooth_ops_parity {
         );
     }
 }
+
+// Additional SDF quantization + noise type matrix parity.
+#[cfg(test)]
+mod quantization_parity {
+    use voxel_core::math::Vector3i;
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
+
+    /// Bit8 SDF quantization: value within tolerance for small magnitudes.
+    #[test]
+    fn bit8_sdf_quantization_small_values() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(2));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        for v in &[0.0f32, 0.5, -0.5, 1.0] {
+            buf.set_voxel_f(*v, 0, 0, 0, ChannelId::Sdf.index());
+            let got = buf.get_voxel_f(0, 0, 0, ChannelId::Sdf.index());
+            assert!((got - v).abs() < 0.15, "Bit8 SDF {v} → {got}");
+        }
+    }
+
+    /// Bit16 SDF has better precision than Bit8.
+    #[test]
+    fn bit16_better_precision_than_bit8() {
+        let mut buf8 = VoxelBuffer::with_size(Vector3i::splat(2));
+        let mut fmt8 = VoxelFormat::new();
+        fmt8.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit8;
+        fmt8.configure_buffer(&mut buf8);
+        buf8.set_voxel_f(-0.123, 0, 0, 0, ChannelId::Sdf.index());
+        let err8 = (buf8.get_voxel_f(0, 0, 0, ChannelId::Sdf.index()) - (-0.123)).abs();
+
+        let mut buf16 = VoxelBuffer::with_size(Vector3i::splat(2));
+        let mut fmt16 = VoxelFormat::new();
+        fmt16.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit16;
+        fmt16.configure_buffer(&mut buf16);
+        buf16.set_voxel_f(-0.123, 0, 0, 0, ChannelId::Sdf.index());
+        let err16 = (buf16.get_voxel_f(0, 0, 0, ChannelId::Sdf.index()) - (-0.123)).abs();
+
+        assert!(
+            err16 <= err8,
+            "Bit16 should have better precision: {err16} vs {err8}"
+        );
+    }
+
+    /// Bit32 SDF is exact (stores raw f32).
+    #[test]
+    fn bit32_sdf_exact() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(2));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+        fmt.configure_buffer(&mut buf);
+        buf.set_voxel_f(-0.123, 0, 0, 0, ChannelId::Sdf.index());
+        let got = buf.get_voxel_f(0, 0, 0, ChannelId::Sdf.index());
+        assert!(
+            (got - (-0.123)).abs() < 1e-6,
+            "Bit32 should be exact: {got}"
+        );
+    }
+}
+
+// Noise type matrix parity — all NoiseType variants produce valid output.
+#[cfg(test)]
+mod noise_type_matrix_parity {
+    use voxel_core::fastnoise_lite::NoiseType;
+    use voxel_core::generators::simple::Noise;
+
+    #[test]
+    fn all_noise_types_produce_finite() {
+        for nt in [
+            NoiseType::OpenSimplex2,
+            NoiseType::OpenSimplex2S,
+            NoiseType::Cellular,
+            NoiseType::Perlin,
+            NoiseType::ValueCubic,
+            NoiseType::Value,
+        ] {
+            let mut gen = Noise::default();
+            gen.noise_mut().set_seed(Some(42));
+            gen.noise_mut().set_frequency(Some(0.1));
+            gen.noise_mut().set_noise_type(Some(nt));
+            let v = gen.sample_noise_3d(3.7, 2.1, 4.9);
+            assert!(v.is_finite(), "{nt:?} should produce finite output: {v}");
+        }
+    }
+
+    #[test]
+    fn open_simplex2_vs_simplex2s_differ() {
+        let mut a = Noise::default();
+        a.noise_mut().set_seed(Some(1));
+        a.noise_mut().set_frequency(Some(0.1));
+        a.noise_mut().set_noise_type(Some(NoiseType::OpenSimplex2));
+
+        let mut b = Noise::default();
+        b.noise_mut().set_seed(Some(1));
+        b.noise_mut().set_frequency(Some(0.1));
+        b.noise_mut().set_noise_type(Some(NoiseType::OpenSimplex2S));
+
+        let va = a.sample_noise_3d(3.7, 2.1, 4.9);
+        let vb = b.sample_noise_3d(3.7, 2.1, 4.9);
+        assert!(
+            (va - vb).abs() > 1e-6,
+            "OpenSimplex2 vs S should differ: {va} vs {vb}"
+        );
+    }
+
+    #[test]
+    fn value_vs_value_cubic_differ() {
+        let mut a = Noise::default();
+        a.noise_mut().set_seed(Some(1));
+        a.noise_mut().set_frequency(Some(0.1));
+        a.noise_mut().set_noise_type(Some(NoiseType::Value));
+
+        let mut b = Noise::default();
+        b.noise_mut().set_seed(Some(1));
+        b.noise_mut().set_frequency(Some(0.1));
+        b.noise_mut().set_noise_type(Some(NoiseType::ValueCubic));
+
+        let va = a.sample_noise_3d(5.0, 5.0, 5.0);
+        let vb = b.sample_noise_3d(5.0, 5.0, 5.0);
+        assert!(
+            (va - vb).abs() > 1e-6,
+            "Value vs ValueCubic should differ: {va} vs {vb}"
+        );
+    }
+}
+
+// Additional blocky bake_library + cubes greedy toggle parity.
+#[cfg(test)]
+mod blocky_bake_cubes_parity {
+    
+    use voxel_core::math::Vector3i;
+    use voxel_core::meshers::blocky::{bake_library, BakedLibrary, BakedModel};
+    use voxel_core::meshers::{CubesMesher, MesherInput, MesherOutput, VoxelMesher};
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
+
+    /// bake_library doesn't panic on a library with one solid model.
+    #[test]
+    fn bake_library_single_model_no_panic() {
+        let mut lib = BakedLibrary::default();
+        lib.models.push(BakedModel {
+            color: voxel_core::math::Color::from_rgb(0.5, 0.5, 0.5),
+            empty: false,
+            culls_neighbors: true,
+            ..BakedModel::default()
+        });
+        bake_library(&mut lib);
+        assert!(
+            lib.side_pattern_count > 0 || !lib.models.is_empty(),
+            "bake should produce patterns or keep models"
+        );
+    }
+
+    /// CubesMesher with different color modes (RAW vs Palette) produces same topology.
+    #[test]
+    fn cubes_raw_vs_palette_same_topology() {
+        let mut voxels = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Color.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut voxels);
+        let opaque: u64 = 0xFFFFFFFF;
+        for x in 0..4 {
+            for y in 0..8 {
+                for z in 0..8 {
+                    voxels.set_voxel(opaque, x, y, z, ChannelId::Color.index());
+                }
+            }
+        }
+        let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+
+        let raw = CubesMesher::new();
+        let mut out_raw = MesherOutput::default();
+        raw.build(&mut out_raw, &input);
+
+        let mut palette = voxel_core::meshers::cubes::palette::ColorPalette::default();
+        palette.set_color8(0xFF, voxel_core::math::Color8::new(255, 255, 255, 255));
+        let pal = CubesMesher::new().with_palette(palette);
+        let mut out_pal = MesherOutput::default();
+        pal.build(&mut out_pal, &input);
+
+        assert_eq!(
+            out_raw.total_vertex_count(),
+            out_pal.total_vertex_count(),
+            "topology should match"
+        );
+    }
+}
+
+// Additional graph Normalize3D + Curve multi-output parity.
+#[cfg(test)]
+mod graph_normalize_curve_parity {
+    use voxel_core::generators::graph::{
+        CompiledGraph, CompiledScratch, Graph, GraphInputs, GraphOutput, GraphPort, NodeKind,
+    };
+    use voxel_core::generators::simple::Curve;
+
+    fn run_with_output(g: &Graph, _output: u8) -> f32 {
+        let c = CompiledGraph::compile(g).expect("compile");
+        let xs = [0.0f32];
+        let zs = [0.0f32];
+        let i = GraphInputs {
+            x: &xs,
+            y: 0.0,
+            z: &zs,
+        };
+        let mut s = CompiledScratch::new();
+        let mut o = Vec::new();
+        c.generate_slice(&i, 1, &mut s, &mut o, false);
+        o.into_iter()
+            .find(|(k, _)| *k == GraphOutput::Sdf)
+            .and_then(|(_, v)| v.into_iter().next())
+            .unwrap_or(f32::NAN)
+    }
+
+    #[test]
+    fn normalize3d_output0_x_component() {
+        let mut g = Graph::new();
+        let x = g.push(NodeKind::Constant(3.0));
+        let y = g.push(NodeKind::Constant(0.0));
+        let z = g.push(NodeKind::Constant(0.0));
+        let n = g.push(NodeKind::Normalize3D {
+            x: Some(GraphPort { node: x, output: 0 }),
+            y: Some(GraphPort { node: y, output: 0 }),
+            z: Some(GraphPort { node: z, output: 0 }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: n, output: 0 }),
+        });
+        let v = run_with_output(&g, 0);
+        // Normalize3D(3,0,0) output0 (x/|v|) = 1.0
+        assert!((v - 1.0).abs() < 1e-5, "normalize x output: {v}");
+    }
+
+    #[test]
+    fn normalize3d_output1_y_component() {
+        let mut g = Graph::new();
+        let x = g.push(NodeKind::Constant(3.0));
+        let y = g.push(NodeKind::Constant(0.0));
+        let z = g.push(NodeKind::Constant(0.0));
+        let n = g.push(NodeKind::Normalize3D {
+            x: Some(GraphPort { node: x, output: 0 }),
+            y: Some(GraphPort { node: y, output: 0 }),
+            z: Some(GraphPort { node: z, output: 0 }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: n, output: 1 }),
+        });
+        let v = run_with_output(&g, 1);
+        // Normalize3D(3,0,0) output1 (y/|v|) = 0.0
+        assert!((v - 0.0).abs() < 1e-5, "normalize y output: {v}");
+    }
+
+    #[test]
+    fn curve_identity_half() {
+        let mut g = Graph::new();
+        let a = g.push(NodeKind::Constant(0.5));
+        let c = g.push(NodeKind::Curve {
+            a: Some(GraphPort { node: a, output: 0 }),
+            curve: std::sync::Arc::new(Curve::identity(2)),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: c, output: 0 }),
+        });
+        let v = run_with_output(&g, 0);
+        assert!((v - 0.5).abs() < 1e-5, "curve identity 0.5: {v}");
+    }
+}
