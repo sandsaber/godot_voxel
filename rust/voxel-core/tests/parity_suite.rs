@@ -4655,3 +4655,470 @@ mod scatter_combinatorics_parity {
         }
     }
 }
+
+#[cfg(test)]
+mod math_funcs_parity {
+    use voxel_core::math::funcs;
+
+    #[test]
+    fn clamp_basic() {
+        assert_eq!(funcs::clamp(5, 0, 10), 5);
+        assert_eq!(funcs::clamp(-1, 0, 10), 0);
+        assert_eq!(funcs::clamp(15, 0, 10), 10);
+    }
+
+    #[test]
+    fn clampf_basic() {
+        assert!((funcs::clampf(0.5, 0.0, 1.0) - 0.5).abs() < 1e-5);
+        assert!((funcs::clampf(-1.0, 0.0, 1.0) - 0.0).abs() < 1e-5);
+        assert!((funcs::clampf(2.0, 0.0, 1.0) - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn lerp_f32_basic() {
+        assert!((funcs::lerp_f32(0.0, 10.0, 0.0) - 0.0).abs() < 1e-5);
+        assert!((funcs::lerp_f32(0.0, 10.0, 1.0) - 10.0).abs() < 1e-5);
+        assert!((funcs::lerp_f32(0.0, 10.0, 0.5) - 5.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn wrap_i32_basic() {
+        assert_eq!(funcs::wrap_i32(7, 5), 2);
+        assert_eq!(funcs::wrap_i32(5, 5), 0);
+        assert_eq!(funcs::wrap_i32(-1, 5), 4);
+    }
+
+    #[test]
+    fn wrapf_f32_basic() {
+        assert!((funcs::wrapf_f32(7.5, 5.0) - 2.5).abs() < 1e-5);
+        assert!((funcs::wrapf_f32(10.0, 5.0) - 0.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn smoothstep_f32_basic() {
+        assert!((funcs::smoothstep_f32(0.0, 1.0, 0.0) - 0.0).abs() < 1e-5);
+        assert!((funcs::smoothstep_f32(0.0, 1.0, 1.0) - 1.0).abs() < 1e-5);
+        let mid = funcs::smoothstep_f32(0.0, 1.0, 0.5);
+        assert!((mid - 0.5).abs() < 0.01, "smoothstep midpoint ~0.5: {mid}");
+    }
+
+    #[test]
+    fn fract_f32_basic() {
+        assert!((funcs::fract_f32(3.25) - 0.25).abs() < 1e-5);
+        assert!((funcs::fract_f32(5.0) - 0.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn ceildiv_basic() {
+        assert_eq!(funcs::ceildiv(10, 3), 4);
+        assert_eq!(funcs::ceildiv(9, 3), 3);
+        assert_eq!(funcs::ceildiv(1, 3), 1);
+    }
+
+    #[test]
+    fn sign_f32_basic() {
+        assert!((funcs::sign_f32(5.0) - 1.0).abs() < 1e-5);
+        assert!((funcs::sign_f32(-5.0) - (-1.0)).abs() < 1e-5);
+        assert!((funcs::sign_f32(0.0) - 0.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn ceil_f32_basic() {
+        assert!((funcs::ceil_f32(3.2) - 4.0).abs() < 1e-5);
+        assert!((funcs::ceil_f32(5.0) - 5.0).abs() < 1e-5);
+        assert!((funcs::ceil_f32(-2.3) - (-2.0)).abs() < 1e-5);
+    }
+}
+
+#[cfg(test)]
+mod box3i_parity {
+    use voxel_core::math::{Box3i, Vector3i};
+
+    #[test]
+    fn contains_point() {
+        let b = Box3i::new(Vector3i::new(0, 0, 0), Vector3i::new(10, 10, 10));
+        assert!(b.contains_point(Vector3i::new(5, 5, 5)));
+        assert!(!b.contains_point(Vector3i::new(-1, 0, 0)));
+        assert!(!b.contains_point(Vector3i::new(10, 10, 10)));
+    }
+
+    #[test]
+    fn intersects() {
+        let a = Box3i::new(Vector3i::new(0, 0, 0), Vector3i::new(10, 10, 10));
+        let b = Box3i::new(Vector3i::new(5, 5, 5), Vector3i::new(15, 15, 15));
+        let c = Box3i::new(Vector3i::new(20, 20, 20), Vector3i::new(30, 30, 30));
+        assert!(a.intersects(&b));
+        assert!(!a.intersects(&c));
+    }
+
+    #[test]
+    fn encloses() {
+        let outer = Box3i::new(Vector3i::new(0, 0, 0), Vector3i::new(20, 20, 20));
+        let inner = Box3i::new(Vector3i::new(5, 5, 5), Vector3i::new(10, 10, 10));
+        let outside = Box3i::new(Vector3i::new(15, 15, 15), Vector3i::new(25, 25, 25));
+        assert!(outer.encloses(inner));
+        assert!(!outer.encloses(outside));
+    }
+
+    #[test]
+    fn clipped() {
+        let a = Box3i::new(Vector3i::new(0, 0, 0), Vector3i::new(20, 20, 20));
+        let lim = Box3i::new(Vector3i::new(5, 5, 5), Vector3i::new(15, 15, 15));
+        let clipped = a.clipped(lim);
+        assert!(clipped.contains_point(Vector3i::new(10, 10, 10)));
+    }
+
+    #[test]
+    fn size() {
+        let b = Box3i::new(Vector3i::new(2, 3, 4), Vector3i::new(10, 10, 10));
+        assert_eq!(b.size, Vector3i::new(10, 10, 10));
+    }
+}
+
+#[cfg(test)]
+mod modifier_combinations_parity {
+    use voxel_core::math::Vector3f;
+    use voxel_core::modifiers::{ModifierStack, SdfOperation, SphereModifier};
+
+    #[test]
+    fn two_subtracts_carve_more_than_one() {
+        let positions: Vec<Vector3f> = (0..5)
+            .flat_map(|x| {
+                (0..5).flat_map(move |y| {
+                    (0..5).map(move |z| Vector3f::new(x as f32, y as f32, z as f32))
+                })
+            })
+            .collect();
+        let mut sdf_one = vec![-10.0f32; positions.len()];
+        let mut sdf_two = vec![-10.0f32; positions.len()];
+        let mut s1 = ModifierStack::new();
+        s1.add(Box::new(SphereModifier {
+            center: Vector3f::new(2.0, 2.0, 2.0),
+            radius: 1.5,
+            operation: SdfOperation::Subtract,
+            smoothness: 0.0,
+        }));
+        s1.apply(&mut sdf_one, &positions);
+        let mut s2 = ModifierStack::new();
+        s2.add(Box::new(SphereModifier {
+            center: Vector3f::new(2.0, 2.0, 2.0),
+            radius: 1.5,
+            operation: SdfOperation::Subtract,
+            smoothness: 0.0,
+        }));
+        s2.add(Box::new(SphereModifier {
+            center: Vector3f::new(0.0, 0.0, 0.0),
+            radius: 1.5,
+            operation: SdfOperation::Subtract,
+            smoothness: 0.0,
+        }));
+        s2.apply(&mut sdf_two, &positions);
+        let carved_one = sdf_one.iter().filter(|&&v| v > -10.0).count();
+        let carved_two = sdf_two.iter().filter(|&&v| v > -10.0).count();
+        assert!(
+            carved_two >= carved_one,
+            "two subtracts should carve >= one: {carved_two} vs {carved_one}"
+        );
+    }
+
+    #[test]
+    fn subtract_then_add_restores() {
+        let positions: Vec<Vector3f> = (0..5)
+            .flat_map(|x| {
+                (0..5).flat_map(move |y| {
+                    (0..5).map(move |z| Vector3f::new(x as f32, y as f32, z as f32))
+                })
+            })
+            .collect();
+        let mut sdf = vec![-10.0f32; positions.len()];
+        let mut stack = ModifierStack::new();
+        stack.add(Box::new(SphereModifier {
+            center: Vector3f::new(2.0, 2.0, 2.0),
+            radius: 2.0,
+            operation: SdfOperation::Subtract,
+            smoothness: 0.0,
+        }));
+        stack.add(Box::new(SphereModifier {
+            center: Vector3f::new(2.0, 2.0, 2.0),
+            radius: 2.0,
+            operation: SdfOperation::Add,
+            smoothness: 0.0,
+        }));
+        stack.apply(&mut sdf, &positions);
+        let center_idx = 2 + 2 * 5 + 2 * 25;
+        // After subtract+add at same center, the result is the sphere SDF
+        // (negative = solid). The add restores solidness.
+        assert!(
+            sdf[center_idx] < 0.0,
+            "center should be solid after sub+add: {}",
+            sdf[center_idx]
+        );
+    }
+
+    #[test]
+    fn modifier_stack_length() {
+        let mut stack = ModifierStack::new();
+        assert_eq!(stack.len(), 0);
+        stack.add(Box::new(SphereModifier {
+            center: Vector3f::zero(),
+            radius: 1.0,
+            operation: SdfOperation::Add,
+            smoothness: 0.0,
+        }));
+        assert_eq!(stack.len(), 1);
+        stack.add(Box::new(SphereModifier {
+            center: Vector3f::zero(),
+            radius: 2.0,
+            operation: SdfOperation::Subtract,
+            smoothness: 0.5,
+        }));
+        assert_eq!(stack.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod graph_identity_parity {
+    use voxel_core::generators::graph::{
+        CompiledGraph, CompiledScratch, Graph, GraphInputs, GraphOutput, GraphPort, NodeKind,
+    };
+
+    fn run_binop(make: impl FnOnce(GraphPort, GraphPort) -> NodeKind, a: f32, b: f32) -> f32 {
+        let mut g = Graph::new();
+        let na = g.push(NodeKind::Constant(a));
+        let nb = g.push(NodeKind::Constant(b));
+        let n = g.push(make(
+            GraphPort {
+                node: na,
+                output: 0,
+            },
+            GraphPort {
+                node: nb,
+                output: 0,
+            },
+        ));
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: n, output: 0 }),
+        });
+        let c = CompiledGraph::compile(&g).expect("compile");
+        let xs = [0.0f32];
+        let zs = [0.0f32];
+        let i = GraphInputs {
+            x: &xs,
+            y: 0.0,
+            z: &zs,
+        };
+        let mut s = CompiledScratch::new();
+        let mut o = Vec::new();
+        c.generate_slice(&i, 1, &mut s, &mut o, false);
+        o.into_iter()
+            .find(|(k, _)| *k == GraphOutput::Sdf)
+            .and_then(|(_, v)| v.into_iter().next())
+            .unwrap()
+    }
+
+    #[test]
+    fn add_zero_identity() {
+        assert!(
+            (run_binop(
+                |a, b| NodeKind::Add {
+                    a: Some(a),
+                    b: Some(b)
+                },
+                42.0,
+                0.0
+            ) - 42.0)
+                .abs()
+                < 1e-5
+        );
+    }
+
+    #[test]
+    fn multiply_one_identity() {
+        assert!(
+            (run_binop(
+                |a, b| NodeKind::Multiply {
+                    a: Some(a),
+                    b: Some(b)
+                },
+                42.0,
+                1.0
+            ) - 42.0)
+                .abs()
+                < 1e-5
+        );
+    }
+
+    #[test]
+    fn subtract_zero_identity() {
+        assert!(
+            (run_binop(
+                |a, b| NodeKind::Subtract {
+                    a: Some(a),
+                    b: Some(b)
+                },
+                42.0,
+                0.0
+            ) - 42.0)
+                .abs()
+                < 1e-5
+        );
+    }
+
+    #[test]
+    fn divide_one_identity() {
+        assert!(
+            (run_binop(
+                |a, b| NodeKind::Divide {
+                    a: Some(a),
+                    b: Some(b)
+                },
+                42.0,
+                1.0
+            ) - 42.0)
+                .abs()
+                < 1e-5
+        );
+    }
+
+    #[test]
+    fn pow_various() {
+        assert!(
+            (run_binop(
+                |a, b| NodeKind::Pow {
+                    a: Some(a),
+                    b: Some(b)
+                },
+                3.0,
+                2.0
+            ) - 9.0)
+                .abs()
+                < 1e-3
+        );
+        assert!(
+            (run_binop(
+                |a, b| NodeKind::Pow {
+                    a: Some(a),
+                    b: Some(b)
+                },
+                5.0,
+                0.0
+            ) - 1.0)
+                .abs()
+                < 1e-3
+        );
+    }
+
+    #[test]
+    fn min_max_negative_pairs() {
+        assert!(
+            (run_binop(
+                |a, b| NodeKind::Min {
+                    a: Some(a),
+                    b: Some(b)
+                },
+                -3.0,
+                -7.0
+            ) - (-7.0))
+                .abs()
+                < 1e-5
+        );
+        assert!(
+            (run_binop(
+                |a, b| NodeKind::Max {
+                    a: Some(a),
+                    b: Some(b)
+                },
+                -3.0,
+                -7.0
+            ) - (-3.0))
+                .abs()
+                < 1e-5
+        );
+    }
+}
+
+#[cfg(test)]
+mod transvoxel_transition_matrix_parity {
+    use voxel_core::math::Vector3i;
+    use voxel_core::meshers::{MesherInput, MesherOutput, TransvoxelMesher, VoxelMesher};
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
+
+    #[test]
+    fn lod_hint_never_fewer_vertices() {
+        let mesher = TransvoxelMesher::new();
+        for &r in &[3.0, 5.0, 7.0] {
+            let mut voxels = VoxelBuffer::with_size(Vector3i::splat(16));
+            let mut fmt = VoxelFormat::new();
+            fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+            fmt.configure_buffer(&mut voxels);
+            let c = 8.0;
+            for z in 0..16 {
+                for y in 0..16 {
+                    for x in 0..16 {
+                        let d = ((x as f32 - c).powi(2)
+                            + (y as f32 - c).powi(2)
+                            + (z as f32 - c).powi(2))
+                        .sqrt()
+                            - r;
+                        voxels.set_voxel_f(d, x, y, z, ChannelId::Sdf.index());
+                    }
+                }
+            }
+            let mut out_no = MesherOutput::default();
+            let mut inp = MesherInput::new(&voxels, Vector3i::zero(), 0);
+            inp.lod_hint = false;
+            mesher.build(&mut out_no, &inp);
+            let mut out_lod = MesherOutput::default();
+            let mut inp2 = MesherInput::new(&voxels, Vector3i::zero(), 0);
+            inp2.lod_hint = true;
+            mesher.build(&mut out_lod, &inp2);
+            assert!(
+                out_lod.total_vertex_count() >= out_no.total_vertex_count(),
+                "lod_hint r={r} should have >= vertices"
+            );
+        }
+    }
+
+    #[test]
+    fn slab_produces_geometry() {
+        let mesher = TransvoxelMesher::new();
+        let mut voxels = VoxelBuffer::with_size(Vector3i::splat(16));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+        fmt.configure_buffer(&mut voxels);
+        for z in 0..16 {
+            for y in 0..16 {
+                for x in 0..16 {
+                    let d = if !(5..=7).contains(&y) {
+                        (y as f32 - 6.0).abs() - 1.0
+                    } else {
+                        -1.0
+                    };
+                    voxels.set_voxel_f(d, x, y, z, ChannelId::Sdf.index());
+                }
+            }
+        }
+        let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+        let mut out = MesherOutput::default();
+        mesher.build(&mut out, &input);
+        assert!(out.total_vertex_count() > 0, "slab should produce geometry");
+    }
+
+    #[test]
+    fn fully_uniform_air_no_geometry() {
+        let mesher = TransvoxelMesher::new();
+        let mut voxels = VoxelBuffer::with_size(Vector3i::splat(16));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+        fmt.configure_buffer(&mut voxels);
+        voxels.clear_channel_f(ChannelId::Sdf.index(), 100.0);
+        let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+        let mut out = MesherOutput::default();
+        mesher.build(&mut out, &input);
+        assert_eq!(
+            out.total_vertex_count(),
+            0,
+            "fully-uniform air should produce no geometry"
+        );
+    }
+}
