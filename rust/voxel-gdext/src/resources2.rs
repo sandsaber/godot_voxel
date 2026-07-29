@@ -207,46 +207,82 @@ impl IRefCounted for VoxelBlockRaycastResultGD {
 // VoxelBlockSerializerGD — RefCounted for block save/load
 // ---------------------------------------------------------------------------
 /// Utility for serializing/deserializing voxel blocks to/from bytes.
-/// Wraps [`voxel_core::streams::block_serializer`].
+/// Wraps [`voxel_core::streams::block_serializer`] with a real VoxelBuffer.
 #[derive(GodotClass)]
 #[class(base = RefCounted, tool)]
 pub struct VoxelBlockSerializerGD {
     base: Base<RefCounted>,
+    buffer: voxel_core::storage::VoxelBuffer,
 }
 #[godot_api]
 impl IRefCounted for VoxelBlockSerializerGD {
     fn init(base: Base<RefCounted>) -> Self {
-        Self { base }
+        let buffer =
+            voxel_core::storage::VoxelBuffer::with_size(voxel_core::math::Vector3i::splat(1));
+        Self { base, buffer }
     }
 }
 #[godot_api]
 impl VoxelBlockSerializerGD {
-    /// Serialize a VoxelBufferGD into a PackedByteArray (block format v4).
+    /// Initialize the internal buffer with a given size.
     #[func]
-    fn serialize(&self, buffer: Gd<RefCounted>) -> PackedByteArray {
-        // In a full impl, we'd downcast to VoxelBufferGD and access its buffer.
-        // For now, return empty — the functional path requires shared buffer ownership.
-        let _ = buffer;
-        PackedByteArray::new()
+    fn create_buffer(&mut self, sx: i32, sy: i32, sz: i32) {
+        self.buffer = voxel_core::storage::VoxelBuffer::with_size(voxel_core::math::Vector3i::new(
+            sx, sy, sz,
+        ));
+        voxel_core::storage::VoxelFormat::new().configure_buffer(&mut self.buffer);
     }
 
-    /// Deserialize a PackedByteArray into a VoxelBufferGD.
-    /// Returns null on error.
+    /// Set a voxel in the internal buffer.
     #[func]
-    fn deserialize(&self, _data: PackedByteArray) -> Variant {
-        Variant::nil()
+    fn set_voxel(&mut self, x: i32, y: i32, z: i32, channel: i32, value: i64) {
+        self.buffer
+            .set_voxel(value as u64, x, y, z, channel as usize);
     }
 
-    /// Serialize + LZ4-compress a block. Returns compressed bytes.
+    /// Get a voxel from the internal buffer.
     #[func]
-    fn serialize_compressed(&self, _buffer: Gd<RefCounted>) -> PackedByteArray {
-        PackedByteArray::new()
+    fn get_voxel(&self, x: i32, y: i32, z: i32, channel: i32) -> i64 {
+        self.buffer.get_voxel(x, y, z, channel as usize) as i64
     }
 
-    /// Decompress + deserialize. Returns null on error.
+    /// Serialize the internal buffer into a PackedByteArray (block format v4).
     #[func]
-    fn decompress_and_deserialize(&self, _data: PackedByteArray) -> Variant {
-        Variant::nil()
+    fn serialize(&self) -> PackedByteArray {
+        let mut data = Vec::new();
+        match voxel_core::streams::block_serializer::serialize(&self.buffer, &mut data) {
+            Ok(_) => PackedByteArray::from(data.as_slice()),
+            Err(_) => PackedByteArray::new(),
+        }
+    }
+
+    /// Deserialize a PackedByteArray into the internal buffer.
+    #[func]
+    fn deserialize(&mut self, data: PackedByteArray) -> bool {
+        let raw = data.as_slice();
+        voxel_core::streams::block_serializer::deserialize(raw, &mut self.buffer).is_ok()
+    }
+
+    /// Serialize + LZ4-compress the internal buffer.
+    #[func]
+    fn serialize_compressed(&self) -> PackedByteArray {
+        let mut data = Vec::new();
+        match voxel_core::streams::block_serializer::serialize_and_compress(
+            &self.buffer,
+            &mut data,
+            voxel_core::streams::compressed_data::Compression::Lz4,
+        ) {
+            Ok(_) => PackedByteArray::from(data.as_slice()),
+            Err(_) => PackedByteArray::new(),
+        }
+    }
+
+    /// Decompress + deserialize into the internal buffer.
+    #[func]
+    fn decompress_and_deserialize(&mut self, data: PackedByteArray) -> bool {
+        let raw = data.as_slice();
+        voxel_core::streams::block_serializer::decompress_and_deserialize(raw, &mut self.buffer)
+            .is_ok()
     }
 }
 
