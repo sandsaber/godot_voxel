@@ -17,3 +17,9 @@
 shaders/dev/.godot/
 *.gen.glsl
 *.gen.h
+
+# ZCode
+.zcode/
+
+# Rust build artifacts
+rust/target/
