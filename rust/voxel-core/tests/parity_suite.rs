@@ -11353,3 +11353,231 @@ mod scatter_precision_parity {
         }
     }
 }
+
+// Additional graph generate_block_with_compiled_graph parity.
+#[cfg(test)]
+mod graph_compiled_gen_block_parity {
+    use voxel_core::generators::base::{VoxelGenerator, VoxelQueryData};
+    use voxel_core::generators::graph::{
+        Graph, GraphGenerator, GraphPort, NodeKind,
+    };
+    use voxel_core::math::Vector3i;
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
+
+    #[test]
+    fn compiled_graph_sphere_negative_at_origin() {
+        let mut g = Graph::new();
+        let x = g.push(NodeKind::InputX);
+        let y = g.push(NodeKind::InputY);
+        let z = g.push(NodeKind::InputZ);
+        let r = g.push(NodeKind::Constant(10.0));
+        let sph = g.push(NodeKind::SdfSphere {
+            x: Some(GraphPort { node: x, output: 0 }),
+            y: Some(GraphPort { node: y, output: 0 }),
+            z: Some(GraphPort { node: z, output: 0 }),
+            radius: Some(GraphPort { node: r, output: 0 }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort {
+                node: sph,
+                output: 0,
+            }),
+        });
+        let gen = GraphGenerator::new(g);
+
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+        fmt.configure_buffer(&mut buf);
+        let query = VoxelQueryData {
+            buffer: &mut buf,
+            origin_in_voxels: Vector3i::zero(),
+            lod: 0,
+        };
+        gen.generate_block(query);
+        // At (0,0,0), sphere r=10 → sdf = 0 - 10 = -10 (inside).
+        let v = buf.get_voxel_f(0, 0, 0, ChannelId::Sdf.index());
+        assert!(v < 0.0, "sphere origin should be negative: {v}");
+    }
+
+    #[test]
+    fn graph_plane_at_offset() {
+        let mut g = Graph::new();
+        let y = g.push(NodeKind::InputY);
+        let h = g.push(NodeKind::Constant(4.0));
+        let p = g.push(NodeKind::SdfPlane {
+            y: Some(GraphPort { node: y, output: 0 }),
+            height: Some(GraphPort { node: h, output: 0 }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: p, output: 0 }),
+        });
+        let gen = GraphGenerator::new(g);
+
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+        fmt.configure_buffer(&mut buf);
+        let query = VoxelQueryData {
+            buffer: &mut buf,
+            origin_in_voxels: Vector3i::zero(),
+            lod: 0,
+        };
+        gen.generate_block(query);
+        // At y=0 (below height 4): sdf = 0-4 = -4 (solid).
+        let v0 = buf.get_voxel_f(0, 0, 0, ChannelId::Sdf.index());
+        assert!(v0 < 0.0, "below plane should be solid: {v0}");
+        // At y=7 (above height 4): sdf = 7-4 = 3 (air).
+        let v7 = buf.get_voxel_f(0, 7, 0, ChannelId::Sdf.index());
+        assert!(v7 > 0.0, "above plane should be air: {v7}");
+    }
+}
+
+// Additional blocky bake + side_pattern parity.
+#[cfg(test)]
+mod blocky_side_pattern_parity {
+    use voxel_core::meshers::blocky::{bake_library, BakedLibrary, BakedModel};
+
+    #[test]
+    fn bake_sets_side_pattern_count() {
+        let mut lib = BakedLibrary::default();
+        lib.models.push(BakedModel {
+            color: voxel_core::math::Color::from_rgb(0.5, 0.5, 0.5),
+            empty: false,
+            culls_neighbors: true,
+            ..BakedModel::default()
+        });
+        bake_library(&mut lib);
+        assert!(
+            lib.side_pattern_count > 0,
+            "bake should set side_pattern_count"
+        );
+    }
+
+    #[test]
+    fn bake_empty_library_no_panic() {
+        let mut lib = BakedLibrary::default();
+        bake_library(&mut lib);
+        assert_eq!(lib.models.len(), 0);
+    }
+
+    #[test]
+    fn baked_model_color_default_white() {
+        let m = BakedModel::default();
+        assert!(
+            (m.color.r - 1.0).abs() < 1e-5,
+            "default model color should be white"
+        );
+    }
+
+    #[test]
+    fn has_model_after_push() {
+        let mut lib = BakedLibrary::default();
+        assert!(!lib.has_model(0));
+        lib.models.push(BakedModel::default());
+        assert!(lib.has_model(0));
+    }
+}
+
+// Additional raycast edge cases.
+#[cfg(test)]
+mod raycast_edge_parity {
+    use voxel_core::edition::raycast::{voxel_raycast, VoxelRaycastState};
+    use voxel_core::math::{Vector3f, Vector3i};
+
+    #[test]
+    fn ray_x_positive_one_step() {
+        let hit = voxel_raycast(
+            Vector3f::new(0.5, 0.5, 0.5),
+            Vector3f::new(1.0, 0.0, 0.0),
+            1.5,
+            |s: &VoxelRaycastState| s.position.x >= 1,
+        );
+        assert!(hit.is_some(), "should hit at x=1");
+        let h = hit.unwrap();
+        assert_eq!(h.position, Vector3i::new(1, 0, 0));
+    }
+
+    #[test]
+    fn ray_zero_direction_no_hit() {
+        let hit = voxel_raycast(
+            Vector3f::new(0.5, 0.5, 0.5),
+            Vector3f::new(0.0, 0.0, 0.0),
+            10.0,
+            |_: &VoxelRaycastState| true,
+        );
+        assert!(hit.is_none(), "zero direction should not hit");
+    }
+
+    #[test]
+    fn ray_immediate_hit_first_voxel() {
+        // The predicate fires on the first voxel the ray enters.
+        let mut count = 0;
+        let hit = voxel_raycast(
+            Vector3f::new(0.5, 0.5, 0.5),
+            Vector3f::new(1.0, 0.0, 0.0),
+            10.0,
+            |_s: &VoxelRaycastState| {
+                count += 1;
+                count == 1 // hit on first visited voxel
+            },
+        );
+        assert!(hit.is_some(), "should hit on first voxel");
+    }
+}
+
+// Additional transvoxel: no geometry for all-solid with boundary at edge.
+#[cfg(test)]
+mod transvoxel_edge_solid_parity {
+    use voxel_core::math::Vector3i;
+    use voxel_core::meshers::{MesherInput, MesherOutput, TransvoxelMesher, VoxelMesher};
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
+
+    #[test]
+    fn thin_wall_produces_geometry() {
+        let mesher = TransvoxelMesher::new();
+        let mut voxels = VoxelBuffer::with_size(Vector3i::splat(16));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+        fmt.configure_buffer(&mut voxels);
+        // Thin wall at x=8: solid at x≤8, air at x>8.
+        for z in 0..16 {
+            for y in 0..16 {
+                for x in 0..16 {
+                    voxels.set_voxel_f(x as f32 - 8.0, x, y, z, ChannelId::Sdf.index());
+                }
+            }
+        }
+        let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+        let mut out = MesherOutput::default();
+        mesher.build(&mut out, &input);
+        assert!(
+            out.total_vertex_count() > 0,
+            "thin wall should produce geometry"
+        );
+    }
+
+    #[test]
+    fn diagonal_surface_produces_geometry() {
+        let mesher = TransvoxelMesher::new();
+        let mut voxels = VoxelBuffer::with_size(Vector3i::splat(16));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+        fmt.configure_buffer(&mut voxels);
+        // Diagonal: sdf = x + y + z - 12.
+        for z in 0..16 {
+            for y in 0..16 {
+                for x in 0..16 {
+                    voxels.set_voxel_f((x + y + z) as f32 - 12.0, x, y, z, ChannelId::Sdf.index());
+                }
+            }
+        }
+        let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+        let mut out = MesherOutput::default();
+        mesher.build(&mut out, &input);
+        assert!(
+            out.total_vertex_count() > 0,
+            "diagonal surface should produce geometry"
+        );
+    }
+}
