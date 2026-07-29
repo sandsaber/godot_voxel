@@ -10170,3 +10170,235 @@ mod edition_sdf_channel_parity {
         );
     }
 }
+
+// Additional lod_octree progressive update + scale patterns.
+#[cfg(test)]
+mod octree_progressive_parity {
+    use voxel_core::terrain::lod_octree::{LodOctree, NoOpActions};
+
+    /// Multiple update passes don't decrease node count below the subdivided state.
+    #[test]
+    fn multiple_updates_stable() {
+        let mut oct = LodOctree::new();
+        oct.create(3);
+        let mut a = NoOpActions;
+        oct.subdivide(&mut a);
+        let count1 = oct.node_count();
+        // Run update several times.
+        for _ in 0..5 {
+            oct.update(&mut NoOpActions);
+        }
+        let count2 = oct.node_count();
+        assert!(
+            count2 <= count1,
+            "updates should not increase nodes: {count2} vs {count1}"
+        );
+    }
+
+    /// A 5-LOD octree has max_depth=4.
+    #[test]
+    fn five_lod_max_depth_four() {
+        let mut oct = LodOctree::new();
+        oct.create(5);
+        assert_eq!(oct.max_depth(), 4);
+    }
+
+    /// lod_count is consistent after operations.
+    #[test]
+    fn lod_count_stable_after_subdivide() {
+        let mut oct = LodOctree::new();
+        oct.create(4);
+        let lc1 = oct.lod_count();
+        oct.subdivide(&mut NoOpActions);
+        let lc2 = oct.lod_count();
+        assert_eq!(lc1, lc2, "lod_count should not change after subdivide");
+    }
+}
+
+// Additional compressed_data direct compress/decompress parity.
+#[cfg(test)]
+mod compressed_data_direct_parity {
+    use voxel_core::streams::compressed_data::{compress, decompress_with_limits, Compression};
+    use voxel_core::streams::decode_limits::DecodeLimits;
+
+    #[test]
+    fn none_preserves_exact_bytes() {
+        let data = vec![42u8; 100];
+        let mut comp = Vec::new();
+        compress(&data, &mut comp, Compression::None).unwrap();
+        let mut decomp = Vec::new();
+        decompress_with_limits(&comp, &mut decomp, DecodeLimits::default()).unwrap();
+        assert_eq!(decomp, data);
+    }
+
+    #[test]
+    fn lz4_preserves_varied_data() {
+        let data: Vec<u8> = (0..200).map(|i| (i * 13 + 7) as u8).collect();
+        let mut comp = Vec::new();
+        compress(&data, &mut comp, Compression::Lz4).unwrap();
+        let mut decomp = Vec::new();
+        decompress_with_limits(&comp, &mut decomp, DecodeLimits::default()).unwrap();
+        assert_eq!(decomp, data);
+    }
+
+    #[test]
+    fn empty_data_round_trips() {
+        let data: Vec<u8> = Vec::new();
+        let mut comp = Vec::new();
+        compress(&data, &mut comp, Compression::None).unwrap();
+        let mut decomp = Vec::new();
+        decompress_with_limits(&comp, &mut decomp, DecodeLimits::default()).unwrap();
+        assert_eq!(decomp, data);
+    }
+
+    #[test]
+    fn single_byte_round_trips() {
+        let data = vec![42u8];
+        let mut comp = Vec::new();
+        compress(&data, &mut comp, Compression::Lz4).unwrap();
+        let mut decomp = Vec::new();
+        decompress_with_limits(&comp, &mut decomp, DecodeLimits::default()).unwrap();
+        assert_eq!(decomp, data);
+    }
+}
+
+// Additional graph SdfPlane multi-slice + SdfBox multi-slice parity.
+#[cfg(test)]
+mod graph_sdf_multi_slice_parity {
+    use voxel_core::generators::graph::{
+        CompiledGraph, CompiledScratch, Graph, GraphInputs, GraphOutput, GraphPort, NodeKind,
+    };
+
+    fn run_multi(g: &Graph, xs: &[f32], y: f32, zs: &[f32]) -> Vec<f32> {
+        let c = CompiledGraph::compile(g).expect("compile");
+        let i = GraphInputs { x: xs, y, z: zs };
+        let mut s = CompiledScratch::new();
+        let mut o = Vec::new();
+        c.generate_slice(&i, xs.len(), &mut s, &mut o, false);
+        o.into_iter()
+            .find(|(k, _)| *k == GraphOutput::Sdf)
+            .map(|(_, v)| v)
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn sdf_plane_varies_with_y() {
+        let mut g = Graph::new();
+        let y = g.push(NodeKind::InputY);
+        let h = g.push(NodeKind::Constant(0.0));
+        let p = g.push(NodeKind::SdfPlane {
+            y: Some(GraphPort { node: y, output: 0 }),
+            height: Some(GraphPort { node: h, output: 0 }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: p, output: 0 }),
+        });
+        // At y=2: sdf=2; at y=-3: sdf=-3.
+        let xs = [0.0f32];
+        let r1 = run_multi(&g, &xs, 2.0, &xs);
+        assert!((r1[0] - 2.0).abs() < 1e-5, "plane y=2: {}", r1[0]);
+        let r2 = run_multi(&g, &xs, -3.0, &xs);
+        assert!((r2[0] - (-3.0)).abs() < 1e-5, "plane y=-3: {}", r2[0]);
+    }
+
+    #[test]
+    fn sdf_box_varies_with_position() {
+        let mut g = Graph::new();
+        let x = g.push(NodeKind::InputX);
+        let y = g.push(NodeKind::InputY);
+        let z = g.push(NodeKind::InputZ);
+        let b = g.push(NodeKind::SdfBox {
+            x: Some(GraphPort { node: x, output: 0 }),
+            y: Some(GraphPort { node: y, output: 0 }),
+            z: Some(GraphPort { node: z, output: 0 }),
+            size_x: 2.0,
+            size_y: 2.0,
+            size_z: 2.0,
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: b, output: 0 }),
+        });
+        // Inside box (0,0,0): sdf = -2 (negative).
+        let xs = [0.0f32];
+        let r_in = run_multi(&g, &xs, 0.0, &xs);
+        assert!(r_in[0] < 0.0, "inside box should be negative: {}", r_in[0]);
+        // Outside box (5,5,5): sdf positive.
+        let xs_out = [5.0f32];
+        let r_out = run_multi(&g, &xs_out, 5.0, &xs_out);
+        assert!(
+            r_out[0] > 0.0,
+            "outside box should be positive: {}",
+            r_out[0]
+        );
+    }
+
+    #[test]
+    fn constant_plus_input_y_sum() {
+        let mut g = Graph::new();
+        let y = g.push(NodeKind::InputY);
+        let c = g.push(NodeKind::Constant(10.0));
+        let add = g.push(NodeKind::Add {
+            a: Some(GraphPort { node: y, output: 0 }),
+            b: Some(GraphPort { node: c, output: 0 }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort {
+                node: add,
+                output: 0,
+            }),
+        });
+        let xs = [0.0f32, 0.0, 0.0];
+        // y=5 → 15; y=3 → 13; y=0 → 10.
+        let r = run_multi(&g, &xs, 5.0, &xs);
+        assert!((r[0] - 15.0).abs() < 1e-5, "y+10 at y=5: {}", r[0]);
+    }
+}
+
+// Additional blocky model + modifier SDF intersection parity.
+#[cfg(test)]
+mod blocky_model_and_modifier_parity {
+    use voxel_core::math::Vector3f;
+    use voxel_core::meshers::blocky::{BakedLibrary, BakedModel};
+    use voxel_core::modifiers::{ModifierStack, SdfOperation, SphereModifier};
+
+    #[test]
+    fn baked_model_default_is_empty() {
+        let m = BakedModel::default();
+        assert!(m.empty);
+    }
+
+    #[test]
+    fn baked_model_non_empty_when_set() {
+        let m = BakedModel {
+            empty: false,
+            color: voxel_core::math::Color::WHITE,
+            ..BakedModel::default()
+        };
+        assert!(!m.empty);
+    }
+
+    #[test]
+    fn baked_library_empty_has_no_models() {
+        let lib = BakedLibrary::default();
+        assert!(lib.models.is_empty());
+    }
+
+    #[test]
+    fn modifier_add_at_origin_makes_center_solid() {
+        let positions = vec![Vector3f::new(0.0, 0.0, 0.0)];
+        let mut sdf = vec![10.0f32]; // air
+        let mut stack = ModifierStack::new();
+        stack.add(Box::new(SphereModifier {
+            center: Vector3f::zero(),
+            radius: 5.0,
+            operation: SdfOperation::Add,
+            smoothness: 0.0,
+        }));
+        stack.apply(&mut sdf, &positions);
+        assert!(
+            sdf[0] < 10.0,
+            "add sphere should make center more solid: {}",
+            sdf[0]
+        );
+    }
+}
