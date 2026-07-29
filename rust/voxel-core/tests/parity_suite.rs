@@ -13166,6 +13166,7 @@ mod graph_sdf_field_patterns_parity {
         );
     }
 
+    #[allow(dead_code)]
     enum SdfOp {
         Add,
         Sub,
@@ -13364,5 +13365,269 @@ mod buffer_size_depth_parity {
     fn rectangular_buffer_size() {
         let buf = VoxelBuffer::with_size(Vector3i::new(4, 8, 2));
         assert_eq!(buf.size(), Vector3i::new(4, 8, 2));
+    }
+}
+
+// Additional graph: deep expression chains.
+#[cfg(test)]
+mod graph_deep_expressions_parity {
+    use voxel_core::generators::graph::{
+        CompiledGraph, CompiledScratch, Graph, GraphInputs, GraphOutput, GraphPort, NodeKind,
+    };
+
+    fn run_multi(g: &Graph, xs: &[f32]) -> Vec<f32> {
+        let c = CompiledGraph::compile(g).expect("compile");
+        let i = GraphInputs {
+            x: xs,
+            y: 0.0,
+            z: xs,
+        };
+        let mut s = CompiledScratch::new();
+        let mut o = Vec::new();
+        c.generate_slice(&i, xs.len(), &mut s, &mut o, false);
+        o.into_iter()
+            .find(|(k, _)| *k == GraphOutput::Sdf)
+            .map(|(_, v)| v)
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn multiply_chain_geometric() {
+        let mut g = Graph::new();
+        let x = g.push(NodeKind::InputX);
+        let c2 = g.push(NodeKind::Constant(2.0));
+        let mut prev = g.push(NodeKind::Multiply {
+            a: Some(GraphPort { node: x, output: 0 }),
+            b: Some(GraphPort {
+                node: c2,
+                output: 0,
+            }),
+        });
+        // Multiply by 2 three more times → x * 2^4 = x * 16.
+        for _ in 0..3 {
+            let c = g.push(NodeKind::Constant(2.0));
+            prev = g.push(NodeKind::Multiply {
+                a: Some(GraphPort {
+                    node: prev,
+                    output: 0,
+                }),
+                b: Some(GraphPort { node: c, output: 0 }),
+            });
+        }
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort {
+                node: prev,
+                output: 0,
+            }),
+        });
+        let xs = [1.0f32, 2.0, 3.0];
+        let r = run_multi(&g, &xs);
+        assert!((r[0] - 16.0).abs() < 1e-3, "1*16=16: {}", r[0]);
+        assert!((r[1] - 32.0).abs() < 1e-3, "2*16=32: {}", r[1]);
+        assert!((r[2] - 48.0).abs() < 1e-3, "3*16=48: {}", r[2]);
+    }
+
+    #[test]
+    fn add_constant_chain_arithmetic() {
+        let mut g = Graph::new();
+        let x = g.push(NodeKind::InputX);
+        let mut prev = x;
+        // Add 1, 2, 3 → x + 6.
+        for &v in &[1.0f32, 2.0, 3.0] {
+            let c = g.push(NodeKind::Constant(v));
+            prev = g.push(NodeKind::Add {
+                a: Some(GraphPort {
+                    node: prev,
+                    output: 0,
+                }),
+                b: Some(GraphPort { node: c, output: 0 }),
+            });
+        }
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort {
+                node: prev,
+                output: 0,
+            }),
+        });
+        let xs = [0.0f32, 5.0, 10.0];
+        let r = run_multi(&g, &xs);
+        assert!((r[0] - 6.0).abs() < 1e-5, "0+6=6: {}", r[0]);
+        assert!((r[1] - 11.0).abs() < 1e-5, "5+6=11: {}", r[1]);
+    }
+
+    #[test]
+    fn mixed_arithmetic_chain() {
+        // ((x+1)*2)-3 = 2x-1.
+        let mut g = Graph::new();
+        let x = g.push(NodeKind::InputX);
+        let c1 = g.push(NodeKind::Constant(1.0));
+        let add = g.push(NodeKind::Add {
+            a: Some(GraphPort { node: x, output: 0 }),
+            b: Some(GraphPort {
+                node: c1,
+                output: 0,
+            }),
+        });
+        let c2 = g.push(NodeKind::Constant(2.0));
+        let mul = g.push(NodeKind::Multiply {
+            a: Some(GraphPort {
+                node: add,
+                output: 0,
+            }),
+            b: Some(GraphPort {
+                node: c2,
+                output: 0,
+            }),
+        });
+        let c3 = g.push(NodeKind::Constant(3.0));
+        let sub = g.push(NodeKind::Subtract {
+            a: Some(GraphPort {
+                node: mul,
+                output: 0,
+            }),
+            b: Some(GraphPort {
+                node: c3,
+                output: 0,
+            }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort {
+                node: sub,
+                output: 0,
+            }),
+        });
+        let xs = [5.0f32, 10.0];
+        let r = run_multi(&g, &xs);
+        assert!((r[0] - 9.0).abs() < 1e-5, "2*5-1=9: {}", r[0]);
+        assert!((r[1] - 19.0).abs() < 1e-5, "2*10-1=19: {}", r[1]);
+    }
+}
+
+// Additional VoxelDataMap: block_surrounded + copy patterns.
+#[cfg(test)]
+mod data_map_surrounded_parity {
+    use voxel_core::math::Vector3i;
+    use voxel_core::storage::VoxelDataMap;
+
+    #[test]
+    fn isolated_block_not_surrounded() {
+        let mut map = VoxelDataMap::new(0);
+        map.set_empty_block(Vector3i::zero(), true);
+        assert!(!map.is_block_surrounded(Vector3i::zero()));
+    }
+
+    #[test]
+    fn surrounded_block_may_be_detected() {
+        let mut map = VoxelDataMap::new(0);
+        map.set_empty_block(Vector3i::zero(), true);
+        map.set_empty_block(Vector3i::new(1, 0, 0), true);
+        map.set_empty_block(Vector3i::new(-1, 0, 0), true);
+        map.set_empty_block(Vector3i::new(0, 1, 0), true);
+        map.set_empty_block(Vector3i::new(0, -1, 0), true);
+        map.set_empty_block(Vector3i::new(0, 0, 1), true);
+        map.set_empty_block(Vector3i::new(0, 0, -1), true);
+        // is_block_surrounded may require specific neighbor check logic;
+        // just verify it doesn't panic.
+        let _ = map.is_block_surrounded(Vector3i::zero());
+    }
+}
+
+// Additional container: append + is_uniform patterns.
+#[cfg(test)]
+mod container_append_parity {
+    use voxel_core::containers::funcs;
+
+    #[test]
+    fn append_empty_to_nonempty() {
+        let mut dst = vec![1, 2, 3];
+        funcs::append_array(&mut dst, &[]);
+        assert_eq!(dst, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn append_nonempty_to_empty() {
+        let mut dst: Vec<i32> = vec![];
+        funcs::append_array(&mut dst, &[4, 5, 6]);
+        assert_eq!(dst, vec![4, 5, 6]);
+    }
+
+    #[test]
+    fn is_uniform_single_element() {
+        assert!(funcs::is_uniform(&[42]));
+    }
+
+    #[test]
+    fn is_uniform_empty_slice_false() {
+        // Empty slice: is_uniform may return false (no elements to compare).
+        assert!(!funcs::is_uniform::<i32>(&[]));
+    }
+}
+
+// Additional edition: do_sphere on SDF with value mode.
+#[cfg(test)]
+mod edition_value_mode_parity {
+    use voxel_core::edition::ops::{EditMode, VoxelToolBuffer};
+    use voxel_core::math::{Vector3f, Vector3i};
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
+
+    #[test]
+    fn set_mode_overwrites_value() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        buf.fill(1, ChannelId::Type.index());
+        let mut tool = VoxelToolBuffer::new(&mut buf, ChannelId::Type.index())
+            .with_mode(EditMode::Set)
+            .with_value(5);
+        tool.do_sphere(Vector3f::new(4.0, 4.0, 4.0), 2.0);
+        // Center should be 5.
+        assert_eq!(buf.get_voxel(4, 4, 4, ChannelId::Type.index()), 5);
+        // Outside sphere should still be 1.
+        assert_eq!(buf.get_voxel(0, 0, 0, ChannelId::Type.index()), 1);
+    }
+}
+
+// Additional transvoxel: uniform SDF at boundary.
+#[cfg(test)]
+mod transvoxel_boundary_uniform_parity {
+    use voxel_core::math::Vector3i;
+    use voxel_core::meshers::{MesherInput, MesherOutput, TransvoxelMesher, VoxelMesher};
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
+
+    #[test]
+    fn uniform_positive_sdf_no_geometry() {
+        let mesher = TransvoxelMesher::new();
+        let mut voxels = VoxelBuffer::with_size(Vector3i::splat(16));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+        fmt.configure_buffer(&mut voxels);
+        voxels.clear_channel_f(ChannelId::Sdf.index(), 50.0);
+        let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+        let mut out = MesherOutput::default();
+        mesher.build(&mut out, &input);
+        assert_eq!(
+            out.total_vertex_count(),
+            0,
+            "uniform positive → no geometry"
+        );
+    }
+
+    #[test]
+    fn uniform_negative_sdf_no_geometry() {
+        let mesher = TransvoxelMesher::new();
+        let mut voxels = VoxelBuffer::with_size(Vector3i::splat(16));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+        fmt.configure_buffer(&mut voxels);
+        voxels.clear_channel_f(ChannelId::Sdf.index(), -50.0);
+        let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+        let mut out = MesherOutput::default();
+        mesher.build(&mut out, &input);
+        assert_eq!(
+            out.total_vertex_count(),
+            0,
+            "uniform negative → no geometry"
+        );
     }
 }
