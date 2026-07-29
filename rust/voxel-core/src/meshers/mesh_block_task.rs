@@ -176,12 +176,18 @@ impl MeshBlockTask {
         };
         mesher.build(&mut surfaces, &input);
 
+        // MESH-1 parity: re-check dependency validity AFTER build. If the
+        // mesher/generator was swapped mid-flight (between the initial check
+        // and now), drop the output so the terrain re-queues with the new
+        // dependency.
+        let dropped = !self.meshing_dependency.is_valid();
+
         self.has_run = true;
         self.output = Some(BlockMeshOutput {
             position_in_blocks: self.position_in_blocks,
             lod_index: self.lod_index,
             surfaces,
-            dropped: false,
+            dropped,
         });
     }
 }

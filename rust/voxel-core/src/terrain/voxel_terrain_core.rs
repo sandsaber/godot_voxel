@@ -845,6 +845,14 @@ impl VoxelTerrainCore {
         let pool = self.mesh_arrays_pool.clone();
         if output.dropped {
             self.stats.meshes_dropped += 1;
+            // MESH-1 parity: requeue the block if it's still viewed so it gets
+            // re-meshed with the current dependency (not silently lost).
+            if let Some(entry) = self.mesh_maps[lod].get_mut(&bpos) {
+                if entry.mesh_viewers > 0 && !entry.is_in_update_list {
+                    entry.is_in_update_list = true;
+                    self.blocks_pending_update[lod].push(bpos);
+                }
+            }
             return;
         }
         let Some(entry) = self.mesh_maps[lod].get_mut(&bpos) else {
