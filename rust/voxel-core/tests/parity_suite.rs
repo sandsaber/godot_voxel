@@ -8940,7 +8940,10 @@ mod scatter_config_parity {
 
     #[test]
     fn config_with_custom_seed() {
-        let config = ScatterConfig { seed: 42, ..ScatterConfig::default() };
+        let config = ScatterConfig {
+            seed: 42,
+            ..ScatterConfig::default()
+        };
         assert_eq!(config.seed, 42);
     }
 }
@@ -8988,5 +8991,260 @@ mod box2i_parity {
         let b = Box2i::new(Vector2i::new(0, 0), Vector2i::new(10, 10));
         assert!(b.contains_point(Vector2i::new(5, 5)));
         assert!(!b.contains_point(Vector2i::new(-1, 0)));
+    }
+}
+
+// Mirrors test_voxel_graph.cpp — Sin/Cos/Abs multi-element slices.
+#[cfg(test)]
+mod graph_trig_slice_parity {
+    use voxel_core::generators::graph::{
+        CompiledGraph, CompiledScratch, Graph, GraphInputs, GraphOutput, GraphPort, NodeKind,
+    };
+
+    fn run_multi(g: &Graph, xs: &[f32]) -> Vec<f32> {
+        let c = CompiledGraph::compile(g).expect("compile");
+        let i = GraphInputs {
+            x: xs,
+            y: 0.0,
+            z: xs,
+        };
+        let mut s = CompiledScratch::new();
+        let mut o = Vec::new();
+        c.generate_slice(&i, xs.len(), &mut s, &mut o, false);
+        o.into_iter()
+            .find(|(k, _)| *k == GraphOutput::Sdf)
+            .map(|(_, v)| v)
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn sin_slice_matches_std() {
+        let mut g = Graph::new();
+        let x = g.push(NodeKind::InputX);
+        let sin = g.push(NodeKind::Sin {
+            a: Some(GraphPort { node: x, output: 0 }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort {
+                node: sin,
+                output: 0,
+            }),
+        });
+        let xs = [0.0f32, std::f32::consts::FRAC_PI_2, std::f32::consts::PI];
+        let result = run_multi(&g, &xs);
+        assert!((result[0] - 0.0).abs() < 1e-3, "sin(0)≈0: {}", result[0]);
+        assert!((result[1] - 1.0).abs() < 1e-3, "sin(π/2)≈1: {}", result[1]);
+        assert!(result[2].abs() < 1e-3, "sin(π)≈0: {}", result[2]);
+    }
+
+    #[test]
+    fn cos_slice_matches_std() {
+        let mut g = Graph::new();
+        let x = g.push(NodeKind::InputX);
+        let cos = g.push(NodeKind::Cos {
+            a: Some(GraphPort { node: x, output: 0 }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort {
+                node: cos,
+                output: 0,
+            }),
+        });
+        let xs = [0.0f32, std::f32::consts::FRAC_PI_2, std::f32::consts::PI];
+        let result = run_multi(&g, &xs);
+        assert!((result[0] - 1.0).abs() < 1e-3, "cos(0)≈1: {}", result[0]);
+        assert!(result[1].abs() < 1e-3, "cos(π/2)≈0: {}", result[1]);
+        assert!(
+            (result[2] - (-1.0)).abs() < 1e-3,
+            "cos(π)≈-1: {}",
+            result[2]
+        );
+    }
+
+    #[test]
+    fn abs_slice_negates_negatives() {
+        let mut g = Graph::new();
+        let x = g.push(NodeKind::InputX);
+        let abs = g.push(NodeKind::Abs {
+            a: Some(GraphPort { node: x, output: 0 }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort {
+                node: abs,
+                output: 0,
+            }),
+        });
+        let xs = [-5.0f32, 0.0, 3.0];
+        let result = run_multi(&g, &xs);
+        assert!((result[0] - 5.0).abs() < 1e-5, "abs(-5)=5: {}", result[0]);
+        assert!((result[1] - 0.0).abs() < 1e-5, "abs(0)=0: {}", result[1]);
+        assert!((result[2] - 3.0).abs() < 1e-5, "abs(3)=3: {}", result[2]);
+    }
+}
+
+// Mirrors generators — Flat generator block generation.
+#[cfg(test)]
+mod flat_generator_parity {
+    use voxel_core::generators::base::{VoxelGenerator, VoxelQueryData};
+    use voxel_core::generators::simple::Flat;
+    use voxel_core::math::Vector3i;
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
+
+    #[test]
+    fn flat_generator_produces_plane() {
+        let gen = Flat::default();
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+        fmt.configure_buffer(&mut buf);
+        let query = VoxelQueryData {
+            buffer: &mut buf,
+            origin_in_voxels: Vector3i::new(0, 0, 0),
+            lod: 0,
+        };
+        let _ = gen.generate_block(query);
+        // Flat generator at height=0: voxels below y=0 are solid (sdf<0),
+        // above are air (sdf>0).
+        let below = buf.get_voxel_f(4, 0, 4, ChannelId::Sdf.index());
+        let above = buf.get_voxel_f(4, 7, 4, ChannelId::Sdf.index());
+        assert!(below <= 0.0, "below plane should be solid: {below}");
+        assert!(above > 0.0, "above plane should be air: {above}");
+    }
+
+    #[test]
+    fn flat_generator_at_height_offset() {
+        let mut gen = Flat::default();
+        gen.set_height(5.0);
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+        fmt.configure_buffer(&mut buf);
+        let query = VoxelQueryData {
+            buffer: &mut buf,
+            origin_in_voxels: Vector3i::new(0, 0, 0),
+            lod: 0,
+        };
+        let _ = gen.generate_block(query);
+        // At y=4 (below height 5): sdf = 4 - 5 = -1 (solid).
+        let at_4 = buf.get_voxel_f(4, 4, 4, ChannelId::Sdf.index());
+        assert!(at_4 < 0.0, "below height should be solid: {at_4}");
+    }
+}
+
+// Mirrors test_edition_funcs.cpp — modifier Add to air field.
+#[cfg(test)]
+mod modifier_add_to_air_parity {
+    use voxel_core::math::Vector3f;
+    use voxel_core::modifiers::{ModifierStack, SdfOperation, SphereModifier};
+
+    #[test]
+    fn add_sphere_to_air_makes_solid() {
+        let positions: Vec<Vector3f> = (0..5)
+            .flat_map(|x| {
+                (0..5).flat_map(move |y| {
+                    (0..5).map(move |z| Vector3f::new(x as f32, y as f32, z as f32))
+                })
+            })
+            .collect();
+        let mut sdf = vec![10.0f32; positions.len()];
+        let mut stack = ModifierStack::new();
+        stack.add(Box::new(SphereModifier {
+            center: Vector3f::new(2.0, 2.0, 2.0),
+            radius: 2.0,
+            operation: SdfOperation::Add,
+            smoothness: 0.0,
+        }));
+        stack.apply(&mut sdf, &positions);
+        let solid_count = sdf.iter().filter(|&&v| v < 10.0).count();
+        assert!(
+            solid_count > 0,
+            "adding sphere to air should make some solid: {solid_count}"
+        );
+    }
+
+    #[test]
+    fn subtract_sphere_from_air_no_change() {
+        let positions: Vec<Vector3f> = (0..5)
+            .flat_map(|x| {
+                (0..5).flat_map(move |y| {
+                    (0..5).map(move |z| Vector3f::new(x as f32, y as f32, z as f32))
+                })
+            })
+            .collect();
+        let mut sdf = vec![10.0f32; positions.len()];
+        let original = sdf.clone();
+        let mut stack = ModifierStack::new();
+        stack.add(Box::new(SphereModifier {
+            center: Vector3f::new(2.0, 2.0, 2.0),
+            radius: 2.0,
+            operation: SdfOperation::Subtract,
+            smoothness: 0.0,
+        }));
+        stack.apply(&mut sdf, &positions);
+        // Subtracting from an all-air field should not change anything (already air).
+        assert_eq!(sdf, original, "subtract from air should be no-op");
+    }
+}
+
+// Additional buffer copy + area clip patterns.
+#[cfg(test)]
+mod buffer_area_clip_parity {
+    use voxel_core::math::Vector3i;
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
+
+    #[test]
+    fn fill_area_negative_origin_clips() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        buf.fill_area(
+            3,
+            Vector3i::new(-4, -4, -4),
+            Vector3i::new(4, 4, 4),
+            ChannelId::Type.index(),
+        );
+        // Only [0,4) portion should be filled.
+        assert_eq!(buf.get_voxel(0, 0, 0, ChannelId::Type.index()), 3);
+        assert_eq!(buf.get_voxel(5, 5, 5, ChannelId::Type.index()), 0);
+    }
+
+    #[test]
+    fn fill_area_zero_size_noop() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(4));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        buf.fill_area(
+            5,
+            Vector3i::zero(),
+            Vector3i::zero(),
+            ChannelId::Type.index(),
+        );
+        assert_eq!(
+            buf.get_voxel(0, 0, 0, ChannelId::Type.index()),
+            0,
+            "zero-size fill_area should be noop"
+        );
+    }
+
+    #[test]
+    fn copy_channel_preserves_data() {
+        let mut src = VoxelBuffer::with_size(Vector3i::splat(4));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut src);
+        src.fill(7, ChannelId::Type.index());
+        let mut dst = VoxelBuffer::with_size(Vector3i::splat(4));
+        fmt.configure_buffer(&mut dst);
+        dst.copy_channel_from_area(
+            &src,
+            Vector3i::zero(),
+            Vector3i::splat(4),
+            Vector3i::zero(),
+            ChannelId::Type.index(),
+        );
+        assert_eq!(dst.get_voxel(0, 0, 0, ChannelId::Type.index()), 7);
+        assert_eq!(dst.get_voxel(3, 3, 3, ChannelId::Type.index()), 7);
     }
 }
