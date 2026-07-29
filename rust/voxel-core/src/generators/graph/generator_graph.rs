@@ -478,11 +478,14 @@ mod tests {
         let x = g.push(NodeKind::InputX);
         let z = g.push(NodeKind::InputZ);
         let mul = g.push(NodeKind::Multiply {
-            a: Some(crate::generators::graph::GraphPort { node: x }),
-            b: Some(crate::generators::graph::GraphPort { node: z }),
+            a: Some(crate::generators::graph::GraphPort { node: x, output: 0 }),
+            b: Some(crate::generators::graph::GraphPort { node: z, output: 0 }),
         });
         g.push(NodeKind::OutputSdf {
-            a: Some(crate::generators::graph::GraphPort { node: mul }),
+            a: Some(crate::generators::graph::GraphPort {
+                node: mul,
+                output: 0,
+            }),
         });
         let gen = GraphGenerator::new(g);
         let mut buffer = VoxelBuffer::with_size(Vector3i::new(2, 4, 2));
@@ -533,7 +536,7 @@ mod tests {
         let mut g = Graph::new();
         let c = g.push(NodeKind::Constant(2.0));
         g.push(NodeKind::OutputSdf {
-            a: Some(GraphPort { node: c }),
+            a: Some(GraphPort { node: c, output: 0 }),
         });
         let gen = GraphGenerator::new(g);
         let mut buffer = VoxelBuffer::with_size(Vector3i::new(4, 4, 4));
@@ -570,7 +573,7 @@ mod tests {
         let mut g = Graph::new();
         let c = g.push(NodeKind::Constant(-2.0));
         g.push(NodeKind::OutputSdf {
-            a: Some(GraphPort { node: c }),
+            a: Some(GraphPort { node: c, output: 0 }),
         });
         let gen = GraphGenerator::new(g);
         let mut buffer = VoxelBuffer::with_size(Vector3i::new(4, 4, 4));

@@ -16,17 +16,22 @@ use std::collections::HashMap;
 /// be dense or contiguous, but must be unique within a graph.
 pub type GraphNodeId = u32;
 
-/// A typed port on a node. `node` is the upstream producer; `port` selects
-/// which of that producer's outputs to read (port 0 for single-output nodes,
-/// the only case this minimal port supports).
+/// A typed port on a node. `node` is the upstream producer; `output` selects
+/// which of that producer's outputs to read (output 0 for single-output nodes,
+/// outputs 0/1/2/3 for multi-output nodes like Normalize3D).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GraphPort {
     pub node: GraphNodeId,
+    pub output: u8,
 }
 
 impl GraphPort {
     pub fn new(node: GraphNodeId) -> Self {
-        Self { node }
+        Self { node, output: 0 }
+    }
+
+    pub fn with_output(node: GraphNodeId, output: u8) -> Self {
+        Self { node, output }
     }
 }
 
@@ -548,24 +553,37 @@ impl Graph {
                     scratch.put(id, r);
                 }
                 NodeKind::Normalize3D { x, y, z } => {
-                    let r: Vec<f32> = (0..slice_size)
-                        .map(|i| {
-                            let xv = value_at(scratch, x, i, 0.0);
-                            let yv = value_at(scratch, y, i, 0.0);
-                            let zv = value_at(scratch, z, i, 0.0);
-                            let len = (xv * xv + yv * yv + zv * zv).sqrt();
-                            if len > 0.0 {
-                                1.0 / len
-                            } else {
-                                0.0
-                            }
-                        })
-                        .collect();
-                    // Note: returning 1/len keeps the value f32-friendly for
-                    // downstream multiply nodes; the C++ node returns the
-                    // normalised vector, which the AST-walker represents as
-                    // three separate Normalize3D nodes feeding back into X/Y/Z.
-                    scratch.put(id, r);
+                    // GRAPH-2 parity: C++ produces 4 outputs (nx, ny, nz, len).
+                    // We compute all four; downstream nodes select via
+                    // GraphPort.output (0=nx, 1=ny, 2=nz, 3=len).
+                    // For backward compat, output 0 stores nx (the first
+                    // normalized component).
+                    let mut nx = Vec::with_capacity(slice_size);
+                    let mut ny = Vec::with_capacity(slice_size);
+                    let mut nz = Vec::with_capacity(slice_size);
+                    let mut len_v = Vec::with_capacity(slice_size);
+                    for i in 0..slice_size {
+                        let xv = value_at(scratch, x, i, 0.0);
+                        let yv = value_at(scratch, y, i, 0.0);
+                        let zv = value_at(scratch, z, i, 0.0);
+                        let len = (xv * xv + yv * yv + zv * zv).sqrt();
+                        if len > 0.0 {
+                            nx.push(xv / len);
+                            ny.push(yv / len);
+                            nz.push(zv / len);
+                        } else {
+                            nx.push(0.0);
+                            ny.push(0.0);
+                            nz.push(0.0);
+                        }
+                        len_v.push(len);
+                    }
+                    scratch.put(id, nx);
+                    // Store extra outputs via named convention:
+                    // node_id + (output_index << 24) as synthetic keys.
+                    scratch.put(GraphNodeId::wrapping_add(id, 1 << 24), ny);
+                    scratch.put(GraphNodeId::wrapping_add(id, 2 << 24), nz);
+                    scratch.put(GraphNodeId::wrapping_add(id, 3 << 24), len_v);
                 }
                 NodeKind::Mix { a, b, t } => {
                     let r = ternary(scratch, a, b, t, slice_size, |a, b, t| {
@@ -1318,14 +1336,17 @@ impl CompiledGraph {
     #[inline]
     fn val(&self, scratch: &CompiledScratch, port: &Option<GraphPort>, idx: usize) -> f32 {
         match port {
-            Some(p) => self
+            Some(p) if p.output == 0 => self
                 .id_to_index
                 .get(&p.node)
                 .copied()
                 .and_then(|i| scratch.buffers.get(i).and_then(|b| b.get(idx)))
                 .copied()
                 .unwrap_or(0.0),
-            None => 0.0,
+            // GRAPH-2: multi-output (Normalize3D ny/nz/len) not yet supported
+            // in the compiled path — falls back to 0.0. Full support requires
+            // extending CompiledScratch to hold extra buffers per node.
+            _ => 0.0,
         }
     }
 }
@@ -1447,7 +1468,16 @@ fn value_at(
     default_value: f32,
 ) -> f32 {
     port.as_ref()
-        .and_then(|p| scratch.get(p.node))
+        .and_then(|p| {
+            // GRAPH-2: multi-output nodes (Normalize3D) store extra outputs
+            // under synthetic keys (node_id + output_index << 24).
+            let key = if p.output == 0 {
+                p.node
+            } else {
+                GraphNodeId::wrapping_add(p.node, (p.output as u32) << 24)
+            };
+            scratch.get(key)
+        })
         .and_then(|values| values.get(index))
         .copied()
         .unwrap_or(default_value)
@@ -1469,11 +1499,14 @@ mod tests {
         let x = g.push(NodeKind::InputX);
         let c = g.push(NodeKind::Constant(3.0));
         let mul = g.push(NodeKind::Multiply {
-            a: Some(GraphPort { node: x }),
-            b: Some(GraphPort { node: c }),
+            a: Some(GraphPort { node: x, output: 0 }),
+            b: Some(GraphPort { node: c, output: 0 }),
         });
         let _out = g.push(NodeKind::OutputSdf {
-            a: Some(GraphPort { node: mul }),
+            a: Some(GraphPort {
+                node: mul,
+                output: 0,
+            }),
         });
         let lazy = g.topological_order().expect("lazy topo");
         let compiled = CompiledGraph::compile(&g).expect("compile");
@@ -1489,11 +1522,14 @@ mod tests {
         let x = g.push(NodeKind::InputX);
         let z = g.push(NodeKind::InputZ);
         let mul = g.push(NodeKind::Multiply {
-            a: Some(GraphPort { node: x }),
-            b: Some(GraphPort { node: z }),
+            a: Some(GraphPort { node: x, output: 0 }),
+            b: Some(GraphPort { node: z, output: 0 }),
         });
         let _out = g.push(NodeKind::OutputSdf {
-            a: Some(GraphPort { node: mul }),
+            a: Some(GraphPort {
+                node: mul,
+                output: 0,
+            }),
         });
         let compiled = CompiledGraph::compile(&g).expect("compile");
         // Pure-XZ graph: every node is Y-independent.
@@ -1506,11 +1542,14 @@ mod tests {
         let x = g.push(NodeKind::InputX);
         let y = g.push(NodeKind::InputY);
         let add = g.push(NodeKind::Add {
-            a: Some(GraphPort { node: x }),
-            b: Some(GraphPort { node: y }),
+            a: Some(GraphPort { node: x, output: 0 }),
+            b: Some(GraphPort { node: y, output: 0 }),
         });
         let _out = g.push(NodeKind::OutputSdf {
-            a: Some(GraphPort { node: add }),
+            a: Some(GraphPort {
+                node: add,
+                output: 0,
+            }),
         });
         let compiled = CompiledGraph::compile(&g).expect("compile");
         // InputX is outer; InputY, Add, OutputSdf are inner.
@@ -1523,11 +1562,14 @@ mod tests {
         let c = g.push(NodeKind::Constant(2.0));
         let y = g.push(NodeKind::InputY);
         let add = g.push(NodeKind::Add {
-            a: Some(GraphPort { node: c }),
-            b: Some(GraphPort { node: y }),
+            a: Some(GraphPort { node: c, output: 0 }),
+            b: Some(GraphPort { node: y, output: 0 }),
         });
         let _out = g.push(NodeKind::OutputSdf {
-            a: Some(GraphPort { node: add }),
+            a: Some(GraphPort {
+                node: add,
+                output: 0,
+            }),
         });
         let compiled = CompiledGraph::compile(&g).expect("compile");
         // Constant is XZ-only; Add depends on InputY → inner.
@@ -1558,8 +1600,8 @@ mod tests {
         g.add_node(GraphNode {
             id: 2,
             kind: NodeKind::Add {
-                a: Some(GraphPort { node: a }),
-                b: Some(GraphPort { node: 2 }),
+                a: Some(GraphPort { node: a, output: 0 }),
+                b: Some(GraphPort { node: 2, output: 0 }),
             },
         });
         assert!(CompiledGraph::compile(&g).is_err());
@@ -1598,11 +1640,14 @@ mod tests {
         let x = g.push(NodeKind::InputX);
         let c = g.push(NodeKind::Constant(3.0));
         let mul = g.push(NodeKind::Multiply {
-            a: Some(GraphPort { node: x }),
-            b: Some(GraphPort { node: c }),
+            a: Some(GraphPort { node: x, output: 0 }),
+            b: Some(GraphPort { node: c, output: 0 }),
         });
         g.push(NodeKind::OutputSdf {
-            a: Some(GraphPort { node: mul }),
+            a: Some(GraphPort {
+                node: mul,
+                output: 0,
+            }),
         });
         let xs = x_inputs(4);
         let inputs = GraphInputs {
@@ -1620,10 +1665,13 @@ mod tests {
         let mut g = Graph::new();
         let x = g.push(NodeKind::InputX);
         let sin = g.push(NodeKind::Sin {
-            a: Some(GraphPort { node: x }),
+            a: Some(GraphPort { node: x, output: 0 }),
         });
         g.push(NodeKind::OutputSdf {
-            a: Some(GraphPort { node: sin }),
+            a: Some(GraphPort {
+                node: sin,
+                output: 0,
+            }),
         });
         let xs = x_inputs(3);
         let inputs = GraphInputs {
@@ -1643,13 +1691,16 @@ mod tests {
         let z = g.push(NodeKind::InputZ);
         let r = g.push(NodeKind::Constant(2.0));
         let sph = g.push(NodeKind::SdfSphere {
-            x: Some(GraphPort { node: x }),
-            y: Some(GraphPort { node: y }),
-            z: Some(GraphPort { node: z }),
-            radius: Some(GraphPort { node: r }),
+            x: Some(GraphPort { node: x, output: 0 }),
+            y: Some(GraphPort { node: y, output: 0 }),
+            z: Some(GraphPort { node: z, output: 0 }),
+            radius: Some(GraphPort { node: r, output: 0 }),
         });
         g.push(NodeKind::OutputSdf {
-            a: Some(GraphPort { node: sph }),
+            a: Some(GraphPort {
+                node: sph,
+                output: 0,
+            }),
         });
         let xs = [1.0f32, 0.0, 0.0];
         let zs = [0.0f32, 0.0, 0.0];
@@ -1668,11 +1719,14 @@ mod tests {
         let a = g.push(NodeKind::Constant(4.0));
         let b = g.push(NodeKind::Constant(0.0));
         let div = g.push(NodeKind::Divide {
-            a: Some(GraphPort { node: a }),
-            b: Some(GraphPort { node: b }),
+            a: Some(GraphPort { node: a, output: 0 }),
+            b: Some(GraphPort { node: b, output: 0 }),
         });
         g.push(NodeKind::OutputSdf {
-            a: Some(GraphPort { node: div }),
+            a: Some(GraphPort {
+                node: div,
+                output: 0,
+            }),
         });
         let xs = x_inputs(2);
         let inputs = GraphInputs {
@@ -1689,10 +1743,13 @@ mod tests {
         let mut g = Graph::new();
         let a = g.push(NodeKind::Constant(-4.0));
         let sq = g.push(NodeKind::Sqrt {
-            a: Some(GraphPort { node: a }),
+            a: Some(GraphPort { node: a, output: 0 }),
         });
         g.push(NodeKind::OutputSdf {
-            a: Some(GraphPort { node: sq }),
+            a: Some(GraphPort {
+                node: sq,
+                output: 0,
+            }),
         });
         let xs = x_inputs(2);
         let inputs = GraphInputs {
@@ -1710,11 +1767,14 @@ mod tests {
         let x = g.push(NodeKind::InputX);
         let z = g.push(NodeKind::InputZ);
         let mul = g.push(NodeKind::Multiply {
-            a: Some(GraphPort { node: x }),
-            b: Some(GraphPort { node: z }),
+            a: Some(GraphPort { node: x, output: 0 }),
+            b: Some(GraphPort { node: z, output: 0 }),
         });
         g.push(NodeKind::OutputSdf {
-            a: Some(GraphPort { node: mul }),
+            a: Some(GraphPort {
+                node: mul,
+                output: 0,
+            }),
         });
         let compiled = CompiledGraph::compile(&g).expect("compile");
         assert_eq!(compiled.xz_prefix_len(), 4, "pure-XZ graph");
@@ -1746,7 +1806,7 @@ mod tests {
         let mut g = Graph::new();
         let x = g.push(NodeKind::InputX);
         g.push(NodeKind::OutputSdf {
-            a: Some(GraphPort { node: x }),
+            a: Some(GraphPort { node: x, output: 0 }),
         });
         let compiled = CompiledGraph::compile(&g).expect("compile");
         let xs = x_inputs(8);
@@ -1774,7 +1834,7 @@ mod tests {
         let mut g = Graph::new();
         let c = g.push(NodeKind::Constant(2.0));
         g.push(NodeKind::OutputSdf {
-            a: Some(GraphPort { node: c }),
+            a: Some(GraphPort { node: c, output: 0 }),
         });
         let compiled = CompiledGraph::compile(&g).expect("compile");
         let r = compiled.analyze_range(
@@ -1794,11 +1854,14 @@ mod tests {
         let y = g.push(NodeKind::InputY);
         let h = g.push(NodeKind::Constant(5.0));
         let plane = g.push(NodeKind::SdfPlane {
-            y: Some(GraphPort { node: y }),
-            height: Some(GraphPort { node: h }),
+            y: Some(GraphPort { node: y, output: 0 }),
+            height: Some(GraphPort { node: h, output: 0 }),
         });
         g.push(NodeKind::OutputSdf {
-            a: Some(GraphPort { node: plane }),
+            a: Some(GraphPort {
+                node: plane,
+                output: 0,
+            }),
         });
         let compiled = CompiledGraph::compile(&g).expect("compile");
         let r = compiled.analyze_range(
@@ -1819,11 +1882,14 @@ mod tests {
         let y = g.push(NodeKind::InputY);
         let h = g.push(NodeKind::Constant(5.0));
         let plane = g.push(NodeKind::SdfPlane {
-            y: Some(GraphPort { node: y }),
-            height: Some(GraphPort { node: h }),
+            y: Some(GraphPort { node: y, output: 0 }),
+            height: Some(GraphPort { node: h, output: 0 }),
         });
         g.push(NodeKind::OutputSdf {
-            a: Some(GraphPort { node: plane }),
+            a: Some(GraphPort {
+                node: plane,
+                output: 0,
+            }),
         });
         let compiled = CompiledGraph::compile(&g).expect("compile");
         let r = compiled.analyze_range(
@@ -1844,12 +1910,15 @@ mod tests {
         let x = g.push(NodeKind::InputX);
         let y = g.push(NodeKind::InputY);
         let _noise = g.push(NodeKind::Noise2D {
-            x: Some(GraphPort { node: x }),
-            y: Some(GraphPort { node: y }),
+            x: Some(GraphPort { node: x, output: 0 }),
+            y: Some(GraphPort { node: y, output: 0 }),
             noise: crate::generators::simple::NoiseConfig::default(),
         });
         g.push(NodeKind::OutputSdf {
-            a: Some(GraphPort { node: _noise }),
+            a: Some(GraphPort {
+                node: _noise,
+                output: 0,
+            }),
         });
         let compiled = CompiledGraph::compile(&g).expect("compile");
         let r = compiled.analyze_range(
@@ -1871,11 +1940,14 @@ mod tests {
         let a = g.push(NodeKind::Constant(3.0));
         let b = g.push(NodeKind::Constant(4.0));
         let add = g.push(NodeKind::Add {
-            a: Some(GraphPort { node: a }),
-            b: Some(GraphPort { node: b }),
+            a: Some(GraphPort { node: a, output: 0 }),
+            b: Some(GraphPort { node: b, output: 0 }),
         });
         g.push(NodeKind::OutputSdf {
-            a: Some(GraphPort { node: add }),
+            a: Some(GraphPort {
+                node: add,
+                output: 0,
+            }),
         });
         let compiled = CompiledGraph::compile(&g).expect("compile");
         let r = compiled.analyze_range(
