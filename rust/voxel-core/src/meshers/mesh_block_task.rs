@@ -387,6 +387,7 @@ fn gather_voxels_cpu_shared_snapshot(
         .map(|ci| ci as usize)
         .collect();
     let mut missing_regions = Vec::new();
+    let mut resident_offsets = Vec::new();
 
     let origin_in_voxels_without_padding = mesh_block_pos * mesh_block_size;
     let origin_in_voxels = origin_in_voxels_without_padding - Vector3i::splat(min_padding);
@@ -396,6 +397,7 @@ fn gather_voxels_cpu_shared_snapshot(
                                dst_offset: Vector3i,
                                src: Option<&VoxelBuffer>| {
         if let Some(src) = src {
+            resident_offsets.push(dst_offset);
             for &channel_index in &channels {
                 dst.copy_channel_from_area(
                     src,
@@ -444,6 +446,44 @@ fn gather_voxels_cpu_shared_snapshot(
                 }
             }
         }
+    }
+
+    // GATHER-1 parity: clip missing regions to the actual missing area
+    // (mesh_data_box minus resident blocks). C++ subtracts resident blocks
+    // and clips to bounds, generating only the true remainder (~38.5× fewer
+    // samples for a block with all 26 neighbours missing).
+    if !missing_regions.is_empty() && !resident_offsets.is_empty() {
+        let padded_box = Box3i::new(
+            Vector3i::splat(min_padding),
+            Vector3i::splat(mesh_block_size + max_padding),
+        );
+        let block_vec = Vector3i::splat(data_block_size);
+        let mut boxes_to_generate: Vec<Box3i> = vec![padded_box];
+        for &offset in &resident_offsets {
+            let resident_box = Box3i::new(offset, block_vec).clipped(padded_box);
+            if resident_box.is_empty() {
+                continue;
+            }
+            let mut next = Vec::new();
+            for b in &boxes_to_generate {
+                next.extend(b.difference(resident_box));
+            }
+            boxes_to_generate = next;
+        }
+        // Convert clipped boxes back to MissingVoxelRegion entries.
+        let lod_stride = 1i32 << lod_index;
+        missing_regions = boxes_to_generate
+            .into_iter()
+            .filter(|b| !b.is_empty())
+            .map(|b| {
+                let world_origin = origin_in_voxels_without_padding * lod_stride
+                    + (b.position - Vector3i::splat(min_padding)) * lod_stride;
+                MissingVoxelRegion {
+                    dst_offset: b.position,
+                    origin_in_voxels: world_origin,
+                }
+            })
+            .collect();
     }
 
     GatherVoxelPlan {
