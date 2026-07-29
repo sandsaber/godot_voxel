@@ -9,5 +9,7 @@
 //! `do_shape_single_buffer` for editing a single `VoxelBuffer`.
 
 pub mod ops;
+pub mod raycast;
 
 pub use ops::{do_box, do_sphere, EditMode, SdfBlendMode, VoxelToolBuffer};
+pub use raycast::{voxel_raycast, VoxelRaycastHit, VoxelRaycastState};
