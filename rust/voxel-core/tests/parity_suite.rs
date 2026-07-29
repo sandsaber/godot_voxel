@@ -157,7 +157,9 @@ mod mesher_parity {
 
     fn make_solid_blocky(size: i32) -> VoxelBuffer {
         let mut buf = VoxelBuffer::with_size(Vector3i::splat(size));
-        VoxelFormat::new().configure_buffer(&mut buf);
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = voxel_core::storage::ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
         for z in 1..size - 1 {
             for y in 1..size - 1 {
                 for x in 1..size - 1 {
@@ -554,7 +556,9 @@ mod edition_parity {
     #[test]
     fn do_box_set_writes_correct_values() {
         let mut buf = VoxelBuffer::with_size(Vector3i::splat(8));
-        VoxelFormat::new().configure_buffer(&mut buf);
+        let mut fmt3 = VoxelFormat::new();
+        fmt3.depths[ChannelId::Type.index()] = voxel_core::storage::ChannelDepth::Bit8;
+        fmt3.configure_buffer(&mut buf);
         do_box(
             &mut buf,
             ChannelId::Type.index(),
