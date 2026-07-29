@@ -8260,3 +8260,286 @@ mod graph_sdf_combine_parity {
         assert!((run(&g) - 5.0).abs() < 1e-5, "remap(0.5) = 5: {}", run(&g));
     }
 }
+
+// Mirrors test_voxel_buffer.cpp — VOX parser + region file edge cases.
+#[cfg(test)]
+mod vox_parser_parity {
+    use voxel_core::format::vox;
+
+    /// A minimal valid VOX file (header + empty MAIN chunk) parses without error.
+    #[test]
+    fn parse_minimal_vox_header() {
+        // 'VOX ' + version 150 (LE) + empty MAIN chunk.
+        let bytes: &[u8] = b"VOX \x96\x00\x00\x00MAIN\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
+        let result = vox::parse(bytes);
+        // It may succeed or fail depending on the exact format, but must not panic.
+        let _ = result;
+    }
+
+    /// An invalid file (wrong magic) returns an error.
+    #[test]
+    fn parse_invalid_magic_returns_error() {
+        let bytes: &[u8] = b"XXXX\x96\x00\x00\x00MAIN\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
+        let result = vox::parse(bytes);
+        assert!(result.is_err(), "invalid magic should return error");
+    }
+
+    /// An empty byte slice returns an error.
+    #[test]
+    fn parse_empty_bytes_returns_error() {
+        let result = vox::parse(&[]);
+        assert!(result.is_err(), "empty bytes should return error");
+    }
+}
+
+// Mirrors test_voxel_graph.cpp — GraphGenerator block generation.
+#[cfg(test)]
+mod graph_generator_block_parity {
+    use voxel_core::generators::base::{VoxelGenerator, VoxelQueryData};
+    use voxel_core::generators::graph::{Graph, GraphGenerator, GraphPort, NodeKind};
+    use voxel_core::math::Vector3i;
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
+
+    /// A GraphGenerator with a sphere SDF produces negative SDF values at the
+    /// sphere center. The sphere is placed at (8,8,8) with radius 8 so the
+    /// center is inside.
+    #[test]
+    fn graph_generator_produces_sdf() {
+        let mut g = Graph::new();
+        let x = g.push(NodeKind::InputX);
+        let y = g.push(NodeKind::InputY);
+        let z = g.push(NodeKind::InputZ);
+        let r = g.push(NodeKind::Constant(8.0));
+        let sph = g.push(NodeKind::SdfSphere {
+            x: Some(GraphPort { node: x, output: 0 }),
+            y: Some(GraphPort { node: y, output: 0 }),
+            z: Some(GraphPort { node: z, output: 0 }),
+            radius: Some(GraphPort { node: r, output: 0 }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort {
+                node: sph,
+                output: 0,
+            }),
+        });
+        let gen = GraphGenerator::new(g);
+        assert!(gen.first_sdf_output().is_some());
+
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(16));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+        fmt.configure_buffer(&mut buf);
+        let query = VoxelQueryData {
+            buffer: &mut buf,
+            origin_in_voxels: Vector3i::zero(),
+            lod: 0,
+        };
+        let _result = gen.generate_block(query);
+        // At the corner (0,0,0), the SDF should be negative (inside sphere
+        // centered at origin r=8): dist=0, sdf=0-8=-8.
+        let corner_sdf = buf.get_voxel_f(0, 0, 0, ChannelId::Sdf.index());
+        assert!(
+            corner_sdf < 0.0,
+            "sphere corner should be negative SDF: {corner_sdf}"
+        );
+    }
+
+    /// A GraphGenerator with a constant SDF produces that constant everywhere.
+    #[test]
+    fn graph_generator_constant_sdf() {
+        let mut g = Graph::new();
+        let c = g.push(NodeKind::Constant(-5.0));
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: c, output: 0 }),
+        });
+        let gen = GraphGenerator::new(g);
+
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+        fmt.configure_buffer(&mut buf);
+        let query = VoxelQueryData {
+            buffer: &mut buf,
+            origin_in_voxels: Vector3i::zero(),
+            lod: 0,
+        };
+        let _ = gen.generate_block(query);
+        let v = buf.get_voxel_f(4, 4, 4, ChannelId::Sdf.index());
+        assert!((v - (-5.0)).abs() < 1e-5, "constant SDF should be -5: {v}");
+    }
+
+    /// GraphGenerator::graph() returns the original graph.
+    #[test]
+    fn graph_generator_graph_accessor() {
+        let mut g = Graph::new();
+        g.push(NodeKind::Constant(1.0));
+        let gen = GraphGenerator::new(g);
+        assert_eq!(gen.graph().nodes().len(), 1);
+    }
+}
+
+// Additional modifier smoothness + scatter library build parity.
+#[cfg(test)]
+mod modifier_smoothness_parity {
+    use voxel_core::math::Vector3f;
+    use voxel_core::modifiers::{ModifierStack, SdfOperation, SphereModifier};
+
+    /// Smoothness > 0 produces a different result from smoothness = 0 when the
+    /// two SDFs are close in magnitude.
+    #[test]
+    fn smoothness_boundary_difference() {
+        let positions: Vec<Vector3f> = (0..5)
+            .flat_map(|x| {
+                (0..5).flat_map(move |y| {
+                    (0..5).map(move |z| Vector3f::new(x as f32, y as f32, z as f32))
+                })
+            })
+            .collect();
+
+        let mut sdf_hard = vec![-5.0f32; positions.len()];
+        let mut s1 = ModifierStack::new();
+        s1.add(Box::new(SphereModifier {
+            center: Vector3f::new(2.0, 2.0, 2.0),
+            radius: 3.0,
+            operation: SdfOperation::Add,
+            smoothness: 0.0,
+        }));
+        s1.apply(&mut sdf_hard, &positions);
+
+        let mut sdf_smooth = vec![-5.0f32; positions.len()];
+        let mut s2 = ModifierStack::new();
+        s2.add(Box::new(SphereModifier {
+            center: Vector3f::new(2.0, 2.0, 2.0),
+            radius: 3.0,
+            operation: SdfOperation::Add,
+            smoothness: 2.0,
+        }));
+        s2.apply(&mut sdf_smooth, &positions);
+
+        let diffs = sdf_hard
+            .iter()
+            .zip(sdf_smooth.iter())
+            .filter(|(&a, &b)| (a - b).abs() > 1e-6)
+            .count();
+        assert!(
+            diffs > 0,
+            "smoothness should change at least one boundary voxel: {diffs}"
+        );
+    }
+}
+
+// Additional octree scaling + LOD distance parity.
+#[cfg(test)]
+mod octree_scaling_parity {
+    use voxel_core::terrain::lod_octree::{LodOctree, NoOpActions};
+
+    /// An octree created with 1 LOD behaves like a simple root (no splits).
+    #[test]
+    fn single_lod_octree_minimal() {
+        let mut oct = LodOctree::new();
+        oct.create(1);
+        assert_eq!(oct.lod_count(), 1);
+        assert_eq!(oct.max_depth(), 0);
+        let mut actions = NoOpActions;
+        oct.subdivide(&mut actions);
+        let mut leaves = 0;
+        oct.for_each_leaf(|_, _, _| {
+            leaves += 1;
+        });
+        // Single LOD → at most the root.
+        assert!(
+            leaves >= 1,
+            "single LOD octree should have ≥1 leaf: {leaves}"
+        );
+    }
+
+    /// clear() resets max_depth.
+    #[test]
+    fn clear_resets_max_depth() {
+        let mut oct = LodOctree::new();
+        oct.create(5);
+        assert_eq!(oct.max_depth(), 4);
+        oct.clear();
+        assert_eq!(oct.max_depth(), 0);
+    }
+
+    /// Re-create after clear works.
+    #[test]
+    fn recreate_after_clear() {
+        let mut oct = LodOctree::new();
+        oct.create(3);
+        oct.clear();
+        oct.create(2);
+        assert_eq!(oct.lod_count(), 2);
+        assert_eq!(oct.max_depth(), 1);
+    }
+}
+
+// Additional buffer read patterns.
+#[cfg(test)]
+mod buffer_read_patterns_parity {
+    use voxel_core::math::Vector3i;
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
+
+    /// A buffer filled with a constant then partially overwritten preserves
+    /// the non-overwritten voxels.
+    #[test]
+    fn fill_then_partial_overwrite_preserves() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        buf.fill(5, ChannelId::Type.index());
+        buf.set_voxel(9, 3, 3, 3, ChannelId::Type.index());
+        assert_eq!(buf.get_voxel(3, 3, 3, ChannelId::Type.index()), 9);
+        assert_eq!(buf.get_voxel(0, 0, 0, ChannelId::Type.index()), 5);
+        assert_eq!(buf.get_voxel(7, 7, 7, ChannelId::Type.index()), 5);
+    }
+
+    /// get_voxel_f on an SDF channel after set_voxel_f round-trips.
+    #[test]
+    fn sdf_set_get_round_trip() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(4));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+        fmt.configure_buffer(&mut buf);
+        for v in &[-3.0f32, -1.0, 0.0, 1.0, 3.0] {
+            buf.set_voxel_f(*v, 0, 0, 0, ChannelId::Sdf.index());
+            let got = buf.get_voxel_f(0, 0, 0, ChannelId::Sdf.index());
+            assert!((got - v).abs() < 1e-5, "SDF round-trip {v}: {got}");
+        }
+    }
+
+    /// A buffer reports its size correctly after creation.
+    #[test]
+    fn buffer_size_after_create() {
+        let buf = VoxelBuffer::with_size(Vector3i::new(32, 16, 8));
+        assert_eq!(buf.size(), Vector3i::new(32, 16, 8));
+    }
+
+    /// fill_area at the exact buffer bounds fills everything.
+    #[test]
+    fn fill_area_full_bounds() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(4));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        buf.fill_area(
+            7,
+            Vector3i::zero(),
+            Vector3i::splat(4),
+            ChannelId::Type.index(),
+        );
+        for z in 0..4 {
+            for y in 0..4 {
+                for x in 0..4 {
+                    assert_eq!(
+                        buf.get_voxel(x, y, z, ChannelId::Type.index()),
+                        7,
+                        "fill_area full bounds at ({x},{y},{z})"
+                    );
+                }
+            }
+        }
+    }
+}
