@@ -87,6 +87,12 @@ impl<'a> VoxelToolBuffer<'a> {
         self.buffer
             .set_voxel(value, pos.x, pos.y, pos.z, self.channel);
     }
+
+    /// Read-only access to the underlying buffer. Used by the Godot binding
+    /// to inspect edit results (e.g. count solid voxels after a carve).
+    pub fn buffer(&self) -> &VoxelBuffer {
+        self.buffer
+    }
 }
 
 /// Apply a sphere edit to a VoxelBuffer's channel.

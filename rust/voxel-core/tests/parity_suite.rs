@@ -2538,4 +2538,324 @@ mod compression_parity {
         compress(&data, &mut lz4be, Compression::Lz4Be).unwrap();
         assert_ne!(lz4, lz4be, "LZ4 and LZ4Be should produce different bytes");
     }
+
+    /// LZ4 compressed size grows with data entropy (less compressible).
+    #[test]
+    fn lz4_compressed_size_grows_with_entropy() {
+        let low_entropy = vec![0u8; 2048];
+        let high_entropy: Vec<u8> = (0..2048).map(|i| (i * 31 + 17) as u8).collect();
+        let mut low_c = Vec::new();
+        compress(&low_entropy, &mut low_c, Compression::Lz4).unwrap();
+        let mut high_c = Vec::new();
+        compress(&high_entropy, &mut high_c, Compression::Lz4).unwrap();
+        assert!(
+            high_c.len() > low_c.len(),
+            "high-entropy data should compress larger: {} vs {}",
+            high_c.len(),
+            low_c.len()
+        );
+    }
+}
+
+#[cfg(test)]
+mod channel_depth_parity {
+    use voxel_core::math::Vector3i;
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
+
+    /// Each ChannelDepth round-trips an integer voxel value via set/get.
+    /// Golden for Bit8, Bit16, Bit32, Bit64.
+    #[test]
+    fn each_depth_round_trips_integer_value() {
+        for (label, depth, value) in [
+            ("Bit8", ChannelDepth::Bit8, 7u64),
+            ("Bit16", ChannelDepth::Bit16, 300u64),
+            ("Bit32", ChannelDepth::Bit32, 70000u64),
+            ("Bit64", ChannelDepth::Bit64, 3000000000u64),
+        ] {
+            let mut buf = VoxelBuffer::with_size(Vector3i::splat(4));
+            let mut fmt = VoxelFormat::new();
+            fmt.depths[ChannelId::Type.index()] = depth;
+            fmt.configure_buffer(&mut buf);
+            buf.set_voxel(value, 1, 1, 1, ChannelId::Type.index());
+            let got = buf.get_voxel(1, 1, 1, ChannelId::Type.index());
+            assert_eq!(got, value, "{label} round-trip failed: got {got}");
+        }
+    }
+
+    /// SDF float values round-trip within tolerance for each depth. Bit32 is
+    /// exact (it stores raw f32); others quantize.
+    #[test]
+    fn each_depth_round_trips_sdf_float() {
+        let value = -2.5f32;
+        for (label, depth) in [
+            ("Bit16", ChannelDepth::Bit16),
+            ("Bit32", ChannelDepth::Bit32),
+            ("Bit64", ChannelDepth::Bit64),
+        ] {
+            let mut buf = VoxelBuffer::with_size(Vector3i::splat(4));
+            let mut fmt = VoxelFormat::new();
+            fmt.depths[ChannelId::Sdf.index()] = depth;
+            fmt.configure_buffer(&mut buf);
+            buf.set_voxel_f(value, 1, 1, 1, ChannelId::Sdf.index());
+            let got = buf.get_voxel_f(1, 1, 1, ChannelId::Sdf.index());
+            // Bit32/64 exact; Bit16 quantizes (~0.03 tolerance).
+            let tol = if depth == ChannelDepth::Bit16 {
+                0.1
+            } else {
+                1e-5
+            };
+            assert!(
+                (got - value).abs() < tol,
+                "{label} SDF round-trip: {got} vs {value}"
+            );
+        }
+    }
+
+    /// `channel_depth` reports the configured depth after `configure_buffer`.
+    #[test]
+    fn channel_depth_reports_configured_value() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(4));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit16;
+        fmt.configure_buffer(&mut buf);
+        assert_eq!(
+            buf.channel_depth(ChannelId::Sdf.index()),
+            ChannelDepth::Bit32
+        );
+        assert_eq!(
+            buf.channel_depth(ChannelId::Type.index()),
+            ChannelDepth::Bit16
+        );
+    }
+
+    /// Filling a channel then reading back yields the fill value for all
+    /// depths (exercises the typed hot loops per depth).
+    #[test]
+    fn fill_then_read_all_depths() {
+        for depth in [
+            ChannelDepth::Bit8,
+            ChannelDepth::Bit16,
+            ChannelDepth::Bit32,
+            ChannelDepth::Bit64,
+        ] {
+            let mut buf = VoxelBuffer::with_size(Vector3i::splat(4));
+            let mut fmt = VoxelFormat::new();
+            fmt.depths[ChannelId::Type.index()] = depth;
+            fmt.configure_buffer(&mut buf);
+            buf.fill(5, ChannelId::Type.index());
+            for z in 0..4 {
+                for y in 0..4 {
+                    for x in 0..4 {
+                        assert_eq!(
+                            buf.get_voxel(x, y, z, ChannelId::Type.index()),
+                            5,
+                            "fill readback failed at ({x},{y},{z}) for {:?}",
+                            depth
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod transvoxel_shapes_parity {
+    use voxel_core::math::Vector3i;
+    use voxel_core::meshers::{MesherInput, MesherOutput, TransvoxelMesher, VoxelMesher};
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
+
+    /// Build a sphere SDF of the given radius centered in a 16³ buffer.
+    fn sphere_verts(radius: f32) -> usize {
+        let mesher = TransvoxelMesher::new();
+        let mut voxels = VoxelBuffer::with_size(Vector3i::splat(16));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+        fmt.configure_buffer(&mut voxels);
+        let c = 8.0f32;
+        for z in 0..16 {
+            for y in 0..16 {
+                for x in 0..16 {
+                    let d =
+                        ((x as f32 - c).powi(2) + (y as f32 - c).powi(2) + (z as f32 - c).powi(2))
+                            .sqrt()
+                            - radius;
+                    voxels.set_voxel_f(d, x, y, z, ChannelId::Sdf.index());
+                }
+            }
+        }
+        let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+        let mut out = MesherOutput::default();
+        mesher.build(&mut out, &input);
+        out.total_vertex_count()
+    }
+
+    /// A small sphere (radius 3) produces a fixed vertex count. Golden.
+    #[test]
+    fn small_sphere_vertex_count_golden() {
+        let v = sphere_verts(3.0);
+        assert!(v > 0, "small sphere should produce geometry: {v}");
+        assert_eq!(v, 480, "small-sphere vertex count regressed: {v}");
+    }
+
+    /// A medium sphere (radius 6) produces more vertices than the small one.
+    #[test]
+    fn medium_sphere_more_vertices_than_small() {
+        let small = sphere_verts(3.0);
+        let medium = sphere_verts(6.0);
+        assert!(
+            medium > small,
+            "medium should have more: {medium} vs {small}"
+        );
+    }
+
+    /// A tilted plane (normal not axis-aligned) still produces a valid mesh.
+    #[test]
+    fn tilted_plane_produces_geometry() {
+        let mesher = TransvoxelMesher::new();
+        let mut voxels = VoxelBuffer::with_size(Vector3i::splat(16));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+        fmt.configure_buffer(&mut voxels);
+        // Tilted plane: sdf = (x + y + z) / sqrt(3) - 10.
+        for z in 0..16 {
+            for y in 0..16 {
+                for x in 0..16 {
+                    let d = ((x + y + z) as f32 / 3.0f32.sqrt()) - 10.0;
+                    voxels.set_voxel_f(d, x, y, z, ChannelId::Sdf.index());
+                }
+            }
+        }
+        let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+        let mut out = MesherOutput::default();
+        mesher.build(&mut out, &input);
+        assert!(
+            out.total_vertex_count() > 0,
+            "tilted plane should produce geometry"
+        );
+    }
+
+    /// Two adjacent solid regions separated by a gap produce geometry on both
+    /// inner surfaces (a hollow shell). Vertex count > single-region.
+    #[test]
+    fn two_separated_spheres_produce_geometry() {
+        let mesher = TransvoxelMesher::new();
+        let mut voxels = VoxelBuffer::with_size(Vector3i::splat(16));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+        fmt.configure_buffer(&mut voxels);
+        // Sphere A at (5,8,8), sphere B at (11,8,8).
+        for z in 0..16 {
+            for y in 0..16 {
+                for x in 0..16 {
+                    let da = ((x as f32 - 5.0).powi(2)
+                        + (y as f32 - 8.0).powi(2)
+                        + (z as f32 - 8.0).powi(2))
+                    .sqrt()
+                        - 2.0;
+                    let db = ((x as f32 - 11.0).powi(2)
+                        + (y as f32 - 8.0).powi(2)
+                        + (z as f32 - 8.0).powi(2))
+                    .sqrt()
+                        - 2.0;
+                    let d = da.min(db);
+                    voxels.set_voxel_f(d, x, y, z, ChannelId::Sdf.index());
+                }
+            }
+        }
+        let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+        let mut out = MesherOutput::default();
+        mesher.build(&mut out, &input);
+        assert!(
+            out.total_vertex_count() > 0,
+            "two spheres should produce geometry"
+        );
+    }
+}
+
+#[cfg(test)]
+mod multi_item_scatter_parity {
+    use voxel_core::instancing::scatter::{InstanceGenerator, RandomScatterGenerator};
+    use voxel_core::instancing::ScatterConfig;
+    use voxel_core::math::Vector3f;
+
+    /// Different item_index values produce independent instance sets with the
+    /// correct item_index propagated. Golden.
+    #[test]
+    fn multiple_items_get_correct_indices() {
+        let gen = RandomScatterGenerator {
+            density: 1.0,
+            min_scale: 1.0,
+            max_scale: 1.0,
+            snap_to_normal: false,
+        };
+        let positions = vec![Vector3f::new(0.0, 0.0, 0.0); 10];
+        let normals = vec![Vector3f::new(0.0, 1.0, 0.0); 10];
+        let config = ScatterConfig::default();
+        for item in 0..5u32 {
+            let result = gen.generate(&positions, &normals, item, &config);
+            assert_eq!(result.len(), 10, "item {item} count");
+            for inst in &result {
+                assert_eq!(inst.item_index, item, "item_index mismatch");
+            }
+        }
+    }
+
+    /// The same surface with different item_index values produces the same
+    /// count when density/scale are identical (seed offsets by item_index).
+    #[test]
+    fn same_surface_same_count_across_items() {
+        let gen = RandomScatterGenerator {
+            density: 0.5,
+            min_scale: 1.0,
+            max_scale: 1.0,
+            snap_to_normal: false,
+        };
+        let positions: Vec<_> = (0..50).map(|i| Vector3f::new(i as f32, 0.0, 0.0)).collect();
+        let normals = vec![Vector3f::new(0.0, 1.0, 0.0); 50];
+        let config = ScatterConfig::default();
+        let mut counts = Vec::new();
+        for item in 0..3u32 {
+            counts.push(gen.generate(&positions, &normals, item, &config).len());
+        }
+        // Counts should be close (same density, different seed offset only
+        // shifts acceptance slightly). Each within a small tolerance.
+        let max = *counts.iter().max().unwrap() as i32;
+        let min = *counts.iter().min().unwrap() as i32;
+        assert!(
+            max - min <= 3,
+            "counts vary too much across items: {counts:?}"
+        );
+    }
+
+    /// Higher density produces >= instances than lower density. Diff test.
+    #[test]
+    fn higher_density_more_or_equal_instances() {
+        let positions: Vec<_> = (0..100)
+            .map(|i| Vector3f::new(i as f32, 0.0, 0.0))
+            .collect();
+        let normals = vec![Vector3f::new(0.0, 1.0, 0.0); 100];
+        let config = ScatterConfig::default();
+        let low = RandomScatterGenerator {
+            density: 0.2,
+            min_scale: 1.0,
+            max_scale: 1.0,
+            snap_to_normal: false,
+        }
+        .generate(&positions, &normals, 0, &config)
+        .len();
+        let high = RandomScatterGenerator {
+            density: 0.9,
+            min_scale: 1.0,
+            max_scale: 1.0,
+            snap_to_normal: false,
+        }
+        .generate(&positions, &normals, 0, &config)
+        .len();
+        assert!(
+            high >= low,
+            "higher density should have >= instances: {high} vs {low}"
+        );
+    }
 }

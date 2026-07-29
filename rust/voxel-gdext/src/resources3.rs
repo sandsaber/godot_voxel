@@ -107,6 +107,10 @@ impl FastNoise2GD {
     }
 }
 
+/// Spot noise resource — generates discrete spot points. `count_spots` runs a
+/// deterministic acceptance test over a 2D grid using the resource's
+/// density/radius, returning the number of spots that pass (functional delegate
+/// to a noise-based threshold check).
 #[derive(GodotClass)]
 #[class(base = Resource, tool)]
 pub struct SpotNoiseGD {
@@ -115,6 +119,9 @@ pub struct SpotNoiseGD {
     density: f32,
     #[var]
     radius: f32,
+    /// Deterministic seed.
+    #[var]
+    seed: i32,
 }
 #[godot_api]
 impl IResource for SpotNoiseGD {
@@ -123,30 +130,87 @@ impl IResource for SpotNoiseGD {
             base,
             density: 0.5,
             radius: 2.0,
+            seed: 0,
         }
     }
 }
 
+#[godot_api]
+impl SpotNoiseGD {
+    /// Count the spots that would be placed over a `grid_size`×`grid_size`
+    /// area. Each cell is accepted if its 3D noise sample (scaled by `radius`)
+    /// is below the density threshold. Deterministic for a fixed seed.
+    #[func]
+    fn count_spots(&self, grid_size: i32) -> i32 {
+        let mut gen = voxel_core::generators::simple::Noise::default();
+        let noise = gen.noise_mut();
+        noise.set_seed(Some(self.seed));
+        noise.set_frequency(Some(1.0 / self.radius.max(0.0001)));
+        let mut count = 0i32;
+        let scale = self.radius;
+        for y in 0..grid_size {
+            for x in 0..grid_size {
+                let v = gen.sample_noise_3d(x as f32 * scale, 0.0, y as f32 * scale);
+                // Normalize noise [-1,1] → [0,1], accept if below density.
+                let n = (v + 1.0) * 0.5;
+                if n < self.density.clamp(0.0, 1.0) {
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+}
+
+/// A 2D noise pattern resource. `sample_2d` returns the raw noise value at a
+/// `(x, z)` point scaled by the resource's `scale`, delegating to the
+/// voxel-core noise sampler.
 #[derive(GodotClass)]
 #[class(base = Resource, tool)]
 pub struct NoisePattern2DGD {
     base: Base<Resource>,
     #[var]
     scale: f32,
+    /// Deterministic seed.
+    #[var]
+    seed: i32,
 }
 #[godot_api]
 impl IResource for NoisePattern2DGD {
     fn init(base: Base<Resource>) -> Self {
-        Self { base, scale: 1.0 }
+        Self {
+            base,
+            scale: 1.0,
+            seed: 0,
+        }
     }
 }
 
+#[godot_api]
+impl NoisePattern2DGD {
+    /// Sample the 2D noise pattern at `(x, z)`, scaled by `scale`.
+    #[func]
+    fn sample_2d(&self, x: f32, z: f32) -> f32 {
+        let mut gen = voxel_core::generators::simple::Noise::default();
+        let noise = gen.noise_mut();
+        noise.set_seed(Some(self.seed));
+        noise.set_frequency(Some(1.0 / self.scale.max(0.0001)));
+        gen.sample_noise_3d(x, 0.0, z)
+    }
+}
+
+/// A baked curve resource. Wraps [`voxel_core::generators::simple::Curve`] —
+/// `sample` returns the linearly-interpolated value at parameter `t ∈ [0,1]`,
+/// and `set_identity` rebuilds an identity curve with `count` points.
 #[derive(GodotClass)]
 #[class(base = Resource, tool)]
 pub struct CurveGD {
     base: Base<Resource>,
-    #[var]
+    /// Number of baked sample points. Plain field exposed via
+    /// `get/set_point_count` #[func]s.
     point_count: i32,
+    /// The real baked curve.
+    curve: voxel_core::generators::simple::Curve,
 }
 #[godot_api]
 impl IResource for CurveGD {
@@ -154,7 +218,46 @@ impl IResource for CurveGD {
         Self {
             base,
             point_count: 2,
+            curve: voxel_core::generators::simple::Curve::identity(2),
         }
+    }
+}
+
+#[godot_api]
+impl CurveGD {
+    /// Sample the curve at `t ∈ [0,1]` (clamped). For an identity curve,
+    /// `sample(t) == t`.
+    #[func]
+    fn sample(&self, t: f32) -> f32 {
+        self.curve.sample(t)
+    }
+
+    /// Rebuild an identity curve (`sample(t) == t`) with `count` points.
+    /// `count` is clamped to at least 2.
+    #[func]
+    fn set_identity(&mut self, count: i32) {
+        let n = count.max(2) as usize;
+        self.point_count = n as i32;
+        self.curve = voxel_core::generators::simple::Curve::identity(n);
+    }
+
+    /// Number of baked points.
+    #[func]
+    fn get_point_count(&self) -> i32 {
+        self.point_count
+    }
+
+    /// Build a curve from explicit `[0,1]`-spaced values. The array length
+    /// becomes the point count (clamped to ≥ 2). The first and last values
+    /// map to t=0 and t=1.
+    #[func]
+    fn set_points(&mut self, values: PackedFloat32Array) {
+        let v: Vec<f32> = values.to_vec();
+        if v.len() < 2 {
+            return;
+        }
+        self.point_count = v.len() as i32;
+        self.curve = voxel_core::generators::simple::Curve::from_points(v);
     }
 }
 

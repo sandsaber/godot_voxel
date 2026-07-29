@@ -410,3 +410,156 @@ impl VoxelInstancerEditorPlugin {
         count
     }
 }
+
+// ---------------------------------------------------------------------------
+// VoxelTerrainEditorPlugin — EditorPlugin for terrain editing
+// ---------------------------------------------------------------------------
+
+/// Editor plugin for editing voxel terrain. Adds a bottom-panel view on
+/// `enter_tree`. The functional API provides `carve_sphere_into`, which runs a
+/// real sphere edit (via voxel-core `VoxelToolBuffer::do_sphere`) on a
+/// `VoxelBufferGD`'s Type channel — exercising the terrain editing pipeline.
+#[derive(GodotClass)]
+#[class(base = EditorPlugin, tool)]
+pub struct VoxelTerrainEditorPlugin {
+    base: Base<EditorPlugin>,
+    panel: Option<Gd<Control>>,
+}
+
+#[godot_api]
+impl IEditorPlugin for VoxelTerrainEditorPlugin {
+    fn init(base: Base<EditorPlugin>) -> Self {
+        godot_print!("VoxelTerrainEditorPlugin: initialised");
+        Self { base, panel: None }
+    }
+
+    fn enter_tree(&mut self) {
+        let panel = Control::new_alloc();
+        self.base_mut()
+            .add_control_to_bottom_panel(&panel, "Voxel Terrain");
+        self.panel = Some(panel);
+        godot_print!("VoxelTerrainEditorPlugin: entered tree — terrain view added");
+    }
+
+    fn exit_tree(&mut self) {
+        if let Some(panel) = self.panel.take() {
+            self.base_mut().remove_control_from_bottom_panel(&panel);
+            panel.free();
+            godot_print!("VoxelTerrainEditorPlugin: exited tree");
+        }
+    }
+}
+
+#[godot_api]
+impl VoxelTerrainEditorPlugin {
+    /// Carve a solid sphere into a `VoxelBufferGD`'s Type channel at the given
+    /// center/radius. Returns the number of voxels set solid, or -1 if
+    /// `buffer` is not a `VoxelBufferGD`.
+    #[func]
+    fn carve_sphere_into(
+        &self,
+        buffer: Gd<RefCounted>,
+        cx: f32,
+        cy: f32,
+        cz: f32,
+        radius: f32,
+    ) -> i64 {
+        let Ok(mut buf) = buffer.try_cast::<crate::voxel_buffer::VoxelBufferGD>() else {
+            return -1;
+        };
+        let mut bound = buf.bind_mut();
+        let core = bound.core_buffer_mut();
+        let before = count_solid_type(core);
+        let mut tool = voxel_core::edition::ops::VoxelToolBuffer::new(core, 0);
+        tool.do_sphere(voxel_core::math::Vector3f::new(cx, cy, cz), radius);
+        let after = count_solid_type(tool.buffer());
+        (after.saturating_sub(before)) as i64
+    }
+}
+
+// ---------------------------------------------------------------------------
+// VoxelLodTerrainEditorPlugin — EditorPlugin for multi-LOD terrain editing
+// ---------------------------------------------------------------------------
+
+/// Editor plugin for multi-LOD terrain editing. Adds a bottom-panel view on
+/// `enter_tree`. The functional API provides `carve_box_into`, which runs a
+/// real box edit (via voxel-core `VoxelToolBuffer::do_box`) on a
+/// `VoxelBufferGD`'s Type channel.
+#[derive(GodotClass)]
+#[class(base = EditorPlugin, tool)]
+pub struct VoxelLodTerrainEditorPlugin {
+    base: Base<EditorPlugin>,
+    panel: Option<Gd<Control>>,
+}
+
+#[godot_api]
+impl IEditorPlugin for VoxelLodTerrainEditorPlugin {
+    fn init(base: Base<EditorPlugin>) -> Self {
+        godot_print!("VoxelLodTerrainEditorPlugin: initialised");
+        Self { base, panel: None }
+    }
+
+    fn enter_tree(&mut self) {
+        let panel = Control::new_alloc();
+        self.base_mut()
+            .add_control_to_bottom_panel(&panel, "Voxel LOD Terrain");
+        self.panel = Some(panel);
+        godot_print!("VoxelLodTerrainEditorPlugin: entered tree — LOD terrain view added");
+    }
+
+    fn exit_tree(&mut self) {
+        if let Some(panel) = self.panel.take() {
+            self.base_mut().remove_control_from_bottom_panel(&panel);
+            panel.free();
+            godot_print!("VoxelLodTerrainEditorPlugin: exited tree");
+        }
+    }
+}
+
+#[godot_api]
+impl VoxelLodTerrainEditorPlugin {
+    /// Carve a solid box into a `VoxelBufferGD`'s Type channel. Returns the
+    /// number of voxels set solid, or -1 if `buffer` is not a `VoxelBufferGD`.
+    #[func]
+    #[allow(clippy::too_many_arguments)]
+    fn carve_box_into(
+        &self,
+        buffer: Gd<RefCounted>,
+        min_x: i32,
+        min_y: i32,
+        min_z: i32,
+        max_x: i32,
+        max_y: i32,
+        max_z: i32,
+    ) -> i64 {
+        let Ok(mut buf) = buffer.try_cast::<crate::voxel_buffer::VoxelBufferGD>() else {
+            return -1;
+        };
+        let mut bound = buf.bind_mut();
+        let core = bound.core_buffer_mut();
+        let before = count_solid_type(core);
+        let mut tool = voxel_core::edition::ops::VoxelToolBuffer::new(core, 0);
+        tool.do_box(
+            voxel_core::math::Vector3i::new(min_x, min_y, min_z),
+            voxel_core::math::Vector3i::new(max_x, max_y, max_z),
+        );
+        let after = count_solid_type(tool.buffer());
+        (after.saturating_sub(before)) as i64
+    }
+}
+
+/// Count solid (non-zero) voxels in the Type channel of a VoxelBuffer.
+fn count_solid_type(buf: &voxel_core::storage::VoxelBuffer) -> usize {
+    let s = buf.size();
+    let mut count = 0;
+    for z in 0..s.z {
+        for y in 0..s.y {
+            for x in 0..s.x {
+                if buf.get_voxel(x, y, z, 0) != 0 {
+                    count += 1;
+                }
+            }
+        }
+    }
+    count
+}

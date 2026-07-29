@@ -201,4 +201,20 @@ impl VoxelGeneratorHeightmap {
         };
         Arc::new(hm)
     }
+
+    /// Sample the terrain height at world `(x, z)`. Returns the height value
+    /// (noise remapped to `[0, height_range]`). Deterministic for a fixed
+    /// seed/frequency.
+    #[func]
+    fn sample_height(&self, x: f32, z: f32) -> f32 {
+        let config = NoiseConfig {
+            seed: Some(self.seed as i32),
+            frequency: Some(self.frequency),
+            ..NoiseConfig::default()
+        };
+        let noise = config.build();
+        let n = noise.get_noise_2d(x, z);
+        // Match HeightmapNoise's default (no curve): 0.5 + 0.5*noise → height_range.
+        (0.5 + 0.5 * n) * self.height_range
+    }
 }
