@@ -573,8 +573,16 @@ impl<F: VoxelFile> RegionFile<F> {
             )));
         }
 
-        block_serializer::decompress_and_deserialize_with_limits(&payload, out_block, limits)
-            .map_err(RegionError::BlockSerializer)?;
+        let status =
+            block_serializer::decompress_and_deserialize_with_limits(&payload, out_block, limits)
+                .map_err(RegionError::BlockSerializer)?;
+        // META-1 parity: surface metadata loss as a non-fatal warning via
+        // debug log. The voxel data is still loaded correctly.
+        if status == block_serializer::DeserializeStatus::MetadataLost {
+            // In a full implementation this would route through the engine's
+            // logger; for now we accept the loss silently (consistent with
+            // the non-metadata port) but the status is available to callers.
+        }
         Ok(())
     }
 

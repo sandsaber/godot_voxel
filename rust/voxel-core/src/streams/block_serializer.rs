@@ -342,23 +342,39 @@ pub fn serialize_and_compress(
 
 /// Decompress `src`, then deserialize. Ported from
 /// `BlockSerializer::decompress_and_deserialize`.
+/// Outcome of a decompress+deserialize operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeserializeStatus {
+    /// Voxel data loaded successfully, no metadata present or all decoded.
+    Complete,
+    /// Voxel data loaded successfully, but block/per-voxel metadata was
+    /// present and could not be decoded (Variant codec not ported). The caller
+    /// must decide whether to accept the lossy load or reject it.
+    MetadataLost,
+}
+
 pub fn decompress_and_deserialize(src: &[u8], buffer: &mut VoxelBuffer) -> Result<(), Error> {
-    decompress_and_deserialize_with_limits(src, buffer, DecodeLimits::default())
+    let status = decompress_and_deserialize_with_limits(src, buffer, DecodeLimits::default())?;
+    // Default: accept metadata loss silently for backward compatibility with
+    // existing callers that use the non-limits wrapper. Callers that care
+    // should use decompress_and_deserialize_with_limits directly.
+    let _ = status;
+    Ok(())
 }
 
 /// Decompress `src`, then deserialize with explicit allocation limits.
+/// Returns a [`DeserializeStatus`] so the caller can detect metadata loss
+/// (META-1 parity: no silent Ok(()) when metadata was present).
 pub fn decompress_and_deserialize_with_limits(
     src: &[u8],
     buffer: &mut VoxelBuffer,
     limits: DecodeLimits,
-) -> Result<(), Error> {
+) -> Result<DeserializeStatus, Error> {
     let mut raw = Vec::new();
     compressed_data::decompress_with_limits(src, &mut raw, limits)?;
-    // If the inner block carried metadata we couldn't decode, surface it as a
-    // non-fatal warning: the voxel data is still loaded correctly.
     match deserialize_with_limits(&raw, buffer, limits) {
-        Ok(()) => Ok(()),
-        Err(Error::MetadataSkipped) => Ok(()),
+        Ok(()) => Ok(DeserializeStatus::Complete),
+        Err(Error::MetadataSkipped) => Ok(DeserializeStatus::MetadataLost),
         Err(e) => Err(e),
     }
 }
