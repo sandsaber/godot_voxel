@@ -1573,8 +1573,335 @@ mod graph_runtime_parity {
         let v = run_graph(&g);
         assert!((v - 10.0).abs() < 1e-5, "clamp: {v}");
     }
+
+    #[test]
+    fn graph_sdf_plane_golden() {
+        // SdfPlane(y=3, height=1) = y - height = 2.
+        let mut g = Graph::new();
+        let ny = g.push(NodeKind::Constant(3.0));
+        let nh = g.push(NodeKind::Constant(1.0));
+        let p = g.push(NodeKind::SdfPlane {
+            y: Some(GraphPort {
+                node: ny,
+                output: 0,
+            }),
+            height: Some(GraphPort {
+                node: nh,
+                output: 0,
+            }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: p, output: 0 }),
+        });
+        assert!((run_graph(&g) - 2.0).abs() < 1e-5, "sdf_plane");
+    }
+
+    #[test]
+    fn graph_sdf_box_golden() {
+        // SdfBox at (1,2,3) half-extents (2,2,2).
+        let mut g = Graph::new();
+        let nx = g.push(NodeKind::Constant(1.0));
+        let ny = g.push(NodeKind::Constant(2.0));
+        let nz = g.push(NodeKind::Constant(3.0));
+        let b = g.push(NodeKind::SdfBox {
+            x: Some(GraphPort {
+                node: nx,
+                output: 0,
+            }),
+            y: Some(GraphPort {
+                node: ny,
+                output: 0,
+            }),
+            z: Some(GraphPort {
+                node: nz,
+                output: 0,
+            }),
+            size_x: 2.0,
+            size_y: 2.0,
+            size_z: 2.0,
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: b, output: 0 }),
+        });
+        assert!((run_graph(&g) - 1.0).abs() < 1e-5, "sdf_box");
+    }
+
+    #[test]
+    fn graph_sdf_union_golden() {
+        // union(5, 2) = min = 2.
+        let mut g = Graph::new();
+        let na = g.push(NodeKind::Constant(5.0));
+        let nb = g.push(NodeKind::Constant(2.0));
+        let u = g.push(NodeKind::SdfUnion {
+            a: Some(GraphPort {
+                node: na,
+                output: 0,
+            }),
+            b: Some(GraphPort {
+                node: nb,
+                output: 0,
+            }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: u, output: 0 }),
+        });
+        assert!((run_graph(&g) - 2.0).abs() < 1e-5, "sdf_union");
+    }
+
+    #[test]
+    fn graph_sdf_subtract_golden() {
+        // subtract(5, 2) = max(5, -2) = 5. subtract(2, 5) = max(2, -5) = 2.
+        let mut g = Graph::new();
+        let na = g.push(NodeKind::Constant(5.0));
+        let nb = g.push(NodeKind::Constant(2.0));
+        let s = g.push(NodeKind::SdfSubtract {
+            a: Some(GraphPort {
+                node: na,
+                output: 0,
+            }),
+            b: Some(GraphPort {
+                node: nb,
+                output: 0,
+            }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: s, output: 0 }),
+        });
+        assert!((run_graph(&g) - 5.0).abs() < 1e-5, "sdf_subtract");
+    }
+
+    #[test]
+    fn graph_sdf_smooth_union_golden() {
+        // smooth_union(-1, 1, 0) = hard union = min = -1.
+        let mut g = Graph::new();
+        let na = g.push(NodeKind::Constant(-1.0));
+        let nb = g.push(NodeKind::Constant(1.0));
+        let u = g.push(NodeKind::SdfSmoothUnion {
+            a: Some(GraphPort {
+                node: na,
+                output: 0,
+            }),
+            b: Some(GraphPort {
+                node: nb,
+                output: 0,
+            }),
+            smoothness: 0.0,
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: u, output: 0 }),
+        });
+        assert!((run_graph(&g) - (-1.0)).abs() < 1e-5, "sdf_smooth_union");
+    }
+
+    #[test]
+    fn graph_mix_golden() {
+        // mix(0, 10, 0.5) = 5.
+        let mut g = Graph::new();
+        let na = g.push(NodeKind::Constant(0.0));
+        let nb = g.push(NodeKind::Constant(10.0));
+        let nt = g.push(NodeKind::Constant(0.5));
+        let m = g.push(NodeKind::Mix {
+            a: Some(GraphPort {
+                node: na,
+                output: 0,
+            }),
+            b: Some(GraphPort {
+                node: nb,
+                output: 0,
+            }),
+            t: Some(GraphPort {
+                node: nt,
+                output: 0,
+            }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: m, output: 0 }),
+        });
+        assert!((run_graph(&g) - 5.0).abs() < 1e-5, "mix");
+    }
+
+    #[test]
+    fn graph_distance_2d_golden() {
+        // Distance2D (0,0)-(3,4) = 5.
+        let mut g = Graph::new();
+        let x0 = g.push(NodeKind::Constant(0.0));
+        let y0 = g.push(NodeKind::Constant(0.0));
+        let x1 = g.push(NodeKind::Constant(3.0));
+        let y1 = g.push(NodeKind::Constant(4.0));
+        let d = g.push(NodeKind::Distance2D {
+            x0: Some(GraphPort {
+                node: x0,
+                output: 0,
+            }),
+            y0: Some(GraphPort {
+                node: y0,
+                output: 0,
+            }),
+            x1: Some(GraphPort {
+                node: x1,
+                output: 0,
+            }),
+            y1: Some(GraphPort {
+                node: y1,
+                output: 0,
+            }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: d, output: 0 }),
+        });
+        assert!((run_graph(&g) - 5.0).abs() < 1e-5, "distance2d");
+    }
+
+    #[test]
+    fn graph_curve_identity_golden() {
+        // Curve identity: sample(0.5) = 0.5.
+        let mut g = Graph::new();
+        let na = g.push(NodeKind::Constant(0.5));
+        let c = g.push(NodeKind::Curve {
+            a: Some(GraphPort {
+                node: na,
+                output: 0,
+            }),
+            curve: std::sync::Arc::new(voxel_core::generators::simple::Curve::identity(2)),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: c, output: 0 }),
+        });
+        assert!((run_graph(&g) - 0.5).abs() < 1e-5, "curve identity");
+    }
 }
 
+#[cfg(test)]
+mod noise_parity {
+    use voxel_core::fastnoise_lite::NoiseType;
+    use voxel_core::generators::simple::Noise;
+
+    /// Raw 3D noise sampling is deterministic for a fixed configuration.
+    /// Golden values pinned against the configured seed/frequency/type.
+    #[test]
+    fn noise_sample_3d_deterministic_golden() {
+        let mut gen = Noise::default();
+        gen.noise_mut().set_seed(Some(1337));
+        gen.noise_mut().set_frequency(Some(0.1));
+        gen.noise_mut()
+            .set_noise_type(Some(NoiseType::OpenSimplex2));
+        assert!(
+            (gen.sample_noise_3d(0.0, 0.0, 0.0) - 0.0).abs() < 1e-5,
+            "noise origin"
+        );
+        assert!(
+            (gen.sample_noise_3d(1.0, 1.0, 1.0) - 0.005424).abs() < 1e-4,
+            "noise (1,1,1)"
+        );
+        assert!(
+            (gen.sample_noise_3d(2.0, 2.0, 2.0) - 0.232637).abs() < 1e-4,
+            "noise (2,2,2)"
+        );
+    }
+
+    /// Different seeds produce different noise values (non-degenerate).
+    #[test]
+    fn noise_seed_changes_output() {
+        let mut gen_a = Noise::default();
+        gen_a.noise_mut().set_seed(Some(1));
+        gen_a.noise_mut().set_frequency(Some(0.1));
+        let mut gen_b = Noise::default();
+        gen_b.noise_mut().set_seed(Some(42));
+        gen_b.noise_mut().set_frequency(Some(0.1));
+        let a = gen_a.sample_noise_3d(3.7, 2.1, 4.9);
+        let b = gen_b.sample_noise_3d(3.7, 2.1, 4.9);
+        assert!(
+            (a - b).abs() > 0.01,
+            "different seeds should differ: {a} vs {b}"
+        );
+    }
+
+    /// Noise output stays in roughly [-1, 1] over a sample grid.
+    #[test]
+    fn noise_output_bounded() {
+        let mut gen = Noise::default();
+        gen.noise_mut().set_seed(Some(42));
+        gen.noise_mut().set_frequency(Some(0.05));
+        for x in 0..10 {
+            for y in 0..10 {
+                for z in 0..10 {
+                    let v = gen.sample_noise_3d(x as f32, y as f32, z as f32);
+                    assert!(
+                        (-1.5..=1.5).contains(&v),
+                        "noise out of expected range at ({x},{y},{z}): {v}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The same configuration sampled twice returns identical values
+    /// (deterministic, no hidden state mutation).
+    #[test]
+    fn noise_repeatable() {
+        let mut gen = Noise::default();
+        gen.noise_mut().set_seed(Some(99));
+        gen.noise_mut().set_frequency(Some(0.2));
+        let a = gen.sample_noise_3d(3.0, 4.0, 5.0);
+        let b = gen.sample_noise_3d(3.0, 4.0, 5.0);
+        assert!((a - b).abs() < 1e-7, "noise not repeatable: {a} vs {b}");
+    }
+}
+
+#[cfg(test)]
+mod sdf_math_parity {
+    use voxel_core::math::{sdf, Vector3f};
+
+    /// sdf_box at center is -the minimum extent (inside the box).
+    #[test]
+    fn sdf_box_inside_is_negative() {
+        let d = sdf::sdf_box(Vector3f::new(0.0, 0.0, 0.0), Vector3f::splat(2.0));
+        assert!((d - (-2.0)).abs() < 1e-5, "sdf_box center: {d}");
+    }
+
+    /// sdf_box outside on +X is the overshoot distance.
+    #[test]
+    fn sdf_box_outside_is_positive() {
+        let d = sdf::sdf_box(Vector3f::new(5.0, 0.0, 0.0), Vector3f::splat(2.0));
+        assert!((d - 3.0).abs() < 1e-5, "sdf_box outside: {d}");
+    }
+
+    /// sdf_union(a, b) = min(a, b).
+    #[test]
+    fn sdf_union_is_min() {
+        assert!((sdf::sdf_union(-1.0, 2.0) - (-1.0)).abs() < 1e-5);
+        assert!((sdf::sdf_union(3.0, -2.0) - (-2.0)).abs() < 1e-5);
+    }
+
+    /// sdf_subtract(a, b) = max(a, -b).
+    #[test]
+    fn sdf_subtract_is_max_negated() {
+        assert!((sdf::sdf_subtract(1.0, 5.0) - 1.0).abs() < 1e-5);
+        assert!((sdf::sdf_subtract(-1.0, 5.0) - (-1.0)).abs() < 1e-5);
+    }
+
+    /// sdf_smooth_union with smoothness=0 equals hard union.
+    #[test]
+    fn sdf_smooth_union_zero_equals_hard() {
+        let smooth = sdf::sdf_smooth_union(-1.0, 1.0, 0.0);
+        let hard = sdf::sdf_union(-1.0, 1.0);
+        assert!(
+            (smooth - hard).abs() < 1e-5,
+            "smooth(0) should equal hard union"
+        );
+    }
+
+    /// sdf_plane = dot(pos, normal) - d.
+    #[test]
+    fn sdf_plane_at_origin() {
+        let d = sdf::sdf_plane(
+            Vector3f::new(0.0, 5.0, 0.0),
+            Vector3f::new(0.0, 1.0, 0.0),
+            3.0,
+        );
+        assert!((d - 2.0).abs() < 1e-5, "sdf_plane: {d}");
+    }
+}
 #[cfg(test)]
 mod raycast_parity {
     use voxel_core::edition::raycast::{voxel_raycast, VoxelRaycastState};

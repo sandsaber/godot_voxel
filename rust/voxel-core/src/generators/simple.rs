@@ -272,6 +272,14 @@ impl Noise {
         &mut self.noise
     }
 
+    /// Sample the raw 3D noise (not the terrain SDF) at a world point. Used by
+    /// the Godot binding ([`FastNoiseLiteGD`](../../voxel_gdext/...)) to expose
+    /// noise sampling through the binding without depending on `fastnoise-lite`
+    /// directly.
+    pub fn sample_noise_3d(&self, x: f32, y: f32, z: f32) -> f32 {
+        self.noise.get_noise_3d(x, y, z)
+    }
+
     /// The noise period derived from the configured frequency. Matches the C++
     /// `noise_period = 1.0 / max(frequency, 0.0001)`.
     fn noise_period(&self) -> f32 {

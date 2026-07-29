@@ -5,6 +5,11 @@ use godot::prelude::*;
 
 // === Noise Resources (5) ===
 
+/// FastNoiseLite noise resource. Wraps
+/// [`voxel_core::generators::simple::Noise`] (which wraps
+/// `fastnoise_lite::FastNoiseLite`) — `sample_3d` configures the sampler from
+/// the resource's seed/frequency/noise_type and returns the raw 3D noise value
+/// at a world point, exercising the full noise pipeline through the binding.
 #[derive(GodotClass)]
 #[class(base = Resource, tool)]
 pub struct FastNoiseLiteGD {
@@ -13,6 +18,8 @@ pub struct FastNoiseLiteGD {
     seed: i32,
     #[var]
     frequency: f32,
+    /// Noise type: 0 = OpenSimplex2, 1 = OpenSimplex2S, 2 = Cellular,
+    /// 3 = Perlin, 4 = ValueCubic, 5 = Value. Mirrors `NoiseType`.
     #[var]
     noise_type: i32,
 }
@@ -25,6 +32,29 @@ impl IResource for FastNoiseLiteGD {
             frequency: 0.01,
             noise_type: 0,
         }
+    }
+}
+
+#[godot_api]
+impl FastNoiseLiteGD {
+    /// Sample the raw 3D noise at world point `(x,y,z)`, configured from this
+    /// resource's seed/frequency/noise_type. Returns a value in roughly
+    /// `[-1, 1]`. The result is deterministic for a fixed configuration.
+    #[func]
+    fn sample_3d(&self, x: f32, y: f32, z: f32) -> f32 {
+        let mut gen = voxel_core::generators::simple::Noise::default();
+        let noise = gen.noise_mut();
+        noise.set_seed(Some(self.seed));
+        noise.set_frequency(Some(self.frequency));
+        noise.set_noise_type(Some(match self.noise_type {
+            1 => voxel_core::fastnoise_lite::NoiseType::OpenSimplex2S,
+            2 => voxel_core::fastnoise_lite::NoiseType::Cellular,
+            3 => voxel_core::fastnoise_lite::NoiseType::Perlin,
+            4 => voxel_core::fastnoise_lite::NoiseType::ValueCubic,
+            5 => voxel_core::fastnoise_lite::NoiseType::Value,
+            _ => voxel_core::fastnoise_lite::NoiseType::OpenSimplex2,
+        }));
+        gen.sample_noise_3d(x, y, z)
     }
 }
 

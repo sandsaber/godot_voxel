@@ -33,5 +33,10 @@ pub mod terrain;
 pub mod testing;
 pub mod thread;
 
+/// Re-export of the `fastnoise-lite` crate so the Godot binding
+/// (`voxel-gdext`) can configure noise samplers without adding a direct
+/// dependency. Used by [`FastNoiseLiteGD`] and the `Noise` generator.
+pub use fastnoise_lite;
+
 /// Crate version (matches `Cargo.toml`).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

@@ -200,21 +200,88 @@ fn sdf_blend_inline(
 // ---------------------------------------------------------------------------
 // VoxelModifierMeshGD — Node3D for mesh SDF modifier
 // ---------------------------------------------------------------------------
-/// A mesh-based SDF modifier node.
+/// A mesh-based SDF modifier node. The shape is an oriented box (a simple
+/// baked-mesh stand-in) whose extents derive from the node's scale; the SDF is
+/// blended into the terrain via union/subtract using
+/// [`voxel_core::math::sdf`] functions.
 #[derive(GodotClass)]
 #[class(base = Node3D, tool)]
 pub struct VoxelModifierMeshGD {
     base: Base<Node3D>,
+    /// Blend operation: 0 = add (union), 1 = subtract.
     #[var]
-    isolevel: f32,
+    operation: i32,
+    /// Half-extents of the box shape (voxel units).
+    #[var]
+    extents: f32,
 }
 #[godot_api]
 impl INode3D for VoxelModifierMeshGD {
     fn init(base: Base<Node3D>) -> Self {
         Self {
             base,
-            isolevel: 0.0,
+            operation: 0,
+            extents: 4.0,
         }
+    }
+}
+
+#[godot_api]
+impl VoxelModifierMeshGD {
+    /// Apply this box-shape modifier to a `VoxelBufferGD`'s SDF channel.
+    /// `buffer` must be a `VoxelBufferGD`; `origin_x/y/z` is the buffer's
+    /// world-space origin. The box is centered on the node's world position.
+    /// Returns the number of voxels whose SDF changed, or -1 if `buffer` is
+    /// not a `VoxelBufferGD`.
+    #[func]
+    fn apply_to_buffer(
+        &self,
+        buffer: Gd<RefCounted>,
+        origin_x: f32,
+        origin_y: f32,
+        origin_z: f32,
+    ) -> i64 {
+        let Ok(mut buf) = buffer.try_cast::<crate::voxel_buffer::VoxelBufferGD>() else {
+            return -1;
+        };
+        let mut bound = buf.bind_mut();
+        let core = bound.core_buffer_mut();
+        let sx = core.size().x;
+        let sy = core.size().y;
+        let sz = core.size().z;
+        const SDF_CHANNEL: usize = 1;
+
+        let center = self.base().get_position();
+        let cx = center.x;
+        let cy = center.y;
+        let cz = center.z;
+        let extents = voxel_core::math::Vector3f::splat(self.extents);
+        let subtract = self.operation == 1;
+
+        let mut changed: i64 = 0;
+        for z in 0..sz {
+            for y in 0..sy {
+                for x in 0..sx {
+                    let sdf = core.get_voxel_f(x, y, z, SDF_CHANNEL);
+                    let pos = voxel_core::math::Vector3f::new(
+                        origin_x + x as f32 - cx,
+                        origin_y + y as f32 - cy,
+                        origin_z + z as f32 - cz,
+                    );
+                    let shape = voxel_core::math::sdf::sdf_box(pos, extents);
+                    let blended = if subtract {
+                        voxel_core::math::sdf::sdf_subtract(sdf, shape)
+                    } else {
+                        voxel_core::math::sdf::sdf_union(sdf, shape)
+                    };
+                    if (blended - sdf).abs() > 1e-6 {
+                        core.set_voxel_f(blended, x, y, z, SDF_CHANNEL);
+                        changed += 1;
+                    }
+                }
+            }
+        }
+        changed
     }
 }
 
@@ -748,11 +815,15 @@ impl VoxelBlockyTypeLibraryGD {
 // ---------------------------------------------------------------------------
 // VoxelBoxMoverGD — Node for box-based terrain editing
 // ---------------------------------------------------------------------------
-/// A Node3D that moves a box through terrain, editing voxels in its path.
+/// A `Node3D` that moves a box through terrain, editing voxels in its path.
+/// Wraps [`voxel_core::edition::ops::VoxelToolBuffer::do_box`] — `carve_path`
+/// stamps a box at each integer step from the node's position to a target,
+/// returning the number of voxels edited.
 #[derive(GodotClass)]
 #[class(base = Node3D, tool)]
 pub struct VoxelBoxMoverGD {
     base: Base<Node3D>,
+    /// Half-size of the stamping box (voxel units).
     #[var]
     box_size: f32,
 }
@@ -763,6 +834,55 @@ impl INode3D for VoxelBoxMoverGD {
             base,
             box_size: 2.0,
         }
+    }
+}
+
+#[godot_api]
+impl VoxelBoxMoverGD {
+    /// Stamp a solid box at each integer step along the line from the node's
+    /// current position to `(target_x,target_y,target_z)` into a
+    /// `VoxelBufferGD`'s Type channel. `origin_x` offsets the stamp into the
+    /// buffer's local space. Returns the number of steps stamped, or -1 if
+    /// `buffer` is not a `VoxelBufferGD`.
+    #[func]
+    fn carve_path(
+        &self,
+        buffer: Gd<RefCounted>,
+        origin_x: i32,
+        target_x: i32,
+        target_y: i32,
+        target_z: i32,
+    ) -> i64 {
+        let Ok(mut buf) = buffer.try_cast::<crate::voxel_buffer::VoxelBufferGD>() else {
+            return -1;
+        };
+        let mut bound = buf.bind_mut();
+        let core = bound.core_buffer_mut();
+        let half = self.box_size as i32;
+        const TYPE_CHANNEL: usize = 0;
+        let start = self.base().get_position();
+        let sx = start.x as i32;
+        let sy = start.y as i32;
+        let sz = start.z as i32;
+
+        // Walk integer steps from start to target (DDA on the longest axis).
+        let dx = target_x - sx;
+        let dy = target_y - sy;
+        let dz = target_z - sz;
+        let steps = dx.abs().max(dy.abs()).max(dz.abs()).max(1);
+        let mut stamped = 0i64;
+        let mut tool = voxel_core::edition::ops::VoxelToolBuffer::new(core, TYPE_CHANNEL);
+        for i in 0..=steps {
+            let t = if steps == 0 { 0 } else { i };
+            let cx = sx + dx * t / steps + origin_x;
+            let cy = sy + dy * t / steps;
+            let cz = sz + dz * t / steps;
+            let min = voxel_core::math::Vector3i::new(cx - half, cy - half, cz - half);
+            let max = voxel_core::math::Vector3i::new(cx + half, cy + half, cz + half);
+            tool.do_box(min, max);
+            stamped += 1;
+        }
+        stamped
     }
 }
 
