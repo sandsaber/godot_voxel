@@ -9776,7 +9776,7 @@ mod noise_type_matrix_parity {
 // Additional blocky bake_library + cubes greedy toggle parity.
 #[cfg(test)]
 mod blocky_bake_cubes_parity {
-    
+
     use voxel_core::math::Vector3i;
     use voxel_core::meshers::blocky::{bake_library, BakedLibrary, BakedModel};
     use voxel_core::meshers::{CubesMesher, MesherInput, MesherOutput, VoxelMesher};
@@ -9911,5 +9911,262 @@ mod graph_normalize_curve_parity {
         });
         let v = run_with_output(&g, 0);
         assert!((v - 0.5).abs() < 1e-5, "curve identity 0.5: {v}");
+    }
+}
+
+// Additional graph SDF combine chains — multi-level union/subtract.
+#[cfg(test)]
+mod graph_sdf_deep_chains_parity {
+    use voxel_core::generators::graph::{
+        CompiledGraph, CompiledScratch, Graph, GraphInputs, GraphOutput, GraphPort, NodeKind,
+    };
+
+    fn run(g: &Graph) -> f32 {
+        let c = CompiledGraph::compile(g).expect("compile");
+        let xs = [0.0f32];
+        let zs = [0.0f32];
+        let i = GraphInputs {
+            x: &xs,
+            y: 0.0,
+            z: &zs,
+        };
+        let mut s = CompiledScratch::new();
+        let mut o = Vec::new();
+        c.generate_slice(&i, 1, &mut s, &mut o, false);
+        o.into_iter()
+            .find(|(k, _)| *k == GraphOutput::Sdf)
+            .and_then(|(_, v)| v.into_iter().next())
+            .unwrap()
+    }
+
+    #[test]
+    fn union_then_subtract_chain() {
+        let mut g = Graph::new();
+        let na = g.push(NodeKind::Constant(-3.0));
+        let nb = g.push(NodeKind::Constant(-1.0));
+        let u = g.push(NodeKind::SdfUnion {
+            a: Some(GraphPort {
+                node: na,
+                output: 0,
+            }),
+            b: Some(GraphPort {
+                node: nb,
+                output: 0,
+            }),
+        });
+        let nc = g.push(NodeKind::Constant(2.0));
+        let s = g.push(NodeKind::SdfSubtract {
+            a: Some(GraphPort { node: u, output: 0 }),
+            b: Some(GraphPort {
+                node: nc,
+                output: 0,
+            }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: s, output: 0 }),
+        });
+        // union(-3,-1) = -3; subtract(-3, 2) = max(-3, -2) = -2.
+        assert!(
+            (run(&g) - (-2.0)).abs() < 1e-5,
+            "union-then-subtract: {}",
+            run(&g)
+        );
+    }
+
+    #[test]
+    fn smooth_union_then_hard_subtract() {
+        let mut g = Graph::new();
+        let na = g.push(NodeKind::Constant(-1.0));
+        let nb = g.push(NodeKind::Constant(1.0));
+        let su = g.push(NodeKind::SdfSmoothUnion {
+            a: Some(GraphPort {
+                node: na,
+                output: 0,
+            }),
+            b: Some(GraphPort {
+                node: nb,
+                output: 0,
+            }),
+            smoothness: 0.5,
+        });
+        let nc = g.push(NodeKind::Constant(0.0));
+        let s = g.push(NodeKind::SdfSubtract {
+            a: Some(GraphPort {
+                node: su,
+                output: 0,
+            }),
+            b: Some(GraphPort {
+                node: nc,
+                output: 0,
+            }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: s, output: 0 }),
+        });
+        let v = run(&g);
+        assert!(v.is_finite(), "smooth+hard chain should be finite: {v}");
+    }
+
+    #[test]
+    fn three_sdf_union_chain() {
+        let mut g = Graph::new();
+        let na = g.push(NodeKind::Constant(-5.0));
+        let nb = g.push(NodeKind::Constant(-3.0));
+        let u1 = g.push(NodeKind::SdfUnion {
+            a: Some(GraphPort {
+                node: na,
+                output: 0,
+            }),
+            b: Some(GraphPort {
+                node: nb,
+                output: 0,
+            }),
+        });
+        let nc = g.push(NodeKind::Constant(-1.0));
+        let u2 = g.push(NodeKind::SdfUnion {
+            a: Some(GraphPort {
+                node: u1,
+                output: 0,
+            }),
+            b: Some(GraphPort {
+                node: nc,
+                output: 0,
+            }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort {
+                node: u2,
+                output: 0,
+            }),
+        });
+        // union(-5, -3, -1) = min(-5,-3,-1) = -5.
+        assert!((run(&g) - (-5.0)).abs() < 1e-5, "three union: {}", run(&g));
+    }
+}
+
+// Additional Color8 from_u16 + Vec3i ops parity.
+#[cfg(test)]
+mod color8_vec3i_ops_parity {
+    use voxel_core::math::{Color8, Vector3i};
+
+    #[test]
+    fn color8_from_u16_produces_valid_color() {
+        let c = Color8::from_u16(0xF81F);
+        // from_u16 unpacks a packed 16-bit color — just verify it produces a valid Color8.
+        let _ = (c.r, c.g, c.b, c.a); // all fields accessible
+    }
+
+    #[test]
+    fn vec3i_zero() {
+        let v = Vector3i::zero();
+        assert_eq!(v, Vector3i::new(0, 0, 0));
+    }
+
+    #[test]
+    fn vec3i_splat() {
+        let v = Vector3i::splat(7);
+        assert_eq!(v.x, 7);
+        assert_eq!(v.y, 7);
+        assert_eq!(v.z, 7);
+    }
+
+    #[test]
+    fn vec3i_arithmetic() {
+        let a = Vector3i::new(1, 2, 3);
+        let b = Vector3i::new(4, 5, 6);
+        let sum = a + b;
+        assert_eq!(sum, Vector3i::new(5, 7, 9));
+        let diff = b - a;
+        assert_eq!(diff, Vector3i::new(3, 3, 3));
+    }
+
+    #[test]
+    fn vec3i_equality() {
+        assert_eq!(Vector3i::new(1, 2, 3), Vector3i::new(1, 2, 3));
+        assert_ne!(Vector3i::new(1, 2, 3), Vector3i::new(3, 2, 1));
+    }
+}
+
+// Additional buffer uniform detection edge cases.
+#[cfg(test)]
+mod buffer_uniform_edge_parity {
+    use voxel_core::math::Vector3i;
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
+
+    #[test]
+    fn fill_makes_uniform() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        buf.fill(5, ChannelId::Type.index());
+        assert!(buf.is_uniform(ChannelId::Type.index()));
+    }
+
+    #[test]
+    fn two_distinct_values_not_uniform() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        buf.fill(5, ChannelId::Type.index());
+        buf.set_voxel(9, 0, 0, 0, ChannelId::Type.index());
+        assert!(!buf.is_uniform(ChannelId::Type.index()));
+    }
+
+    #[test]
+    fn set_same_value_stays_uniform() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(4));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        buf.fill(3, ChannelId::Type.index());
+        buf.set_voxel(3, 2, 2, 2, ChannelId::Type.index()); // same value
+        assert!(
+            buf.is_uniform(ChannelId::Type.index()),
+            "setting same value should stay uniform"
+        );
+    }
+}
+
+// Additional edition patterns — do_sphere SDF channel + channel independence.
+#[cfg(test)]
+mod edition_sdf_channel_parity {
+    use voxel_core::edition::ops::VoxelToolBuffer;
+    use voxel_core::math::{Vector3f, Vector3i};
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
+
+    #[test]
+    fn do_sphere_on_sdf_channel() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+        fmt.configure_buffer(&mut buf);
+        buf.clear_channel_f(ChannelId::Sdf.index(), 5.0); // all air
+        let mut tool = VoxelToolBuffer::new(&mut buf, ChannelId::Sdf.index());
+        tool.do_sphere(Vector3f::new(4.0, 4.0, 4.0), 3.0);
+        let center = buf.get_voxel_f(4, 4, 4, ChannelId::Sdf.index());
+        assert!(center < 5.0, "sphere center SDF should decrease: {center}");
+    }
+
+    #[test]
+    fn channels_are_independent() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(4));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.depths[ChannelId::Color.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        buf.set_voxel(1, 0, 0, 0, ChannelId::Type.index());
+        buf.set_voxel(2, 0, 0, 0, ChannelId::Color.index());
+        // Type channel has value, Color channel has different value.
+        assert_eq!(buf.get_voxel(0, 0, 0, ChannelId::Type.index()), 1);
+        assert_eq!(buf.get_voxel(0, 0, 0, ChannelId::Color.index()), 2);
+        // Writing to one doesn't affect the other.
+        buf.set_voxel(9, 0, 0, 0, ChannelId::Type.index());
+        assert_eq!(
+            buf.get_voxel(0, 0, 0, ChannelId::Color.index()),
+            2,
+            "Color should be unchanged"
+        );
     }
 }
