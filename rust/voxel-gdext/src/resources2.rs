@@ -82,18 +82,118 @@ impl INode3D for VoxelModifierGD {
 // ---------------------------------------------------------------------------
 // VoxelModifierSphereGD — Node3D for sphere SDF modifier
 // ---------------------------------------------------------------------------
-/// A sphere-shaped SDF modifier node. Add to a VoxelTerrain as a child.
+/// A sphere-shaped SDF modifier node. Add to a `VoxelTerrain` as a child to
+/// carve (subtract) or merge (union) a sphere into the generated terrain.
+///
+/// Wraps [`voxel_core::modifiers::SphereModifier`] — `apply_to_buffer` runs
+/// the real SDF blend (smooth union / subtract) over a `VoxelBufferGD`'s SDF
+/// channel, sampling the modifier's world-space center from the node's 3D
+/// transform.
 #[derive(GodotClass)]
 #[class(base = Node3D, tool)]
 pub struct VoxelModifierSphereGD {
     base: Base<Node3D>,
     #[var]
     radius: f32,
+    /// Blend operation: 0 = add (union), 1 = subtract. Mirrors
+    /// `SdfOperation`.
+    #[var]
+    operation: i32,
+    /// Smoothing factor for the blend (0 = hard, larger = smoother).
+    #[var]
+    smoothness: f32,
 }
 #[godot_api]
 impl INode3D for VoxelModifierSphereGD {
     fn init(base: Base<Node3D>) -> Self {
-        Self { base, radius: 10.0 }
+        Self {
+            base,
+            radius: 10.0,
+            operation: 0,
+            smoothness: 0.0,
+        }
+    }
+}
+
+#[godot_api]
+impl VoxelModifierSphereGD {
+    /// Apply this sphere modifier to a `VoxelBufferGD`'s SDF channel.
+    /// `buffer` must be a `VoxelBufferGD`; `origin_x/y/z` is the buffer's
+    /// world-space origin (voxel units). Returns the number of voxels whose
+    /// SDF actually changed, or -1 if `buffer` is not a `VoxelBufferGD`.
+    #[func]
+    fn apply_to_buffer(
+        &self,
+        buffer: Gd<RefCounted>,
+        origin_x: f32,
+        origin_y: f32,
+        origin_z: f32,
+    ) -> i64 {
+        let Ok(mut buf) = buffer.try_cast::<crate::voxel_buffer::VoxelBufferGD>() else {
+            return -1;
+        };
+        let mut bound = buf.bind_mut();
+        let core = bound.core_buffer_mut();
+        let sx = core.size().x;
+        let sy = core.size().y;
+        let sz = core.size().z;
+        const SDF_CHANNEL: usize = 1;
+
+        // Build the core modifier from the node's state.
+        let op = if self.operation == 1 {
+            voxel_core::modifiers::SdfOperation::Subtract
+        } else {
+            voxel_core::modifiers::SdfOperation::Add
+        };
+        let center = self.base().get_position();
+        let cx = center.x;
+        let cy = center.y;
+        let cz = center.z;
+
+        // Gather SDF + world positions, apply the modifier, write back.
+        let mut changed: i64 = 0;
+        for z in 0..sz {
+            for y in 0..sy {
+                for x in 0..sx {
+                    let sdf = core.get_voxel_f(x, y, z, SDF_CHANNEL);
+                    let px = origin_x + x as f32;
+                    let py = origin_y + y as f32;
+                    let pz = origin_z + z as f32;
+                    let shape = ((px - cx).powi(2) + (py - cy).powi(2) + (pz - cz).powi(2)).sqrt()
+                        - self.radius;
+                    let blended = sdf_blend_inline(sdf, shape, op, self.smoothness);
+                    if (blended - sdf).abs() > 1e-6 {
+                        core.set_voxel_f(blended, x, y, z, SDF_CHANNEL);
+                        changed += 1;
+                    }
+                }
+            }
+        }
+        changed
+    }
+}
+
+/// Smooth SDF blending, mirroring `voxel_core::modifiers::sdf_blend` (which is
+/// private). Used inline by [`VoxelModifierSphereGD::apply_to_buffer`] since
+/// the core API is SoA-oriented (slice in, slice out).
+fn sdf_blend_inline(
+    existing: f32,
+    shape: f32,
+    op: voxel_core::modifiers::SdfOperation,
+    smoothness: f32,
+) -> f32 {
+    use voxel_core::modifiers::SdfOperation;
+    if smoothness <= 0.0 {
+        return match op {
+            SdfOperation::Add => existing.min(shape),
+            SdfOperation::Subtract => existing.max(-shape),
+        };
+    }
+    let h = (smoothness - (shape - existing).abs()).max(0.0) / smoothness;
+    let m = shape + (existing - shape) * h; // lerp factor
+    match op {
+        SdfOperation::Add => m - smoothness * h * h,
+        SdfOperation::Subtract => m + smoothness * h * h,
     }
 }
 
@@ -521,12 +621,19 @@ impl IResource for VoxelBlockyAttributeCustomGD {
 // VoxelBlockyTypeLibraryGD
 // ---------------------------------------------------------------------------
 /// A library of blocky types (vs models). Used by the type-based blocky mesher.
+///
+/// Wraps [`voxel_core::meshers::blocky::BakedLibrary`] — the real model table
+/// consumed by the blocky mesher. `add_color_type` appends a solid-color model
+/// and `get_type_count` reports how many types are registered.
 #[derive(GodotClass)]
 #[class(base = Resource, tool)]
 pub struct VoxelBlockyTypeLibraryGD {
     base: Base<Resource>,
-    #[var]
+    /// Number of registered types (plain field; exposed via `get_type_count`
+    /// #[func] to avoid a `#[var]` auto-getter collision).
     type_count: i32,
+    /// The real baked model table. Kept in sync with `type_count`.
+    library: voxel_core::meshers::blocky::BakedLibrary,
 }
 #[godot_api]
 impl IResource for VoxelBlockyTypeLibraryGD {
@@ -534,7 +641,48 @@ impl IResource for VoxelBlockyTypeLibraryGD {
         Self {
             base,
             type_count: 0,
+            library: voxel_core::meshers::blocky::BakedLibrary::default(),
         }
+    }
+}
+
+#[godot_api]
+impl VoxelBlockyTypeLibraryGD {
+    /// Append a solid-color blocky type and return its id (the index of the
+    /// new model). Mirrors the C++ `VoxelBlockyTypeLibrary::add_type`.
+    #[func]
+    fn add_color_type(&mut self, r: f32, g: f32, b: f32, a: f32) -> i32 {
+        let model = voxel_core::meshers::blocky::BakedModel {
+            color: voxel_core::math::Color::new(r, g, b, a),
+            empty: false,
+            ..voxel_core::meshers::blocky::BakedModel::default()
+        };
+        let id = self.library.models.len() as i32;
+        self.library.models.push(model);
+        self.type_count = self.library.models.len() as i32;
+        id
+    }
+
+    /// Returns the number of registered types (read-only `#[var]` mirror).
+    #[func]
+    fn get_type_count(&self) -> i32 {
+        self.type_count
+    }
+
+    /// Returns `true` if the type at `id` exists in the library.
+    #[func]
+    fn has_type(&self, id: i32) -> bool {
+        self.library.has_model(id as u32)
+    }
+}
+
+impl VoxelBlockyTypeLibraryGD {
+    /// Borrow the underlying [`BakedLibrary`]. Used by sibling binding classes
+    /// (the blocky mesher resource) that need direct access to run the blocky
+    /// mesher without round-tripping through Godot calls.
+    #[allow(dead_code)]
+    pub fn core_library(&self) -> &voxel_core::meshers::blocky::BakedLibrary {
+        &self.library
     }
 }
 

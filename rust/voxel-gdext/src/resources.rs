@@ -5,12 +5,18 @@
 
 use godot::prelude::*;
 
+use voxel_core::math::Vector3i;
+
 // ---------------------------------------------------------------------------
 // VoxelMesherTransvoxelGD — Resource wrapper for TransvoxelMesher config
 // ---------------------------------------------------------------------------
 
 /// Configuration Resource for the transvoxel smooth terrain mesher.
 /// Exposes mesher settings to the Godot inspector.
+///
+/// Wraps [`voxel_core::meshers::TransvoxelMesher`] — `build_vertex_count` runs
+/// the real transvoxel extraction over a `VoxelBufferGD` and returns the total
+/// vertex count, exercising the full mesher pipeline through the binding.
 #[derive(GodotClass)]
 #[class(base = Resource, tool)]
 pub struct VoxelMesherTransvoxelGD {
@@ -27,6 +33,47 @@ impl IResource for VoxelMesherTransvoxelGD {
             base,
             sdf_channel: 1,
         }
+    }
+}
+
+#[godot_api]
+impl VoxelMesherTransvoxelGD {
+    /// Build the transvoxel mesh from a `VoxelBufferGD` and return the total
+    /// vertex count. `buffer` must be a `VoxelBufferGD`; `lod_hint` toggles
+    /// transition-cell generation on the +X/+Z seam faces.
+    ///
+    /// Returns -1 if `buffer` is not a `VoxelBufferGD`.
+    #[func]
+    fn build_vertex_count(&self, buffer: Gd<RefCounted>, lod_hint: bool) -> i64 {
+        let Ok(buf) = buffer.try_cast::<crate::voxel_buffer::VoxelBufferGD>() else {
+            return -1;
+        };
+        let bound = buf.bind();
+        let mesher = voxel_core::meshers::TransvoxelMesher::new()
+            .with_sdf_channel(self.sdf_channel.max(0) as usize);
+        let mut input =
+            voxel_core::meshers::MesherInput::new(bound.core_buffer(), Vector3i::zero(), 0);
+        input.lod_hint = lod_hint;
+        let mut output = voxel_core::meshers::MesherOutput::default();
+        voxel_core::meshers::VoxelMesher::build(&mesher, &mut output, &input);
+        output.total_vertex_count() as i64
+    }
+
+    /// Build the transvoxel mesh and return the total triangle count.
+    #[func]
+    fn build_triangle_count(&self, buffer: Gd<RefCounted>, lod_hint: bool) -> i64 {
+        let Ok(buf) = buffer.try_cast::<crate::voxel_buffer::VoxelBufferGD>() else {
+            return -1;
+        };
+        let bound = buf.bind();
+        let mesher = voxel_core::meshers::TransvoxelMesher::new()
+            .with_sdf_channel(self.sdf_channel.max(0) as usize);
+        let mut input =
+            voxel_core::meshers::MesherInput::new(bound.core_buffer(), Vector3i::zero(), 0);
+        input.lod_hint = lod_hint;
+        let mut output = voxel_core::meshers::MesherOutput::default();
+        voxel_core::meshers::VoxelMesher::build(&mesher, &mut output, &input);
+        output.total_triangle_count() as i64
     }
 }
 
@@ -118,7 +165,7 @@ impl VoxelColorPaletteGD {
     /// Set the RGBA color for palette entry `index` (0-255).
     #[func]
     fn set_color(&mut self, index: i32, r: i32, g: i32, b: i32, a: i32) {
-        if index >= 0 && index < 256 {
+        if (0..256).contains(&index) {
             let c = voxel_core::math::Color8::new(
                 r.clamp(0, 255) as u8,
                 g.clamp(0, 255) as u8,
@@ -132,7 +179,7 @@ impl VoxelColorPaletteGD {
     /// Get the RGBA color for palette entry `index`. Returns [r, g, b, a].
     #[func]
     fn get_color(&self, index: i32) -> PackedInt32Array {
-        if index >= 0 && index < 256 {
+        if (0..256).contains(&index) {
             let c = self.palette.get_color8(index as u8);
             PackedInt32Array::from(&[c.r as i32, c.g as i32, c.b as i32, c.a as i32])
         } else {

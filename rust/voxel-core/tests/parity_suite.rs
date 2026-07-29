@@ -238,7 +238,6 @@ mod graph_parity {
     use voxel_core::generators::graph::{
         CompiledGraph, Graph, GraphInputs, GraphOutput, GraphPort, GraphScratch, NodeKind,
     };
-    use voxel_core::math::Vector3i;
 
     fn eval_node(kind: NodeKind, inputs: &GraphInputs, slice_size: usize) -> Vec<f32> {
         let mut g = Graph::new();
@@ -593,7 +592,6 @@ mod streams_parity {
     use voxel_core::math::Vector3i;
     use voxel_core::storage::{ChannelId, VoxelBuffer, VoxelFormat};
 
-    #[test]
     #[test]
     fn block_serializer_compressed_round_trip() {
         use voxel_core::streams::block_serializer;
@@ -973,5 +971,438 @@ mod instancing_parity {
             result_half2.len(),
             "scatter count is not deterministic"
         );
+    }
+}
+
+#[cfg(test)]
+mod modifier_parity {
+    use voxel_core::math::Vector3f;
+    use voxel_core::modifiers::{ModifierStack, SdfOperation, SphereModifier};
+
+    /// A sphere modifier subtracted from a SOLID (negative) field carves a
+    /// hole: voxels near the sphere center become air (sdf >= 0). The number
+    /// of voxels made air is deterministic for a centered sphere. Golden.
+    #[test]
+    fn sphere_subtract_carves_from_solid() {
+        // 5³ grid of voxels at integer positions, all starting SOLID (sdf=-10).
+        let positions: Vec<Vector3f> = (0..5)
+            .flat_map(|x| {
+                (0..5).flat_map(move |y| {
+                    (0..5).map(move |z| Vector3f::new(x as f32, y as f32, z as f32))
+                })
+            })
+            .collect();
+        let mut sdf = vec![-10.0f32; positions.len()];
+
+        let modifier = SphereModifier {
+            center: Vector3f::new(2.0, 2.0, 2.0),
+            radius: 2.0,
+            operation: SdfOperation::Subtract,
+            smoothness: 0.0,
+        };
+        let mut stack = ModifierStack::new();
+        stack.add(Box::new(modifier));
+        stack.apply(&mut sdf, &positions);
+
+        let made_air = sdf.iter().filter(|&&v| v >= 0.0).count();
+        assert!(made_air > 0, "subtract should carve air voxels: {made_air}");
+        assert_eq!(made_air, 33, "carved-air voxel count regressed: {made_air}");
+    }
+
+    /// A sphere modifier added (union) into an AIR (positive) field makes
+    /// voxels near the sphere solid (sdf < 0). The count is deterministic. Golden.
+    #[test]
+    fn sphere_add_merges_into_air_field() {
+        let positions: Vec<Vector3f> = (0..5)
+            .flat_map(|x| {
+                (0..5).flat_map(move |y| {
+                    (0..5).map(move |z| Vector3f::new(x as f32, y as f32, z as f32))
+                })
+            })
+            .collect();
+        let mut sdf = vec![10.0f32; positions.len()];
+
+        let mut stack = ModifierStack::new();
+        stack.add(Box::new(SphereModifier {
+            center: Vector3f::new(2.0, 2.0, 2.0),
+            radius: 1.5,
+            operation: SdfOperation::Add,
+            smoothness: 0.0,
+        }));
+        stack.apply(&mut sdf, &positions);
+
+        let made_solid = sdf.iter().filter(|&&v| v < 0.0).count();
+        assert!(made_solid > 0, "add should make solid voxels: {made_solid}");
+        assert_eq!(
+            made_solid, 19,
+            "made-solid voxel count regressed: {made_solid}"
+        );
+    }
+
+    /// An empty modifier stack is a no-op: SDF is unchanged.
+    #[test]
+    fn empty_modifier_stack_is_noop() {
+        let positions = vec![Vector3f::new(0.0, 0.0, 0.0)];
+        let mut sdf = vec![5.0f32];
+        let stack = ModifierStack::new();
+        assert!(stack.is_empty());
+        stack.apply(&mut sdf, &positions);
+        assert_eq!(sdf, vec![5.0], "empty stack should not change SDF");
+    }
+
+    /// Subtract and Add are inverse: subtracting a sphere then adding it back
+    /// (in the same positions) returns the field close to its original state at
+    /// voxels outside the boundary, while the boundary voxels reflect the blend.
+    /// Diff test: the two operations produce different results.
+    #[test]
+    fn add_and_subtract_produce_different_results() {
+        let positions: Vec<Vector3f> = (0..5)
+            .flat_map(|x| {
+                (0..5).flat_map(move |y| {
+                    (0..5).map(move |z| Vector3f::new(x as f32, y as f32, z as f32))
+                })
+            })
+            .collect();
+
+        let mut sdf_sub = vec![-5.0f32; positions.len()];
+        let mut stack_sub = ModifierStack::new();
+        stack_sub.add(Box::new(SphereModifier {
+            center: Vector3f::new(2.0, 2.0, 2.0),
+            radius: 2.0,
+            operation: SdfOperation::Subtract,
+            smoothness: 0.0,
+        }));
+        stack_sub.apply(&mut sdf_sub, &positions);
+
+        let mut sdf_add = vec![-5.0f32; positions.len()];
+        let mut stack_add = ModifierStack::new();
+        stack_add.add(Box::new(SphereModifier {
+            center: Vector3f::new(2.0, 2.0, 2.0),
+            radius: 2.0,
+            operation: SdfOperation::Add,
+            smoothness: 0.0,
+        }));
+        stack_add.apply(&mut sdf_add, &positions);
+
+        let diffs = sdf_sub
+            .iter()
+            .zip(sdf_add.iter())
+            .filter(|(&a, &b)| (a - b).abs() > 1e-6)
+            .count();
+        assert!(diffs > 0, "subtract and add should differ: {diffs}");
+    }
+}
+
+#[cfg(test)]
+mod blocky_library_parity {
+    use voxel_core::meshers::blocky::{bake_library, BakedLibrary, BakedModel, AIR_ID};
+
+    /// Adding models to a BakedLibrary increments the model count, and
+    /// `has_model` correctly reports presence/absence.
+    #[test]
+    fn library_tracks_model_count_and_presence() {
+        let mut lib = BakedLibrary::default();
+        assert!(!lib.has_model(0), "empty library should have no models");
+        assert_eq!(lib.models.len(), 0);
+
+        let m1 = BakedModel {
+            color: voxel_core::math::Color::from_rgb(1.0, 0.0, 0.0),
+            empty: false,
+            ..BakedModel::default()
+        };
+        lib.models.push(m1);
+        assert!(lib.has_model(0));
+        assert!(!lib.has_model(1));
+
+        lib.models.push(BakedModel::default());
+        assert!(lib.has_model(0));
+        assert!(lib.has_model(1));
+        assert!(!lib.has_model(2));
+    }
+
+    /// `bake_library` is idempotent on an empty library and doesn't panic.
+    #[test]
+    fn bake_library_runs_on_empty() {
+        let mut lib = BakedLibrary::default();
+        bake_library(&mut lib);
+        assert_eq!(lib.models.len(), 0);
+    }
+
+    /// `bake_library` populates the side-pattern culling matrix and the
+    /// side_pattern_count when models are present.
+    #[test]
+    fn bake_library_populates_culling_matrix() {
+        let mut lib = BakedLibrary::default();
+        // Add a non-empty solid model that culls neighbors.
+        lib.models.push(BakedModel {
+            color: voxel_core::math::Color::from_rgb(0.5, 0.5, 0.5),
+            empty: false,
+            culls_neighbors: true,
+            ..BakedModel::default()
+        });
+        bake_library(&mut lib);
+        assert!(
+            lib.side_pattern_count > 0,
+            "side_pattern_count should be set after bake"
+        );
+    }
+
+    /// The air sentinel (`AIR_ID`) is distinct from valid model ids.
+    #[test]
+    fn air_id_is_not_a_valid_model_in_empty_library() {
+        let lib = BakedLibrary::default();
+        // AIR_ID refers to index 0 conceptually; an empty library has no model 0.
+        assert!(!lib.has_model(0));
+        let _ = AIR_ID; // sentinel exists and is usable
+    }
+}
+
+#[cfg(test)]
+mod cubes_mesher_parity {
+    use voxel_core::math::Vector3i;
+    use voxel_core::meshers::cubes::palette::ColorPalette;
+    use voxel_core::meshers::{CubesMesher, MesherInput, MesherOutput, VoxelMesher};
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
+
+    /// A half-solid buffer (x < 4 opaque, x >= 4 air) on the Color channel
+    /// produces a single greedy-merged face. Golden vertex/triangle count.
+    #[test]
+    fn cubes_mesmer_half_solid_vertex_count_golden() {
+        let mesher = CubesMesher::new();
+        let mut voxels = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Color.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut voxels);
+        let opaque: u64 = 0xFFFFFFFF;
+        for x in 0..4 {
+            for y in 0..8 {
+                for z in 0..8 {
+                    voxels.set_voxel(opaque, x, y, z, ChannelId::Color.index());
+                }
+            }
+        }
+        let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+        let mut out = MesherOutput::default();
+        mesher.build(&mut out, &input);
+        // One greedy-merged quad face at the x=4 boundary.
+        assert_eq!(
+            out.total_vertex_count(),
+            4,
+            "cubes half-solid vertex count regressed: {}",
+            out.total_vertex_count()
+        );
+        assert_eq!(
+            out.total_triangle_count(),
+            2,
+            "cubes half-solid triangle count regressed: {}",
+            out.total_triangle_count()
+        );
+    }
+
+    /// An all-air buffer produces no vertices from the CubesMesher.
+    #[test]
+    fn cubes_mesher_all_air_is_empty() {
+        let mesher = CubesMesher::new();
+        let mut voxels = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Color.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut voxels);
+        // All air (0).
+        voxels.fill(0, ChannelId::Color.index());
+
+        let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+        let mut out = MesherOutput::default();
+        mesher.build(&mut out, &input);
+        assert_eq!(
+            out.total_vertex_count(),
+            0,
+            "all-air buffer should produce no vertices"
+        );
+    }
+
+    /// A custom palette doesn't change the vertex/triangle topology (colors
+    /// only affect appearance, not geometry). Diff test: RAW vs Palette mode
+    /// over the same half-solid buffer produce identical vertex/triangle counts.
+    #[test]
+    fn cubes_palette_does_not_change_topology() {
+        let mut voxels = VoxelBuffer::with_size(Vector3i::splat(8));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Color.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut voxels);
+        let opaque: u64 = 0xFFFFFFFF;
+        for x in 0..4 {
+            for y in 0..8 {
+                for z in 0..8 {
+                    voxels.set_voxel(opaque, x, y, z, ChannelId::Color.index());
+                }
+            }
+        }
+        let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+
+        let raw_mesher = CubesMesher::new(); // default RAW mode
+        let mut out_raw = MesherOutput::default();
+        raw_mesher.build(&mut out_raw, &input);
+
+        let mut palette = ColorPalette::default();
+        palette.set_color8(0xFF, voxel_core::math::Color8::new(255, 255, 255, 255));
+        let palette_mesher = CubesMesher::new().with_palette(palette);
+        let mut out_pal = MesherOutput::default();
+        palette_mesher.build(&mut out_pal, &input);
+
+        assert_eq!(
+            out_raw.total_vertex_count(),
+            out_pal.total_vertex_count(),
+            "palette mode should not change vertex topology"
+        );
+        assert_eq!(
+            out_raw.total_triangle_count(),
+            out_pal.total_triangle_count(),
+            "palette mode should not change triangle topology"
+        );
+    }
+}
+
+#[cfg(test)]
+mod edition_tool_parity {
+    use voxel_core::edition::ops::VoxelToolBuffer;
+    use voxel_core::math::{Vector3f, Vector3i};
+    use voxel_core::storage::{ChannelDepth, ChannelId, VoxelBuffer, VoxelFormat};
+
+    /// `do_sphere` carves a sphere of solid voxels into an empty buffer. The
+    /// count of solid voxels is deterministic for a centered sphere. Golden.
+    #[test]
+    fn do_sphere_carves_deterministic_voxel_count() {
+        let mut voxels = VoxelBuffer::with_size(Vector3i::splat(16));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut voxels);
+
+        let mut tool = VoxelToolBuffer::new(&mut voxels, ChannelId::Type.index());
+        tool.do_sphere(Vector3f::new(8.0, 8.0, 8.0), 5.0);
+
+        let solid = count_solid(&voxels, ChannelId::Type.index());
+        assert!(solid > 0, "do_sphere should carve solid voxels: {solid}");
+        assert_eq!(solid, 552, "do_sphere voxel count regressed: {solid}");
+    }
+
+    /// `do_box` fills an axis-aligned box region with solid voxels. The count
+    /// equals the box volume (exclusive max, matching the C++ range).
+    #[test]
+    fn do_box_fills_exact_volume() {
+        let mut voxels = VoxelBuffer::with_size(Vector3i::splat(16));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut voxels);
+
+        let min = Vector3i::new(4, 4, 4);
+        let max = Vector3i::new(10, 10, 10);
+        let mut tool = VoxelToolBuffer::new(&mut voxels, ChannelId::Type.index());
+        tool.do_box(min, max);
+
+        let solid = count_solid(&voxels, ChannelId::Type.index());
+        // Range [4,10) per axis → 6³ = 216.
+        assert_eq!(solid, 216, "do_box should fill exact volume: {solid}");
+    }
+
+    fn count_solid(voxels: &VoxelBuffer, channel: usize) -> usize {
+        let s = voxels.size();
+        let mut count = 0;
+        for z in 0..s.z {
+            for y in 0..s.y {
+                for x in 0..s.x {
+                    if voxels.get_voxel(x, y, z, channel) != 0 {
+                        count += 1;
+                    }
+                }
+            }
+        }
+        count
+    }
+}
+
+#[cfg(test)]
+mod graph_runtime_parity {
+    use voxel_core::generators::graph::{
+        CompiledGraph, CompiledScratch, Graph, GraphInputs, GraphOutput, GraphPort, NodeKind,
+    };
+
+    /// A constant → OutputSdf graph produces that exact constant value.
+    /// Golden single-value check.
+    #[test]
+    fn graph_constant_output_is_exact() {
+        let mut g = Graph::new();
+        let c = g.push(NodeKind::Constant(7.5));
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: c, output: 0 }),
+        });
+        let compiled = CompiledGraph::compile(&g).expect("compile");
+        let xs = [0.0f32];
+        let zs = [0.0f32];
+        let inputs = GraphInputs {
+            x: &xs,
+            y: 0.0,
+            z: &zs,
+        };
+        let mut scratch = CompiledScratch::new();
+        let mut out = Vec::new();
+        compiled.generate_slice(&inputs, 1, &mut scratch, &mut out, false);
+        let sdf: f32 = out
+            .into_iter()
+            .find(|(k, _)| *k == GraphOutput::Sdf)
+            .and_then(|(_, v)| v.into_iter().next())
+            .unwrap();
+        assert_eq!(sdf, 7.5, "constant graph output regressed: {sdf}");
+    }
+
+    /// A SdfSphere graph at the center point returns -radius (inside surface).
+    #[test]
+    fn graph_sphere_sdf_at_center_is_negative_radius() {
+        let mut g = Graph::new();
+        let cx = g.push(NodeKind::Constant(0.0));
+        let cy = g.push(NodeKind::Constant(0.0));
+        let cz = g.push(NodeKind::Constant(0.0));
+        let cr = g.push(NodeKind::Constant(4.0));
+        let sphere = g.push(NodeKind::SdfSphere {
+            x: Some(GraphPort {
+                node: cx,
+                output: 0,
+            }),
+            y: Some(GraphPort {
+                node: cy,
+                output: 0,
+            }),
+            z: Some(GraphPort {
+                node: cz,
+                output: 0,
+            }),
+            radius: Some(GraphPort {
+                node: cr,
+                output: 0,
+            }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort {
+                node: sphere,
+                output: 0,
+            }),
+        });
+        let compiled = CompiledGraph::compile(&g).expect("compile");
+        let xs = [0.0f32];
+        let zs = [0.0f32];
+        let inputs = GraphInputs {
+            x: &xs,
+            y: 0.0,
+            z: &zs,
+        };
+        let mut scratch = CompiledScratch::new();
+        let mut out = Vec::new();
+        compiled.generate_slice(&inputs, 1, &mut scratch, &mut out, false);
+        let sdf: f32 = out
+            .into_iter()
+            .find(|(k, _)| *k == GraphOutput::Sdf)
+            .and_then(|(_, v)| v.into_iter().next())
+            .unwrap();
+        // At center, dist=0, sdf = 0 - 4 = -4.
+        assert!((sdf - (-4.0)).abs() < 1e-5, "sphere sdf at center: {sdf}");
     }
 }

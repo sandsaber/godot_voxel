@@ -76,6 +76,20 @@ impl VoxelBufferGD {
     }
 }
 
+impl VoxelBufferGD {
+    /// Borrow the underlying engine-agnostic [`VoxelBuffer`]. Used by sibling
+    /// binding classes (mesher resources, modifiers) that need direct access
+    /// to run voxel-core logic without round-tripping through Godot calls.
+    pub fn core_buffer(&self) -> &VoxelBuffer {
+        &self.buffer
+    }
+
+    /// Mutably borrow the underlying [`VoxelBuffer`].
+    pub fn core_buffer_mut(&mut self) -> &mut VoxelBuffer {
+        &mut self.buffer
+    }
+}
+
 // ---------------------------------------------------------------------------
 // VoxelInstancerGD — Node3D for scatter-based instance placement
 // ---------------------------------------------------------------------------
