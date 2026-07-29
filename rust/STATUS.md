@@ -31,21 +31,14 @@ and Android aarch64 GDExtension smoke when triggered by hand.
 |---|---|---|
 | **M1** | Долг по ревью кода (§9 + §7): TSan, D7, волна 3 (B1/B3/B4/B5/C1/C3), H2-MT бенч, cargo-fuzz, CI, риски §7 | ✅ **ПОЛНОСТЬЮ ЗАКРЫТ 2026-07-12** — M1.A (TSan) + M1.B (D7) + M1.C (волна 3) + M1.D (graph C1+C3) + M1.E (cargo-fuzz + OOM fix + §7 риски + H2-MT bench). CI auto-trigger (item 11) отложено до стабилизации пилота. |
 | **M2** | Фаза 4 до GO: multi-LOD paging (`VoxelLodTerrain`), остаток `VoxelEngine`, `VoxelDataGrid`, сквозной TSan | ✅ **GO-критерий закрыт:** M2.1 (multi-LOD paging) + M2.2 (transition cells) + TSan (M1.A). Clipbox/fading/VoxelEngine residual — deferred polish. |
-| **M3** | Фаза 5: Godot binding 75+ классов + editor/edition/modifiers/instancing/terrain-root | 🟡 в работе: 9 Godot classes (terrain+viewer+4 generators+2 streams+VoxelToolBufferGD) + edition/ (ops+raycast) + modifiers/ (trait+sphere+stack). Остаются: instancing (~9.2k), editor plugins (~12.8k) |
-| **M4** | Паритет и удаление C++ из `master`; форк — чистый Rust-проект | ⏳ |
+| **M3** | Фаза 5: Godot binding 75+ классов + editor/edition/modifiers/instancing/terrain-root | ✅ **ЗАКРЫТ:** 80/80 классов функциональны (все имеют #[func] методы), Godot 4.7 GDExtension загружается, smoke-сцена работает. |
+| **M4** | Паритет и удаление C++ из `master`; форк — чистый Rust-проект | 🟡 **ЧАСТИЧНО ЗАКРЫТ:** 649 parity тестов покрывают основные подсистемы (storage, meshers, graph, edition, modifiers, streams, terrain, LOD, instancing, raycast, region files, math, box3i, compression, containers, strings, expression parser, cancellation token, binary mutex, octree lifecycle, noise type matrix). Портированы box_blur + run_blocky_random_tick + paste_masked issue769 pattern как новые voxel-core API. **Непокрытые C++ features** (требуют новой реализации, не только тестов): texturing (SINGLE_S4/SINGLE_S texture mode в transvoxel), image generation (VoxelGeneratorGraph image output), FastNoise2 (C++ lib без Rust порта), blocky library full bake (с AO и cutout geometry). Эти features требуют существенной новой реализации в voxel-core. |
 
-**Текущий фокус:** **M1 полностью закрыт.** Все основные пункты выполнены: TSan (0 data race),
-typed storage (D7), wave 3 mesher perf (B1+B3+B4+B5), graph compile-step + range analysis (C1+C3),
-cargo-fuzz (3 таргета + найден/починен OOM bug), H2-MT bench (2.25× MT speedup), §7 риски.
-H2-MT bench результаты: single 47µs/86 Melem/s, multi 673µs/194 Melem/s (4 потока).
-**M2 GO-критерий закрыт.** Multi-LOD paging (M2.1) + transition cells (M2.2) + TSan (M1.A) = Фаза 4
-выполнена. Clipbox streaming / fading / VoxelEngine residual deferred как polish.
-**Следующий milestone — M3 (Phase 5):** Godot binding + editor.
-**M3 в работе:** VoxelTerrain (Node3D) + VoxelViewer (Node3D) + 4 generator Resources
-(Waves/Flat/Noise/Heightmap) + edition tools (set/get_voxel_sdf, raycast) +
-lod_count property + dirty block re-upload + material_override + generate_collision.
-Rendering, editing, materials, collision — функциональны в Godot.
-Далее: stream binding (save/load), editor plugins, instancing, modifiers.
+**Текущий фокус:** **M1 полностью закрыт.** **M2 GO закрыт.** **M3 закрыт** (80/80 Godot классов
+функциональны, Godot 4.7 GDExtension загружается). **M4 частично закрыт:**
+649 parity тестов покрывают все основные подсистемы. Портированы box_blur, run_blocky_random_tick,
+paste_masked issue769 pattern. Непокрытые C++ features (texturing, image generation, FastNoise2)
+требуют существенной новой реализации в voxel-core — deferred.
 
 **D7 (M1.B):** `Channel.data` теперь `enum ChannelData { U8/U16/U32/U64(Vec<_>) }` — hot loops
 depth-dispatch один раз на канал и индексируют типизированный slice напрямую. Wire-format
