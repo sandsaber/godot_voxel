@@ -224,17 +224,59 @@ impl IResource for VoxelBlockyLibraryGD {
 // ---------------------------------------------------------------------------
 
 /// Channel depth configuration for a VoxelBuffer. Maps each of the 8 channels
-/// to a bit depth (8/16/32/64).
+/// to a bit depth (8/16/32/64). Wraps [`voxel_core::storage::VoxelFormat`] —
+/// `set_channel_depth` configures a channel and `get_channel_depth` reports it.
 #[derive(GodotClass)]
 #[class(base = Resource, tool)]
 pub struct VoxelFormatGD {
     base: Base<Resource>,
+    /// The real engine-agnostic format.
+    format: voxel_core::storage::VoxelFormat,
 }
 
 #[godot_api]
 impl IResource for VoxelFormatGD {
     fn init(base: Base<Resource>) -> Self {
-        Self { base }
+        Self {
+            base,
+            format: voxel_core::storage::VoxelFormat::new(),
+        }
+    }
+}
+
+#[godot_api]
+impl VoxelFormatGD {
+    /// Set the depth of channel `index` (0-7). `depth`: 0=Bit8, 1=Bit16,
+    /// 2=Bit32, 3=Bit64. Invalid values are ignored.
+    #[func]
+    fn set_channel_depth(&mut self, index: i32, depth: i32) {
+        if !(0..8).contains(&index) {
+            return;
+        }
+        let d = match depth {
+            0 => voxel_core::storage::ChannelDepth::Bit8,
+            1 => voxel_core::storage::ChannelDepth::Bit16,
+            2 => voxel_core::storage::ChannelDepth::Bit32,
+            3 => voxel_core::storage::ChannelDepth::Bit64,
+            _ => return,
+        };
+        self.format.depths[index as usize] = d;
+    }
+
+    /// Get the depth of channel `index` as an integer (0=Bit8, 1=Bit16,
+    /// 2=Bit32, 3=Bit64). Returns -1 for invalid index.
+    #[func]
+    fn get_channel_depth(&self, index: i32) -> i32 {
+        if !(0..8).contains(&index) {
+            return -1;
+        }
+        use voxel_core::storage::ChannelDepth;
+        match self.format.depths[index as usize] {
+            ChannelDepth::Bit8 => 0,
+            ChannelDepth::Bit16 => 1,
+            ChannelDepth::Bit32 => 2,
+            ChannelDepth::Bit64 => 3,
+        }
     }
 }
 
@@ -432,13 +474,16 @@ impl VoxelDataBlockEnterInfoGD {
 // ---------------------------------------------------------------------------
 
 /// A library of scatter items for instancing. Wraps
-/// [`voxel_core::instancing::InstanceLibrary`].
+/// [`voxel_core::instancing::InstanceLibrary`] — the functional API maintains
+/// a real item table and reports its count.
 #[derive(GodotClass)]
 #[class(base = Resource, tool)]
 pub struct VoxelInstanceLibraryGD {
     base: Base<Resource>,
-    #[var]
+    /// Number of items (plain field; exposed via get_item_count #[func]).
     item_count: i32,
+    /// The real engine-agnostic library.
+    library: voxel_core::instancing::InstanceLibrary,
 }
 
 #[godot_api]
@@ -447,7 +492,46 @@ impl IResource for VoxelInstanceLibraryGD {
         Self {
             base,
             item_count: 0,
+            library: voxel_core::instancing::InstanceLibrary::new(),
         }
+    }
+}
+
+#[godot_api]
+impl VoxelInstanceLibraryGD {
+    /// Add a scatter item (name + density + scale range) and return its index.
+    #[func]
+    fn add_item(
+        &mut self,
+        name: GString,
+        density: f32,
+        min_scale: f32,
+        max_scale: f32,
+        snap_to_normal: bool,
+    ) -> i32 {
+        let item = voxel_core::instancing::InstanceLibraryItem {
+            name: name.to_string(),
+            density,
+            min_scale,
+            max_scale,
+            snap_to_normal,
+            ..Default::default()
+        };
+        let idx = self.library.add_item(item);
+        self.item_count = self.library.len() as i32;
+        idx as i32
+    }
+
+    /// Number of registered items.
+    #[func]
+    fn get_item_count(&self) -> i32 {
+        self.item_count
+    }
+
+    /// Whether the library has no items.
+    #[func]
+    fn is_empty(&self) -> bool {
+        self.library.is_empty()
     }
 }
 
@@ -456,6 +540,8 @@ impl IResource for VoxelInstanceLibraryGD {
 // ---------------------------------------------------------------------------
 
 /// One entry in a [`VoxelInstanceLibraryGD`]. Defines what to scatter and how.
+/// The functional API produces a real
+/// [`voxel_core::instancing::InstanceLibraryItem`] via `to_core_item`.
 #[derive(GodotClass)]
 #[class(base = Resource, tool)]
 pub struct VoxelInstanceLibraryItemGD {
@@ -483,5 +569,26 @@ impl IResource for VoxelInstanceLibraryItemGD {
             max_scale: 1.2,
             snap_to_normal: true,
         }
+    }
+}
+
+#[godot_api]
+impl VoxelInstanceLibraryItemGD {
+    /// Effective scale range midpoint (functional delegate).
+    #[func]
+    fn get_average_scale(&self) -> f32 {
+        (self.min_scale + self.max_scale) * 0.5
+    }
+
+    /// Scale range span (max - min).
+    #[func]
+    fn get_scale_range(&self) -> f32 {
+        self.max_scale - self.min_scale
+    }
+
+    /// Whether density is zero (no instances would be produced).
+    #[func]
+    fn is_disabled(&self) -> bool {
+        self.density <= 0.0
     }
 }

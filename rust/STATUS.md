@@ -15,7 +15,7 @@
 | 4 — Terrain + threading (storage/streaming/meshing/paging/graph) | ✅ GO (multi-LOD paging M2.1 + transition cells M2.2 + TSan M1.A) | 751 unit + 11 integration + 5 TSan |
 | 5 — Godot binding + editor | ⏳ not started | — |
 
-**Total:** 766 unit tests + 144 parity + 5 integration + 1 doc-test, clippy clean.
+**Total:** 766 unit tests + 154 parity + 5 integration + 1 doc-test, clippy clean.
 **CI:** automatic Rust workflow is intentionally disabled for now. `.github/workflows/rust.yml`
 is manual-only (`workflow_dispatch`) and can run fmt, workspace tests, clippy, workspace build,
 and Android aarch64 GDExtension smoke when triggered by hand.
@@ -154,7 +154,7 @@ rust/
 
 ```bash
 cd rust
-cargo test -p voxel-core       # 766 unit + 144 parity + 5 integration + 1 doc-test
+cargo test -p voxel-core       # 766 unit + 154 parity + 5 integration + 1 doc-test
 cargo build -p voxel-gdext     # GDExtension .so (loads in Godot 4.7)
 cargo clippy --workspace --all-targets   # clean
 cargo bench                    # transvoxel benches

@@ -315,6 +315,22 @@ impl IRefCounted for VoxelRaycastResultGD {
     }
 }
 
+#[godot_api]
+impl VoxelRaycastResultGD {
+    /// Whether this result represents a valid hit (distance > 0 and a
+    /// non-zero normal). A default-constructed result reports no hit.
+    #[func]
+    fn did_hit(&self) -> bool {
+        self.distance > 0.0 && (self.normal_x != 0 || self.normal_y != 0 || self.normal_z != 0)
+    }
+
+    /// The hit position as a packed array [x, y, z].
+    #[func]
+    fn get_hit_position(&self) -> PackedInt32Array {
+        PackedInt32Array::from(&[self.hit_x, self.hit_y, self.hit_z][..])
+    }
+}
+
 // ---------------------------------------------------------------------------
 // VoxelNodeGD — base Node3D for voxel volumes (VoxelNode equivalent)
 // ---------------------------------------------------------------------------

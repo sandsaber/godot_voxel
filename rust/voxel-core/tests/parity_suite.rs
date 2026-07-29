@@ -3629,4 +3629,309 @@ mod block_serializer_v4_parity {
         .unwrap();
         assert_eq!(buf2.get_voxel(3, 3, 3, ChannelId::Type.index()), 3);
     }
+
+    #[test]
+    fn block_v4_lz4_round_trips_sdf_bit16() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(16));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit16;
+        fmt.configure_buffer(&mut buf);
+        buf.clear_channel_f(ChannelId::Sdf.index(), -2.0);
+        let mut payload = Vec::new();
+        block_serializer::serialize_and_compress(&buf, &mut payload, Compression::Lz4).unwrap();
+        let mut buf2 = VoxelBuffer::with_size(Vector3i::splat(16));
+        fmt.configure_buffer(&mut buf2);
+        block_serializer::decompress_and_deserialize_with_limits(
+            &payload,
+            &mut buf2,
+            DecodeLimits::default(),
+        )
+        .unwrap();
+        let val = buf2.get_voxel_f(4, 4, 4, ChannelId::Sdf.index());
+        assert!(
+            (val - (-2.0)).abs() < 0.1,
+            "v4 LZ4 SDF Bit16 round-trip: {val}"
+        );
+    }
+
+    #[test]
+    fn block_v4_lz4_round_trips_sdf_bit64() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(16));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit64;
+        fmt.configure_buffer(&mut buf);
+        buf.clear_channel_f(ChannelId::Sdf.index(), -3.75);
+        let mut payload = Vec::new();
+        block_serializer::serialize_and_compress(&buf, &mut payload, Compression::Lz4).unwrap();
+        let mut buf2 = VoxelBuffer::with_size(Vector3i::splat(16));
+        fmt.configure_buffer(&mut buf2);
+        block_serializer::decompress_and_deserialize_with_limits(
+            &payload,
+            &mut buf2,
+            DecodeLimits::default(),
+        )
+        .unwrap();
+        let val = buf2.get_voxel_f(4, 4, 4, ChannelId::Sdf.index());
+        assert!(
+            (val - (-3.75)).abs() < 1e-5,
+            "v4 LZ4 SDF Bit64 round-trip: {val}"
+        );
+    }
+
+    #[test]
+    fn block_v4_preserves_non_uniform_data() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::splat(4));
+        let mut fmt = VoxelFormat::new();
+        fmt.depths[ChannelId::Type.index()] = ChannelDepth::Bit8;
+        fmt.configure_buffer(&mut buf);
+        for z in 0..4 {
+            for y in 0..4 {
+                for x in 0..4 {
+                    buf.set_voxel(
+                        (x + y * 4 + z * 16) as u64,
+                        x,
+                        y,
+                        z,
+                        ChannelId::Type.index(),
+                    );
+                }
+            }
+        }
+        let mut payload = Vec::new();
+        block_serializer::serialize_and_compress(&buf, &mut payload, Compression::Lz4).unwrap();
+        let mut buf2 = VoxelBuffer::with_size(Vector3i::splat(4));
+        fmt.configure_buffer(&mut buf2);
+        block_serializer::decompress_and_deserialize_with_limits(
+            &payload,
+            &mut buf2,
+            DecodeLimits::default(),
+        )
+        .unwrap();
+        for z in 0..4 {
+            for y in 0..4 {
+                for x in 0..4 {
+                    assert_eq!(
+                        buf2.get_voxel(x, y, z, ChannelId::Type.index()),
+                        (x + y * 4 + z * 16) as u64,
+                        "non-uniform voxel mismatch at ({x},{y},{z})"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod graph_combo_parity {
+    use voxel_core::generators::graph::{
+        CompiledGraph, CompiledScratch, Graph, GraphInputs, GraphOutput, GraphPort, NodeKind,
+    };
+
+    fn run(g: &Graph) -> f32 {
+        let c = CompiledGraph::compile(g).expect("compile");
+        let xs = [0.0f32];
+        let zs = [0.0f32];
+        let i = GraphInputs {
+            x: &xs,
+            y: 0.0,
+            z: &zs,
+        };
+        let mut s = CompiledScratch::new();
+        let mut o = Vec::new();
+        c.generate_slice(&i, 1, &mut s, &mut o, false);
+        o.into_iter()
+            .find(|(k, _)| *k == GraphOutput::Sdf)
+            .and_then(|(_, v)| v.into_iter().next())
+            .unwrap()
+    }
+
+    #[test]
+    fn graph_union_subtract_chain_golden() {
+        let mut g = Graph::new();
+        let na = g.push(NodeKind::Constant(5.0));
+        let nb = g.push(NodeKind::Constant(2.0));
+        let sub = g.push(NodeKind::SdfSubtract {
+            a: Some(GraphPort {
+                node: na,
+                output: 0,
+            }),
+            b: Some(GraphPort {
+                node: nb,
+                output: 0,
+            }),
+        });
+        let nc = g.push(NodeKind::Constant(1.0));
+        let u = g.push(NodeKind::SdfUnion {
+            a: Some(GraphPort {
+                node: sub,
+                output: 0,
+            }),
+            b: Some(GraphPort {
+                node: nc,
+                output: 0,
+            }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort { node: u, output: 0 }),
+        });
+        assert!((run(&g) - 1.0).abs() < 1e-5, "union-subtract chain");
+    }
+
+    #[test]
+    fn graph_add_then_multiply_golden() {
+        let mut g = Graph::new();
+        let na = g.push(NodeKind::Constant(2.0));
+        let nb = g.push(NodeKind::Constant(3.0));
+        let add = g.push(NodeKind::Add {
+            a: Some(GraphPort {
+                node: na,
+                output: 0,
+            }),
+            b: Some(GraphPort {
+                node: nb,
+                output: 0,
+            }),
+        });
+        let nc = g.push(NodeKind::Constant(4.0));
+        let mul = g.push(NodeKind::Multiply {
+            a: Some(GraphPort {
+                node: add,
+                output: 0,
+            }),
+            b: Some(GraphPort {
+                node: nc,
+                output: 0,
+            }),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort {
+                node: mul,
+                output: 0,
+            }),
+        });
+        assert!((run(&g) - 20.0).abs() < 1e-5, "add-then-multiply chain");
+    }
+
+    #[test]
+    fn graph_nested_smooth_ops_finite() {
+        let mut g = Graph::new();
+        let na = g.push(NodeKind::Constant(-1.0));
+        let nb = g.push(NodeKind::Constant(1.0));
+        let su = g.push(NodeKind::SdfSmoothUnion {
+            a: Some(GraphPort {
+                node: na,
+                output: 0,
+            }),
+            b: Some(GraphPort {
+                node: nb,
+                output: 0,
+            }),
+            smoothness: 0.5,
+        });
+        let nc = g.push(NodeKind::Constant(0.5));
+        let ss = g.push(NodeKind::SdfSmoothSubtract {
+            a: Some(GraphPort {
+                node: su,
+                output: 0,
+            }),
+            b: Some(GraphPort {
+                node: nc,
+                output: 0,
+            }),
+            smoothness: 0.3,
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort {
+                node: ss,
+                output: 0,
+            }),
+        });
+        let v = run(&g);
+        assert!(v.is_finite(), "nested smooth ops should be finite: {v}");
+    }
+
+    #[test]
+    fn graph_deep_chain_compiles() {
+        let mut g = Graph::new();
+        let mut prev = g.push(NodeKind::Constant(1.0));
+        for i in 0..6 {
+            let c = g.push(NodeKind::Constant(i as f32));
+            prev = g.push(NodeKind::Add {
+                a: Some(GraphPort {
+                    node: prev,
+                    output: 0,
+                }),
+                b: Some(GraphPort { node: c, output: 0 }),
+            });
+        }
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort {
+                node: prev,
+                output: 0,
+            }),
+        });
+        assert!((run(&g) - 16.0).abs() < 1e-5, "deep chain sum");
+    }
+}
+
+#[cfg(test)]
+mod scatter_transform_verify_parity {
+    use voxel_core::instancing::scatter::{InstanceGenerator, RandomScatterGenerator};
+    use voxel_core::instancing::ScatterConfig;
+    use voxel_core::math::Vector3f;
+
+    #[test]
+    fn scatter_positions_match_inputs() {
+        let gen = RandomScatterGenerator {
+            density: 1.0,
+            min_scale: 1.0,
+            max_scale: 1.0,
+            snap_to_normal: false,
+        };
+        let positions: Vec<_> = (0..10)
+            .map(|i| Vector3f::new(i as f32 * 3.0, (i * 2) as f32, (i * 5) as f32))
+            .collect();
+        let normals = vec![Vector3f::new(0.0, 1.0, 0.0); 10];
+        let result = gen.generate(&positions, &normals, 0, &ScatterConfig::default());
+        assert_eq!(result.len(), positions.len());
+        for (inst, pos) in result.iter().zip(positions.iter()) {
+            assert!((inst.position.x - pos.x).abs() < 1e-4, "pos x mismatch");
+            assert!((inst.position.y - pos.y).abs() < 1e-4, "pos y mismatch");
+            assert!((inst.position.z - pos.z).abs() < 1e-4, "pos z mismatch");
+        }
+    }
+
+    #[test]
+    fn scatter_density_one_produces_all() {
+        let gen = RandomScatterGenerator {
+            density: 1.0,
+            min_scale: 1.0,
+            max_scale: 1.0,
+            snap_to_normal: false,
+        };
+        let positions: Vec<_> = (0..25).map(|i| Vector3f::new(i as f32, 0.0, 0.0)).collect();
+        let normals = vec![Vector3f::new(0.0, 1.0, 0.0); 25];
+        let result = gen.generate(&positions, &normals, 0, &ScatterConfig::default());
+        assert_eq!(result.len(), 25, "density 1.0 should produce all 25");
+    }
+
+    #[test]
+    fn scatter_fixed_scale_exact() {
+        let gen = RandomScatterGenerator {
+            density: 1.0,
+            min_scale: 0.5,
+            max_scale: 0.5,
+            snap_to_normal: false,
+        };
+        let positions: Vec<_> = (0..15).map(|i| Vector3f::new(i as f32, 0.0, 0.0)).collect();
+        let normals = vec![Vector3f::new(0.0, 1.0, 0.0); 15];
+        let result = gen.generate(&positions, &normals, 0, &ScatterConfig::default());
+        for inst in &result {
+            assert!(
+                (inst.scale - 0.5).abs() < 1e-5,
+                "fixed scale should be exactly 0.5: {}",
+                inst.scale
+            );
+        }
+    }
 }

@@ -844,7 +844,8 @@ impl VoxelMeshSDFGD {
 // ---------------------------------------------------------------------------
 // VoxelBlockyTypeGD — Resource for one blocky voxel type
 // ---------------------------------------------------------------------------
-/// Defines a single blocky voxel type (model + attributes).
+/// Defines a single blocky voxel type (model + attributes). The functional API
+/// classifies the type: `is_passable` (air/non-solid), `is_opaque_solid`.
 #[derive(GodotClass)]
 #[class(base = Resource, tool)]
 pub struct VoxelBlockyTypeGD {
@@ -865,6 +866,21 @@ impl IResource for VoxelBlockyTypeGD {
             transparent: false,
             solid: false,
         }
+    }
+}
+
+#[godot_api]
+impl VoxelBlockyTypeGD {
+    /// Whether entities can pass through this type (not solid).
+    #[func]
+    fn is_passable(&self) -> bool {
+        !self.solid
+    }
+
+    /// Whether this type is fully opaque and solid (blocks light + movement).
+    #[func]
+    fn is_opaque_solid(&self) -> bool {
+        self.solid && !self.transparent
     }
 }
 
