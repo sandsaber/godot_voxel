@@ -11,7 +11,7 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 authors = ["godot_voxel Rust migration"]
-repository = "https://github.com/sandsaber/godot_voxel"
+repository = "https://github.com/sandsaber/godot_voxel_rust"
 description = "Rust port of godot_voxel core (engine-agnostic voxel engine)"
 
 [profile.release]
