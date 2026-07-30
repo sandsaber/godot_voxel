@@ -7,10 +7,20 @@ in [`voxel-core`](../voxel-core); this crate wraps it into Godot classes.
 
 ## Status
 
-Phase 2 skeleton. A single `VoxelRustHello` class with two `#[func]` methods
-proves the end-to-end path (voxel-core → voxel-gdext → Godot 4.7 → GDScript)
-works. Real voxel classes (`VoxelBuffer`, `VoxelTerrain`, …) land in later
-phases as `voxel-core` grows the compute layer.
+**Phase 5 — complete.** 82 Godot classes are registered and functional (all carry
+`#[func]` methods delegating to `voxel-core`). The extension loads in Godot 4.7+
+and the full paging/generation/meshing pipeline runs end-to-end.
+
+### Class names
+
+Classes are exposed under **canonical names** matching the upstream godot_voxel
+C++ module (`VoxelBuffer`, `VoxelMesherBlocky`, `VoxelTerrain`, …), via the
+`#[class(rename = ...)]` attribute — the Rust structs keep a `GD` suffix
+(`VoxelBufferGD`) internally, but ClassDB and GDScript see `VoxelBuffer`.
+
+Exceptions (to avoid clashing with Godot builtins, matching upstream's `ZN_`
+prefix): `ZN_FastNoiseLite`, `ZN_SpotNoise`, `ZN_Curve` (Godot already ships
+`Curve`, `FastNoiseLite`).
 
 ## Build
 
@@ -32,29 +42,50 @@ This is a `cdylib`; the artifact is `target/<profile>/libvoxel_gdext.so` (Linux)
    build.
 2. (Re)open the Godot project — the editor scans for `.gdextension` files and
    loads the library on startup.
-3. The class is now available in GDScript:
+3. The classes are now available in GDScript:
 
 ```gdscript
-var v = VoxelRustHello.new()
-print(v.say_hello("World"))   # "Hello, World! voxel-core v0.1.0 says hi from Rust"
-print(v.is_alive())           # true
-v.free()
+var terrain = VoxelTerrain.new()
+terrain.set_generator(VoxelGeneratorWaves.new())
+add_child(terrain)
+var viewer = VoxelViewer.new()
+terrain.add_child(viewer)   # viewer must be a child of the terrain
 ```
 
 ### Verified
 
-Tested headless against Godot 4.7.stable on Linux x86_64:
+Tested headless against Godot 4.7.1.stable on Linux x86_64 (2026-07-30).
+The `smoke_test/` Godot project ships two runnable checks plus a driver script.
+
+**Reproducing on a clean checkout** — the compiled library is a git-ignored build
+artifact, so build it first. The driver does everything:
+
+```sh
+cd rust
+./voxel-gdext/smoke_test/run_smoke_test.sh          # debug build + all 3 checks
+./voxel-gdext/smoke_test/run_smoke_test.sh --release
+```
+
+It (1) `cargo build`s `voxel-gdext`, (2) copies the `.so`/`.dylib` next to the
+`.gdextension`, then runs:
+
+- **`api_test.gd`** (`godot --headless --script api_test.gd`) — class
+  registration, `VoxelTerrain` instantiate, `set_generator`, property round-trip,
+  `VoxelBuffer` voxel read/write. The SDF edit is asserted **honestly**: before
+  `_ready()` runs it reports the not-ready state (set=false, sdf=0.0) rather than
+  a false positive.
+- **`runtime_scene.tscn`** — builds a `VoxelTerrain` + `VoxelGeneratorWaves` +
+  `VoxelViewer` in the tree and pumps real frames: paging generates **210 mesh
+  blocks** by frame 10, and the live edition path is verified (`set_voxel_sdf`
+  returns true, `get_voxel_sdf` reads back -1.0).
 
 ```
-Initialize godot-rust (API v4.7.stable.official, runtime v4.7.stable.arch_linux, safeguards strict)
+Initialize godot-rust (API v4.7.stable.official, runtime v4.7.1.stable.arch_linux, safeguards strict)
 voxel-gdext: Scene stage initialized (voxel-core v0.1.0)
-class: VoxelRustHello
-hello: Hello, World! voxel-core v0.1.0 says hi from Rust
-alive: true
+[runtime] PASS set_voxel_sdf/get_voxel_sdf (set=true sdf=-1.000000)
+[runtime] frame 10 — mesh_block_count=210
+[runtime] DONE after 40 frames — mesh_block_count=210, paging ran without crash
 ```
-
-The crate-to-crate path works: `say_hello()` reads `voxel_core::VERSION`,
-proving `voxel-gdext` links `voxel-core` and reaches it through the FFI boundary.
 
 ## Android
 

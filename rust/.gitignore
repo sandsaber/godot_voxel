@@ -9,6 +9,17 @@ Cargo.lock
 # voxel-gdext: the .gdextension is generated from .gdextension.in per-machine.
 /voxel-gdext/voxel_gdext.gdextension
 
+# GDExtension binaries are build artifacts — never commit them.
+*.so
+*.dylib
+*.dll
+
+# Godot editor cache / generated state (regenerated per-machine).
+**/.godot/editor/
+**/.godot/uid_cache.bin
+**/.godot/global_script_class_cache.cfg
+**/.godot/extension_list.cfg
+
 # Keep these tracked:
 !rust/Cargo.toml
 !rust/Cargo.lock

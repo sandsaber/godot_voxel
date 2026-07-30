@@ -5,8 +5,12 @@ A voxel terrain engine for Godot Engine 4, **fully ported from C++ to Rust**.
 
 This fork is a **pure Rust GDExtension** — no C++ module code remains. The
 engine core (`voxel-core`) is engine-agnostic and fully unit-testable; the
-thin Godot binding (`voxel-gdext`) exposes 80 functional classes via
+thin Godot binding (`voxel-gdext`) exposes 82 functional classes via
 `#[func]` methods. Loads in Godot 4.7+.
+
+> **Verified by independent audit (2026-07-30):** 1489 tests pass (0 failed),
+> `cargo clippy --workspace --all-targets` is warning-clean, `cargo fmt --check`
+> passes, and `voxel-core` cross-compiles to Android `aarch64`.
 
 ![Blocky screenshot](doc/source/images/blocky_screenshot.webp)
 ![Smooth screenshot](doc/source/images/smooth_screenshot.webp)
@@ -42,8 +46,9 @@ Testing
 
 ```bash
 cd rust
-cargo test -p voxel-core -p voxel-gdext    # 795 unit + 674 parity + 5 integration
-cargo clippy --workspace --all-targets      # clean
+cargo test --workspace                      # 1489 tests (0 failed)
+cargo clippy --workspace --all-targets      # warning-clean
+cargo fmt --check                           # clean
 ```
 
 Project structure
@@ -53,8 +58,8 @@ Project structure
 rust/
 ├── voxel-core/          # Engine-agnostic Rust core (all logic)
 │   ├── src/             # 795 unit tests
-│   └── tests/           # 674 parity tests (mirrors C++ test suite)
-├── voxel-gdext/         # Godot GDExtension binding (80 classes)
+│   └── tests/           # 674 parity tests + integration + transvoxel parity
+├── voxel-gdext/         # Godot GDExtension binding (82 classes)
 │   ├── src/             # #[func] methods delegating to voxel-core
 │   └── smoke_test/      # Godot 4.7 project + VoxelGeneratorGraph addon
 ├── cpp-baseline/        # C++ parity harness (reference data generation)
@@ -62,28 +67,29 @@ rust/
 └── fuzz/                # cargo-fuzz targets
 ```
 
-Migration status
+Status
 ---------------
 
-All milestones closed: **M1 ✅ M2 ✅ M3 ✅ M4 ✅**
+The C++ → Rust migration is **complete**. The original C++ module is fully
+removed; the project is a pure-Rust GDExtension verified in Godot 4.7.1:
 
-| Milestone | Description |
-|---|---|
-| M1 | Code review debt closed (TSan, typed storage, mesher perf, graph compile, fuzz) |
-| M2 | Phase 4 multi-LOD paging GO (LodOctree + transition cells) |
-| M3 | 80/80 Godot classes functional, Godot 4.7 GDExtension loads |
-| M4 | Full C++ parity: 674 parity tests + 9 ported features (box_blur, texturing, FastNoise2, etc.) |
+- **1489 tests pass** (795 unit + 674 parity + 5 integration + 5 transvoxel
+  parity + 1 stress + 5 TSan + 3 gdext unit + 1 doc-test), clippy/fmt clean.
+- **82 Godot classes** functional, registered under canonical upstream names
+  (`VoxelBuffer`, `VoxelMesherBlocky`, `VoxelTerrain`, …).
+- Full paging + generation + meshing pipeline runs end-to-end (verified headless:
+  210 mesh blocks generated).
 
-See [`rust/STATUS.md`](rust/STATUS.md) for details.
+Class names follow upstream godot_voxel (`#[class(rename=…)]`); see
+[`AGENTS.md`](AGENTS.md) for the naming scheme.
 
 Documentation
 ---------------
 
-- [Migration plan](MIGRATION_PLAN.md)
-- [Rust port status](rust/STATUS.md)
-- [Audit report](rust/AUDIT.md)
-- [Phase 0 pilot report](REPORT.md)
-- [Original docs](https://voxel-tools.readthedocs.io/en/latest/)
+- [AGENTS.md](AGENTS.md) — repo guide for AI agents and contributors (architecture,
+  crate layout, build/test/smoke commands, conventions).
+- [Rust gdext binding](rust/voxel-gdext/README.md) — build, load, and verify in Godot.
+- [Original upstream docs](https://voxel-tools.readthedocs.io/en/latest/)
 
 Credits
 ---------------

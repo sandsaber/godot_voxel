@@ -6,9 +6,9 @@
 //! engine. The thin Godot binding lives in the separate `voxel-gdext` crate.
 //!
 //! ## Status
-//! This crate is under active development as part of the Rust migration pilot
-//! (Phase 4 started; Phases 1-3 audited). See `MIGRATION_PLAN.md` at the
-//! repository root for context.
+//! The C++ → Rust migration is complete. This crate holds the full engine core;
+//! see `AGENTS.md` at the repository root for architecture, build/test
+//! commands, and conventions.
 
 #![deny(unsafe_op_in_unsafe_fn)]
 

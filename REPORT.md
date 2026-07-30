@@ -6,13 +6,14 @@
 > been removed. The project is now a pure Rust GDExtension for Godot 4.7+.
 >
 > **Final numbers (2026-07-30):**
-> - 795 unit tests + 674 parity tests + 5 integration tests + 1 doc-test = **1475 total, 0 failed**
-> - 80/80 Godot classes functional (all have `#[func]` methods)
+> - **1489 tests, 0 failed** (795 unit + 674 parity + 5 integration + 5 transvoxel parity + 1 stress + 5 TSan + 3 gdext unit + 1 doc-test)
+> - **82 Godot classes** functional (all have `#[func]` methods)
 > - 9 C++ features ported as new voxel-core APIs
-> - clippy/fmt clean, release build verified
+> - clippy/fmt clean (0 warnings, verified by independent audit 2026-07-30), release build verified
 > - Godot 4.7 GDExtension loads
+> - Android aarch64 cross-compile builds; root-level C++ artifacts removed
 >
-> See [`rust/STATUS.md`](rust/STATUS.md) for the full status breakdown.
+> See [`AGENTS.md`](AGENTS.md) for architecture, build/test/smoke commands, and conventions.
 >
 > ---
 >
@@ -21,7 +22,7 @@
 # Phase 0 Pilot — Report & GO/NO-GO
 
 > Branch: `rust/pilot` · Date: 2026-07-03 · Host: Linux x86_64, Rust 1.96.1, NDK r29
-> See `MIGRATION_PLAN.md` for the full plan. This report covers Phase 0 (pilot).
+> See [`AGENTS.md`](AGENTS.md) for architecture and conventions. This report covers Phase 0 (pilot).
 > Update 2026-07-06: the C++ stub-tree harness now supplies the committed mesh
 > goldens. H1 and H2 both pass; see `rust/cpp-baseline/README.md`.
 
