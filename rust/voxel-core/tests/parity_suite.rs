@@ -14457,7 +14457,7 @@ mod graph_image_output_parity {
 // Mirrors test_voxel_buffer.cpp — blocky library full bake with AO + cutout geometry.
 #[cfg(test)]
 mod blocky_bake_ao_cutout_parity {
-    use voxel_core::meshers::blocky::{bake_library, BakedLibrary, BakedModel, AIR_ID};
+    use voxel_core::meshers::blocky::{bake_library, BakedLibrary, BakedModel};
 
     /// bake_library on a full-cube library sets contributes_to_ao = true.
     #[test]
@@ -14543,7 +14543,7 @@ mod blocky_bake_ao_cutout_parity {
         // A full side pattern should occlude itself.
         let cube = &lib.models[1];
         let p = cube.model.side_pattern_indices[0];
-        let i = (p + p * lib.side_pattern_count) as usize;
+        let _i = (p + p * lib.side_pattern_count) as usize;
         assert!(
             lib.get_side_pattern_occlusion(p, p),
             "full side should occlude itself"
@@ -14583,7 +14583,7 @@ mod blocky_bake_ao_cutout_parity {
             CORNER_POSITION, SIDE_CORNERS, SIDE_QUAD_TRIANGLES,
         };
         use voxel_core::math::{Vector2f, Vector3f};
-        use voxel_core::meshers::blocky::baked_library::{ModelSurface, SideSurface};
+        use voxel_core::meshers::blocky::baked_library::SideSurface;
 
         let mut cube = BakedModel {
             empty: false,

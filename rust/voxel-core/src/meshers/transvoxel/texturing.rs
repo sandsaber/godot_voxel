@@ -79,8 +79,8 @@ fn insert_sort(sorted: &mut [WeightedIndex; 4], new_item: WeightedIndex) {
 /// Returns the position of `needle` in `haystack` (up to N entries), or 0
 /// if not found. Matches C++ `index_of_or_zero`.
 fn index_of_or_zero<const N: usize>(haystack: &[u8; 4], needle: u8) -> u8 {
-    for i in 0..N {
-        if haystack[i] == needle {
+    for (i, &entry) in haystack.iter().take(N).enumerate() {
+        if entry == needle {
             return i as u8;
         }
     }
@@ -89,12 +89,12 @@ fn index_of_or_zero<const N: usize>(haystack: &[u8; 4], needle: u8) -> u8 {
 
 /// Assigns component indices: for each voxel, finds which of the 4 selected
 /// materials it uses.
-fn assign_component_indices<const NVoxels: usize>(
+fn assign_component_indices<const NVOXELS: usize>(
     available: &[u8; 4],
-    cell_voxel_materials: &[u8; NVoxels],
-    component_indices: &mut [u8; NVoxels],
+    cell_voxel_materials: &[u8; NVOXELS],
+    component_indices: &mut [u8; NVOXELS],
 ) {
-    for i in 0..NVoxels {
+    for i in 0..NVOXELS {
         let mi = cell_voxel_materials[i];
         component_indices[i] = index_of_or_zero::<4>(available, mi);
     }
@@ -125,13 +125,13 @@ pub fn get_regular_cell_materials(
 
     // Find top 4 by weight using insertion sort.
     let mut sorted = [WeightedIndex::default(); 4];
-    for i in 0..256 {
-        if counts[i] > 0 {
+    for (i, &weight) in counts.iter().enumerate() {
+        if weight > 0 {
             insert_sort(
                 &mut sorted,
                 WeightedIndex {
                     index: i as u8,
-                    weight: counts[i],
+                    weight,
                 },
             );
         }
@@ -164,13 +164,13 @@ pub fn get_transition_cell_materials(voxel_corner_values: &[u8; 9]) -> Transitio
     }
 
     let mut sorted = [WeightedIndex::default(); 4];
-    for i in 0..256 {
-        if counts[i] > 0 {
+    for (i, &weight) in counts.iter().enumerate() {
+        if weight > 0 {
             insert_sort(
                 &mut sorted,
                 WeightedIndex {
                     index: i as u8,
-                    weight: counts[i],
+                    weight,
                 },
             );
         }

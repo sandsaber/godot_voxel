@@ -153,7 +153,7 @@ mod tests {
             for y in 0..20 {
                 let v = noise.get_noise_2d_single(x as f32, y as f32);
                 assert!(
-                    v >= -1.5 && v <= 1.5,
+                    (-1.5..=1.5).contains(&v),
                     "noise out of range at ({x},{y}): {v}"
                 );
             }

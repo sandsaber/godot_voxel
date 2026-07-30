@@ -8,7 +8,7 @@
 //! ports. At evaluation time, each slice element's input values are bound to
 //! the variable names, and the parsed expression is evaluated.
 
-use crate::string::expression_parser::{self, Function, Node as AstNode, Op};
+use crate::string::expression_parser::{self, Function, Node as AstNode};
 
 /// An expression node that evaluates a string expression at each voxel.
 ///
