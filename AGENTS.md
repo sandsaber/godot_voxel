@@ -84,6 +84,10 @@ cargo fmt --check                       # must pass
 cargo build -p voxel-core --target aarch64-linux-android   # cross-compile (pure-Rust core)
 ```
 
+> For loading the built extension into a Godot project (desktop + Android + iOS,
+> debug vs release, the `.gdextension` setup), see
+> [`rust/docs/INTEGRATION.md`](rust/docs/INTEGRATION.md).
+
 Toolchain is pinned in `rust/rust-toolchain.toml` (Rust 1.96.1).
 
 ### Test categories

@@ -32,14 +32,17 @@ Features
 Building
 ---------------
 
+This is a **native GDExtension** — you compile it to a `.so`/`.dylib`/`.dll`,
+then point a `.gdextension` file at it. Quick start:
+
 ```bash
 cd rust
-cargo build -p voxel-gdext --release
+cargo build -p voxel-gdext --release    # → rust/target/release/libvoxel_gdext.so
 ```
 
-This produces the `.so`/`.dylib`/`.dll` GDExtension library. Copy the
-`.gdextension` file from `rust/voxel-gdext/voxel_gdext.gdextension.in` into
-your Godot project and point it at the built library.
+For the full integration walkthrough (every platform: Linux/Windows/macOS,
+Android, iOS; the `.gdextension` setup; debug vs release; verifying it loads),
+see **[Integration guide](rust/docs/INTEGRATION.md)**.
 
 Testing
 ---------------
@@ -88,6 +91,8 @@ Documentation
 
 - [AGENTS.md](AGENTS.md) — repo guide for AI agents and contributors (architecture,
   crate layout, build/test/smoke commands, conventions).
+- [Integration guide](rust/docs/INTEGRATION.md) — how to build the extension and
+  load it in a Godot project (Linux/Windows/macOS/Android/iOS).
 - [Rust gdext binding](rust/voxel-gdext/README.md) — build, load, and verify in Godot.
 - [Original upstream docs](https://voxel-tools.readthedocs.io/en/latest/)
 
