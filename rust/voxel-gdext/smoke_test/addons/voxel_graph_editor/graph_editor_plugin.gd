@@ -22,8 +22,8 @@ func _get_plugin_icon() -> Texture2D:
 	return EditorInterface.get_editor_theme().get_icon("GraphEdit", "EditorIcons")
 
 func _handles(object: Object) -> bool:
-	# Show the "Edit Graph" button when a VoxelGeneratorGraphGD is selected
-	return object is VoxelGeneratorGraphGD
+	# Show the "Edit Graph" button when a VoxelGeneratorGraph is selected
+	return object is VoxelGeneratorGraph
 
 func _make_visible(visible: bool) -> void:
 	if _panel:
@@ -44,5 +44,5 @@ func _exit_tree() -> void:
 	print("VoxelGraphEditor: plugin exited tree")
 
 func _edit(object: Object) -> void:
-	if _panel and object is VoxelGeneratorGraphGD:
+	if _panel and object is VoxelGeneratorGraph:
 		_panel.edit_graph(object)

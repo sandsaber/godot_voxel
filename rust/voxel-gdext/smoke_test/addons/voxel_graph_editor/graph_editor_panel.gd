@@ -4,11 +4,11 @@ extends Control
 ## Graph editor panel — a GraphEdit-based visual editor for VoxelGeneratorGraph.
 ##
 ## Provides node creation, connection, and parameter editing through the
-## VoxelGeneratorGraphGD Rust API (set_graph_json / get_graph_json /
+## VoxelGeneratorGraph Rust API (set_graph_json / get_graph_json /
 ## compile_and_sample / get_node_count).
 
 var _graph_edit: GraphEdit
-var _current_graph: VoxelGeneratorGraphGD
+var _current_graph: VoxelGeneratorGraph
 var _toolbar: HBoxContainer
 var _add_node_menu: MenuButton
 var _status_label: Label
@@ -63,7 +63,7 @@ func _build_ui() -> void:
 	_graph_edit.disconnection_request.connect(_on_disconnection_request)
 	vbox.add_child(_graph_edit)
 
-func edit_graph(graph: VoxelGeneratorGraphGD) -> void:
+func edit_graph(graph: VoxelGeneratorGraph) -> void:
 	_current_graph = graph
 	_status_label.text = "Editing graph (%d nodes)" % graph.get_node_count()
 	# Load existing nodes from graph_json

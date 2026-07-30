@@ -11,7 +11,7 @@ use godot::prelude::*;
 /// the resource's seed/frequency/noise_type and returns the raw 3D noise value
 /// at a world point, exercising the full noise pipeline through the binding.
 #[derive(GodotClass)]
-#[class(base = Resource, tool)]
+#[class(base = Resource, tool, rename = ZN_FastNoiseLite)]
 pub struct FastNoiseLiteGD {
     base: Base<Resource>,
     #[var]
@@ -64,7 +64,7 @@ impl FastNoiseLiteGD {
 /// functional through the binding. `sample_3d` returns the raw 3D noise value
 /// at a world point, configured from the resource's seed/frequency.
 #[derive(GodotClass)]
-#[class(base = Resource, tool)]
+#[class(base = Resource, tool, rename = FastNoise2)]
 pub struct FastNoise2GD {
     base: Base<Resource>,
     #[var]
@@ -112,7 +112,7 @@ impl FastNoise2GD {
 /// density/radius, returning the number of spots that pass (functional delegate
 /// to a noise-based threshold check).
 #[derive(GodotClass)]
-#[class(base = Resource, tool)]
+#[class(base = Resource, tool, rename = ZN_SpotNoise)]
 pub struct SpotNoiseGD {
     base: Base<Resource>,
     #[var]
@@ -166,7 +166,7 @@ impl SpotNoiseGD {
 /// `(x, z)` point scaled by the resource's `scale`, delegating to the
 /// voxel-core noise sampler.
 #[derive(GodotClass)]
-#[class(base = Resource, tool)]
+#[class(base = Resource, tool, rename = NoisePattern2D)]
 pub struct NoisePattern2DGD {
     base: Base<Resource>,
     #[var]
@@ -203,7 +203,7 @@ impl NoisePattern2DGD {
 /// `sample` returns the linearly-interpolated value at parameter `t ∈ [0,1]`,
 /// and `set_identity` rebuilds an identity curve with `count` points.
 #[derive(GodotClass)]
-#[class(base = Resource, tool)]
+#[class(base = Resource, tool, rename = ZN_Curve)]
 pub struct CurveGD {
     base: Base<Resource>,
     /// Number of baked sample points. Plain field exposed via
@@ -267,7 +267,7 @@ impl CurveGD {
 /// — `to_baked_model` produces a real solid cube model (empty=false,
 /// culls_neighbors=true) with the configured color, ready for the blocky mesher.
 #[derive(GodotClass)]
-#[class(base = Resource, tool)]
+#[class(base = Resource, tool, rename = VoxelBlockyModelCube)]
 pub struct VoxelBlockyModelCubeGD {
     base: Base<Resource>,
     #[var]
@@ -328,7 +328,7 @@ impl VoxelBlockyModelCubeGD {
 /// An empty (air) blocky model. `to_baked_model` produces the default empty
 /// model (empty=true, no geometry), the sentinel for passable cells.
 #[derive(GodotClass)]
-#[class(base = Resource, tool)]
+#[class(base = Resource, tool, rename = VoxelBlockyModelEmpty)]
 pub struct VoxelBlockyModelEmptyGD {
     base: Base<Resource>,
 }
@@ -359,7 +359,7 @@ impl VoxelBlockyModelEmptyGD {
 /// A mesh-based blocky model. `to_baked_model` produces a solid model with
 /// the configured transparency and color, ready for the blocky mesher.
 #[derive(GodotClass)]
-#[class(base = Resource, tool)]
+#[class(base = Resource, tool, rename = VoxelBlockyModelMesh)]
 pub struct VoxelBlockyModelMeshGD {
     base: Base<Resource>,
     #[var]
@@ -421,7 +421,7 @@ impl VoxelBlockyModelMeshGD {
 /// A fluid blocky model (water/lava). `to_baked_model` produces a model
 /// flagged as fluid with the given fluid level and flow parameters.
 #[derive(GodotClass)]
-#[class(base = Resource, tool)]
+#[class(base = Resource, tool, rename = VoxelBlockyModelFluid)]
 pub struct VoxelBlockyModelFluidGD {
     base: Base<Resource>,
     /// Fluid level (0-8). Plain field exposed via get/set_fluid_level #[func]s.
@@ -476,7 +476,7 @@ impl VoxelBlockyModelFluidGD {
 
 /// A fluid type for blocky terrain. The functional API reports flow state.
 #[derive(GodotClass)]
-#[class(base = Resource, tool)]
+#[class(base = Resource, tool, rename = VoxelBlockyFluid)]
 pub struct VoxelBlockyFluidGD {
     base: Base<Resource>,
     flowing: bool,
@@ -523,7 +523,7 @@ impl VoxelBlockyFluidGD {
 /// A graph node descriptor. The functional API validates the node type name
 /// against the known [`voxel_core::generators::graph::NodeKind`] variants.
 #[derive(GodotClass)]
-#[class(base = Resource, tool)]
+#[class(base = Resource, tool, rename = VoxelGraphNode)]
 pub struct VoxelGraphNodeGD {
     base: Base<Resource>,
     #[var]
@@ -558,7 +558,7 @@ impl VoxelGraphNodeGD {
 
 /// A connection between two graph nodes. Stores source/target node ids + ports.
 #[derive(GodotClass)]
-#[class(base = Resource, tool)]
+#[class(base = Resource, tool, rename = VoxelGraphConnection)]
 pub struct VoxelGraphConnectionGD {
     base: Base<Resource>,
     src_node: i32,
@@ -599,7 +599,7 @@ impl VoxelGraphConnectionGD {
 
 /// Graph preview configuration. The functional API reports resolution validity.
 #[derive(GodotClass)]
-#[class(base = Resource, tool)]
+#[class(base = Resource, tool, rename = VoxelGraphPreview)]
 pub struct VoxelGraphPreviewGD {
     base: Base<Resource>,
     #[var]
@@ -626,7 +626,7 @@ impl VoxelGraphPreviewGD {
 
 /// Documentation data for graph nodes. The functional API counts doc entries.
 #[derive(GodotClass)]
-#[class(base = Resource, tool)]
+#[class(base = Resource, tool, rename = VoxelGraphNodesDocData)]
 pub struct VoxelGraphNodesDocDataGD {
     base: Base<Resource>,
     doc_count: i32,
@@ -656,7 +656,7 @@ impl VoxelGraphNodesDocDataGD {
 
 /// The graph editor window state. The functional API tracks open/dirty state.
 #[derive(GodotClass)]
-#[class(base = Resource, tool)]
+#[class(base = Resource, tool, rename = VoxelGraphEditorWindow)]
 pub struct VoxelGraphEditorWindowGD {
     base: Base<Resource>,
     is_open: bool,
@@ -744,7 +744,7 @@ impl VoxelStreamRegionFilesGD {
 
 /// SQLite stream configuration. The functional API validates the DB path.
 #[derive(GodotClass)]
-#[class(base = Resource, tool)]
+#[class(base = Resource, tool, rename = VoxelStreamSQLite)]
 pub struct VoxelStreamSQLiteGD {
     base: Base<Resource>,
     #[var]
@@ -771,7 +771,7 @@ impl VoxelStreamSQLiteGD {
 
 /// MagicaVoxel `.vox` loader. The functional API reports format support.
 #[derive(GodotClass)]
-#[class(base = Resource, tool)]
+#[class(base = Resource, tool, rename = VoxelVoxLoader)]
 pub struct VoxelVoxLoaderGD {
     base: Base<Resource>,
 }
@@ -794,7 +794,7 @@ impl VoxelVoxLoaderGD {
 // === Instance subtypes (3) ===
 
 #[derive(GodotClass)]
-#[class(base = Resource, tool)]
+#[class(base = Resource, tool, rename = VoxelInstanceLibraryMultiMeshItem)]
 pub struct VoxelInstanceLibraryMultiMeshItemGD {
     base: Base<Resource>,
     #[var]
@@ -821,7 +821,7 @@ impl VoxelInstanceLibraryMultiMeshItemGD {
 
 /// A scene-based instance library item (places PackedScenes, not multimesh).
 #[derive(GodotClass)]
-#[class(base = Resource, tool)]
+#[class(base = Resource, tool, rename = VoxelInstanceLibrarySceneItem)]
 pub struct VoxelInstanceLibrarySceneItemGD {
     base: Base<Resource>,
     scene_path: GString,
@@ -847,7 +847,7 @@ impl VoxelInstanceLibrarySceneItemGD {
 
 /// An instance component attached to a node for scatter rendering.
 #[derive(GodotClass)]
-#[class(base = Resource, tool)]
+#[class(base = Resource, tool, rename = VoxelInstanceComponent)]
 pub struct VoxelInstanceComponentGD {
     base: Base<Resource>,
     visible: bool,
@@ -948,7 +948,7 @@ impl VoxelGraphEditorPluginGD {
 // === Misc utility (3) ===
 
 #[derive(GodotClass)]
-#[class(base = RefCounted, tool)]
+#[class(base = RefCounted, tool, rename = VoxelTaskIndicator)]
 pub struct VoxelTaskIndicatorGD {
     base: Base<RefCounted>,
     #[var]
@@ -990,7 +990,7 @@ impl VoxelTaskIndicatorGD {
 /// Caches the editor camera transform so plugins can restore it. The
 /// functional API stores/retrieves a 3D position.
 #[derive(GodotClass)]
-#[class(base = RefCounted, tool)]
+#[class(base = RefCounted, tool, rename = VoxelEditorCameraCache)]
 pub struct VoxelEditorCameraCacheGD {
     base: Base<RefCounted>,
     cached_x: f32,
@@ -1048,7 +1048,7 @@ impl VoxelEditorCameraCacheGD {
 /// The "About" window resource. The functional API reports the voxel-core
 /// version string for display.
 #[derive(GodotClass)]
-#[class(base = Resource, tool)]
+#[class(base = Resource, tool, rename = VoxelAboutWindow)]
 pub struct VoxelAboutWindowGD {
     base: Base<Resource>,
 }

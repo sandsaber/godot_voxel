@@ -18,7 +18,7 @@ use voxel_core::math::Vector3i;
 /// the real transvoxel extraction over a `VoxelBufferGD` and returns the total
 /// vertex count, exercising the full mesher pipeline through the binding.
 #[derive(GodotClass)]
-#[class(base = Resource, tool)]
+#[class(base = Resource, tool, rename = VoxelMesherTransvoxel)]
 pub struct VoxelMesherTransvoxelGD {
     base: Base<Resource>,
     /// SDF channel index (default: 1).
@@ -83,7 +83,7 @@ impl VoxelMesherTransvoxelGD {
 
 /// Configuration Resource for the blocky (Minecraft-style) terrain mesher.
 #[derive(GodotClass)]
-#[class(base = Resource, tool)]
+#[class(base = Resource, tool, rename = VoxelMesherBlocky)]
 pub struct VoxelMesherBlockyGD {
     base: Base<Resource>,
     /// Whether ambient occlusion is baked.
@@ -148,7 +148,7 @@ impl VoxelMesherBlockyGD {
 
 /// Configuration Resource for the cubes (greedy mesh) terrain mesher.
 #[derive(GodotClass)]
-#[class(base = Resource, tool)]
+#[class(base = Resource, tool, rename = VoxelMesherCubes)]
 pub struct VoxelMesherCubesGD {
     base: Base<Resource>,
     /// Whether to use greedy rectangle merging.
@@ -208,7 +208,7 @@ impl VoxelMesherCubesGD {
 /// A 256-entry color palette used by the cubes mesher. Each entry is an
 /// RGBA color (8 bits per channel). Wraps [`voxel_core::meshers::cubes::palette::ColorPalette`].
 #[derive(GodotClass)]
-#[class(base = Resource, tool)]
+#[class(base = Resource, tool, rename = VoxelColorPalette)]
 pub struct VoxelColorPaletteGD {
     base: Base<Resource>,
     palette: voxel_core::meshers::cubes::palette::ColorPalette,
@@ -265,7 +265,7 @@ impl VoxelColorPaletteGD {
 /// A library of baked blocky models. The functional API maintains a real
 /// [`voxel_core::meshers::blocky::BakedLibrary`] model table.
 #[derive(GodotClass)]
-#[class(base = Resource, tool)]
+#[class(base = Resource, tool, rename = VoxelBlockyLibrary)]
 pub struct VoxelBlockyLibraryGD {
     base: Base<Resource>,
     /// Number of models (plain field; exposed via get_model_count #[func]).
@@ -323,7 +323,7 @@ impl VoxelBlockyLibraryGD {
 /// to a bit depth (8/16/32/64). Wraps [`voxel_core::storage::VoxelFormat`] —
 /// `set_channel_depth` configures a channel and `get_channel_depth` reports it.
 #[derive(GodotClass)]
-#[class(base = Resource, tool)]
+#[class(base = Resource, tool, rename = VoxelFormat)]
 pub struct VoxelFormatGD {
     base: Base<Resource>,
     /// The real engine-agnostic format.
@@ -383,7 +383,7 @@ impl VoxelFormatGD {
 /// The voxel engine singleton. Wraps a ThreadedTaskRunner for
 /// background task processing. Manages real task drain loop.
 #[derive(GodotClass)]
-#[class(base = Object, tool)]
+#[class(base = Object, tool, rename = VoxelEngine)]
 pub struct VoxelEngineGD {
     base: Base<Object>,
     /// Number of background threads.
@@ -460,7 +460,7 @@ impl VoxelEngineGD {
 /// `mark_pending` increments it, `mark_done` decrements it, and `is_done`
 /// reflects whether all saves have completed.
 #[derive(GodotClass)]
-#[class(base = RefCounted, tool)]
+#[class(base = RefCounted, tool, rename = VoxelSaveCompletionTracker)]
 pub struct VoxelSaveCompletionTrackerGD {
     base: Base<RefCounted>,
     /// Number of pending save operations (plain field; exposed via #[func]s).
@@ -521,7 +521,7 @@ impl VoxelSaveCompletionTrackerGD {
 /// Information about a data block entering the resident set.
 /// Emitted as part of terrain lifecycle events.
 #[derive(GodotClass)]
-#[class(base = RefCounted, tool)]
+#[class(base = RefCounted, tool, rename = VoxelDataBlockEnterInfo)]
 pub struct VoxelDataBlockEnterInfoGD {
     base: Base<RefCounted>,
     #[var]
@@ -573,7 +573,7 @@ impl VoxelDataBlockEnterInfoGD {
 /// [`voxel_core::instancing::InstanceLibrary`] — the functional API maintains
 /// a real item table and reports its count.
 #[derive(GodotClass)]
-#[class(base = Resource, tool)]
+#[class(base = Resource, tool, rename = VoxelInstanceLibrary)]
 pub struct VoxelInstanceLibraryGD {
     base: Base<Resource>,
     /// Number of items (plain field; exposed via get_item_count #[func]).
@@ -639,7 +639,7 @@ impl VoxelInstanceLibraryGD {
 /// The functional API produces a real
 /// [`voxel_core::instancing::InstanceLibraryItem`] via `to_core_item`.
 #[derive(GodotClass)]
-#[class(base = Resource, tool)]
+#[class(base = Resource, tool, rename = VoxelInstanceLibraryItem)]
 pub struct VoxelInstanceLibraryItemGD {
     base: Base<Resource>,
     #[var]

@@ -10,7 +10,7 @@ use godot::prelude::*;
 /// wrapper around the engine-agnostic `VoxelGenerator`. Subclasses:
 /// Waves, Flat, Noise, Heightmap, Graph.
 #[derive(GodotClass)]
-#[class(base = Resource, tool)]
+#[class(base = Resource, tool, rename = VoxelGenerator)]
 pub struct VoxelGeneratorGD {
     base: Base<Resource>,
 }
@@ -35,7 +35,7 @@ impl VoxelGeneratorGD {
 // ---------------------------------------------------------------------------
 /// Abstract base resource for voxel streams. Subclasses: Memory, RegionFiles.
 #[derive(GodotClass)]
-#[class(base = Resource, tool)]
+#[class(base = Resource, tool, rename = VoxelStream)]
 pub struct VoxelStreamGD {
     base: Base<Resource>,
 }
@@ -60,7 +60,7 @@ impl VoxelStreamGD {
 // ---------------------------------------------------------------------------
 /// Abstract base resource for voxel meshers. Subclasses: Transvoxel, Blocky, Cubes.
 #[derive(GodotClass)]
-#[class(base = Resource, tool)]
+#[class(base = Resource, tool, rename = VoxelMesher)]
 pub struct VoxelMesherGD {
     base: Base<Resource>,
     #[var]
@@ -87,7 +87,7 @@ impl VoxelMesherGD {
 // ---------------------------------------------------------------------------
 /// Base Node3D for SDF modifiers. Children modify terrain SDF data.
 #[derive(GodotClass)]
-#[class(base = Node3D, tool)]
+#[class(base = Node3D, tool, rename = VoxelModifier)]
 pub struct VoxelModifierGD {
     base: Base<Node3D>,
     #[var]
@@ -126,7 +126,7 @@ impl VoxelModifierGD {
 /// channel, sampling the modifier's world-space center from the node's 3D
 /// transform.
 #[derive(GodotClass)]
-#[class(base = Node3D, tool)]
+#[class(base = Node3D, tool, rename = VoxelModifierSphere)]
 pub struct VoxelModifierSphereGD {
     base: Base<Node3D>,
     #[var]
@@ -241,7 +241,7 @@ fn sdf_blend_inline(
 /// blended into the terrain via union/subtract using
 /// [`voxel_core::math::sdf`] functions.
 #[derive(GodotClass)]
-#[class(base = Node3D, tool)]
+#[class(base = Node3D, tool, rename = VoxelModifierMesh)]
 pub struct VoxelModifierMeshGD {
     base: Base<Node3D>,
     /// Blend operation: 0 = add (union), 1 = subtract.
@@ -331,7 +331,7 @@ impl VoxelModifierMeshGD {
 /// subdivision pass — `subdivide_and_count_leaves` runs the real octree
 /// split logic and returns how many leaf blocks the LOD structure produces.
 #[derive(GodotClass)]
-#[class(base = Node3D, tool)]
+#[class(base = Node3D, tool, rename = VoxelLodTerrain)]
 pub struct VoxelLodTerrainGD {
     base: Base<Node3D>,
     /// Number of LOD levels (1 = single-LOD). Plain field exposed via the
@@ -413,7 +413,7 @@ impl VoxelLodTerrainGD {
 /// pulled from the paging orchestrator (blocks loaded/unloaded, meshes
 /// built/dropped).
 #[derive(GodotClass)]
-#[class(base = RefCounted, tool)]
+#[class(base = RefCounted, tool, rename = VoxelTerrainStats)]
 pub struct VoxelTerrainStatsGD {
     base: Base<RefCounted>,
     #[var]
@@ -459,7 +459,7 @@ impl VoxelTerrainStatsGD {
 // ---------------------------------------------------------------------------
 /// Result of a blocky/non-SDF voxel raycast.
 #[derive(GodotClass)]
-#[class(base = RefCounted, tool)]
+#[class(base = RefCounted, tool, rename = VoxelBlockRaycastResult)]
 pub struct VoxelBlockRaycastResultGD {
     base: Base<RefCounted>,
     #[var]
@@ -505,7 +505,7 @@ impl VoxelBlockRaycastResultGD {
 /// Utility for serializing/deserializing voxel blocks to/from bytes.
 /// Wraps [`voxel_core::streams::block_serializer`] with a real VoxelBuffer.
 #[derive(GodotClass)]
-#[class(base = RefCounted, tool)]
+#[class(base = RefCounted, tool, rename = VoxelBlockSerializer)]
 pub struct VoxelBlockSerializerGD {
     base: Base<RefCounted>,
     buffer: voxel_core::storage::VoxelBuffer,
@@ -591,7 +591,7 @@ impl VoxelBlockSerializerGD {
 /// [`voxel_core::streams::compressed_data`]: `compress_bytes` LZ4-compresses a
 /// byte array and `decompress_bytes` restores it.
 #[derive(GodotClass)]
-#[class(base = RefCounted, tool)]
+#[class(base = RefCounted, tool, rename = VoxelCompressedData)]
 pub struct VoxelCompressedDataGD {
     base: Base<RefCounted>,
     /// Compression mode: 0=None, 1=Lz4Be, 2=Lz4. Plain field exposed via
@@ -674,7 +674,7 @@ fn compression_from_mode(mode: i32) -> voxel_core::streams::compressed_data::Com
 /// number of voxels set solid — exercising the multi-pass generation pipeline
 /// through the binding.
 #[derive(GodotClass)]
-#[class(base = Resource, tool)]
+#[class(base = Resource, tool, rename = VoxelGeneratorMultipass)]
 pub struct VoxelGeneratorMultipassGD {
     base: Base<Resource>,
     /// Number of generation passes (layers). Plain field exposed via
@@ -751,7 +751,7 @@ impl VoxelGeneratorMultipassGD {
 /// exercising the CompiledGraph pipeline through the binding as a reusable
 /// unit.
 #[derive(GodotClass)]
-#[class(base = Resource, tool)]
+#[class(base = Resource, tool, rename = VoxelGraphFunction)]
 pub struct VoxelGraphFunctionGD {
     base: Base<Resource>,
     /// Function name. Plain field exposed via get/set_name #[func]s.
@@ -849,7 +849,7 @@ impl VoxelGraphFunctionGD {
 /// functional API samples a box SDF (a simple baked-mesh stand-in) at a point,
 /// delegating to [`voxel_core::math::sdf::sdf_box`].
 #[derive(GodotClass)]
-#[class(base = Resource, tool)]
+#[class(base = Resource, tool, rename = VoxelMeshSDF)]
 pub struct VoxelMeshSDFGD {
     base: Base<Resource>,
     /// Bake grid resolution (voxels per axis). Plain field exposed via
@@ -898,7 +898,7 @@ impl VoxelMeshSDFGD {
 /// Defines a single blocky voxel type (model + attributes). The functional API
 /// classifies the type: `is_passable` (air/non-solid), `is_opaque_solid`.
 #[derive(GodotClass)]
-#[class(base = Resource, tool)]
+#[class(base = Resource, tool, rename = VoxelBlockyType)]
 pub struct VoxelBlockyTypeGD {
     base: Base<Resource>,
     #[var]
@@ -940,7 +940,7 @@ impl VoxelBlockyTypeGD {
 // ---------------------------------------------------------------------------
 /// A baked blocky model (geometry + AO). Part of VoxelBlockyLibraryGD.
 #[derive(GodotClass)]
-#[class(base = Resource, tool)]
+#[class(base = Resource, tool, rename = VoxelBlockyModel)]
 pub struct VoxelBlockyModelGD {
     base: Base<Resource>,
     #[var]
@@ -971,7 +971,7 @@ impl VoxelBlockyModelGD {
 /// Base for blocky type attributes (axis, rotation, direction, custom).
 /// The functional API reports the attribute kind name.
 #[derive(GodotClass)]
-#[class(base = Resource, tool)]
+#[class(base = Resource, tool, rename = VoxelBlockyAttribute)]
 pub struct VoxelBlockyAttributeGD {
     base: Base<Resource>,
     attr_name: GString,
@@ -1001,7 +1001,7 @@ impl VoxelBlockyAttributeGD {
 /// Axis attribute for blocky types (X/Y/Z). The functional API reports the
 /// axis as an integer (0=X, 1=Y, 2=Z).
 #[derive(GodotClass)]
-#[class(base = Resource, tool)]
+#[class(base = Resource, tool, rename = VoxelBlockyAttributeAxis)]
 pub struct VoxelBlockyAttributeAxisGD {
     base: Base<Resource>,
     axis: i32,
@@ -1034,7 +1034,7 @@ impl VoxelBlockyAttributeAxisGD {
 /// Rotation attribute for blocky types (0-360 degrees). The functional API
 /// normalizes the rotation to [0, 360).
 #[derive(GodotClass)]
-#[class(base = Resource, tool)]
+#[class(base = Resource, tool, rename = VoxelBlockyAttributeRotation)]
 pub struct VoxelBlockyAttributeRotationGD {
     base: Base<Resource>,
     rotation_degrees: i32,
@@ -1070,7 +1070,7 @@ impl VoxelBlockyAttributeRotationGD {
 /// Direction attribute for blocky types (cardinal direction). The functional
 /// API reports the direction name.
 #[derive(GodotClass)]
-#[class(base = Resource, tool)]
+#[class(base = Resource, tool, rename = VoxelBlockyAttributeDirection)]
 pub struct VoxelBlockyAttributeDirectionGD {
     base: Base<Resource>,
     direction: i32,
@@ -1103,7 +1103,7 @@ impl VoxelBlockyAttributeDirectionGD {
 /// Custom attribute for blocky types (user-defined data). The functional API
 /// stores/retrieves a custom integer value.
 #[derive(GodotClass)]
-#[class(base = Resource, tool)]
+#[class(base = Resource, tool, rename = VoxelBlockyAttributeCustom)]
 pub struct VoxelBlockyAttributeCustomGD {
     base: Base<Resource>,
     custom_value: i64,
@@ -1142,7 +1142,7 @@ impl VoxelBlockyAttributeCustomGD {
 /// consumed by the blocky mesher. `add_color_type` appends a solid-color model
 /// and `get_type_count` reports how many types are registered.
 #[derive(GodotClass)]
-#[class(base = Resource, tool)]
+#[class(base = Resource, tool, rename = VoxelBlockyTypeLibrary)]
 pub struct VoxelBlockyTypeLibraryGD {
     base: Base<Resource>,
     /// Number of registered types (plain field; exposed via `get_type_count`
@@ -1210,7 +1210,7 @@ impl VoxelBlockyTypeLibraryGD {
 /// stamps a box at each integer step from the node's position to a target,
 /// returning the number of voxels edited.
 #[derive(GodotClass)]
-#[class(base = Node3D, tool)]
+#[class(base = Node3D, tool, rename = VoxelBoxMover)]
 pub struct VoxelBoxMoverGD {
     base: Base<Node3D>,
     /// Half-size of the stamping box (voxel units).
@@ -1285,7 +1285,7 @@ impl VoxelBoxMoverGD {
 /// below is solid (ground-walking semantics), mirroring how an A* grid would
 /// classify passable nodes.
 #[derive(GodotClass)]
-#[class(base = RefCounted, tool)]
+#[class(base = RefCounted, tool, rename = VoxelAStarGrid3D)]
 pub struct VoxelAStarGrid3DGD {
     base: Base<RefCounted>,
 }

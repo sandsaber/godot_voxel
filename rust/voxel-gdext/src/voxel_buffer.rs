@@ -16,7 +16,7 @@ use voxel_core::storage::{VoxelBuffer, VoxelFormat};
 /// A Godot `RefCounted` wrapping a [`VoxelBuffer`]. Exposes basic voxel
 /// read/write to GDScript for testing and procedural generation.
 #[derive(GodotClass)]
-#[class(base = RefCounted, tool)]
+#[class(base = RefCounted, tool, rename = VoxelBuffer)]
 pub struct VoxelBufferGD {
     base: Base<RefCounted>,
     buffer: VoxelBuffer,
@@ -98,7 +98,7 @@ impl VoxelBufferGD {
 /// a parent [`VoxelTerrain`](crate::terrain::VoxelTerrain) using
 /// [`voxel_core::instancing`].
 #[derive(GodotClass)]
-#[class(base = Node3D, tool)]
+#[class(base = Node3D, tool, rename = VoxelInstancer)]
 pub struct VoxelInstancerGD {
     base: Base<Node3D>,
     /// Instance library (items to scatter).
@@ -234,7 +234,7 @@ impl VoxelInstancerGD {
 /// A Godot `RefCounted` that wraps a reference to a [`VoxelTerrain`](crate::terrain::VoxelTerrain)
 /// for GDScript-callable terrain editing operations.
 #[derive(GodotClass)]
-#[class(base = RefCounted, tool)]
+#[class(base = RefCounted, tool, rename = VoxelToolTerrain)]
 pub struct VoxelToolTerrainGD {
     base: Base<RefCounted>,
     /// Weak reference to the terrain node path.
@@ -271,7 +271,7 @@ impl VoxelToolTerrainGD {
 /// Result of a voxel raycast. Contains hit position, previous position,
 /// and distance along the ray.
 #[derive(GodotClass)]
-#[class(base = RefCounted, tool)]
+#[class(base = RefCounted, tool, rename = VoxelRaycastResult)]
 pub struct VoxelRaycastResultGD {
     base: Base<RefCounted>,
     #[var]
@@ -340,7 +340,7 @@ impl VoxelRaycastResultGD {
 /// In Rust, VoxelTerrain inherits Node3D directly, but this class
 /// exists for API parity and future VoxelLodTerrain.
 #[derive(GodotClass)]
-#[class(base = Node3D, tool)]
+#[class(base = Node3D, tool, rename = VoxelNode)]
 pub struct VoxelNodeGD {
     base: Base<Node3D>,
     /// Whether the terrain streams blocks around viewers.
@@ -388,7 +388,7 @@ impl VoxelNodeGD {
 /// output at a world point, exercising the full graph generation pipeline
 /// through the binding.
 #[derive(GodotClass)]
-#[class(base = Resource, tool)]
+#[class(base = Resource, tool, rename = VoxelGeneratorGraph)]
 pub struct VoxelGeneratorGraphGD {
     base: Base<Resource>,
     /// Graph nodes serialized as a JSON string (for save/load).

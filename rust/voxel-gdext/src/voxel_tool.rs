@@ -11,7 +11,7 @@ use voxel_core::storage::{ChannelId, VoxelBuffer, VoxelFormat};
 /// A Godot `RefCounted` that wraps a [`VoxelBuffer`] and provides voxel
 /// editing operations (sphere, box, set_voxel) callable from GDScript.
 #[derive(GodotClass)]
-#[class(base = RefCounted, tool)]
+#[class(base = RefCounted, tool, rename = VoxelToolBuffer)]
 pub struct VoxelToolBufferGD {
     base: Base<RefCounted>,
     buffer: VoxelBuffer,
