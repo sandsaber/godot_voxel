@@ -91,7 +91,9 @@ impl ModifierStack {
 }
 
 /// Smooth SDF blending. Matches `util/math/sdf.h` smooth_union / smooth_subtract.
-fn sdf_blend(existing: f32, shape: f32, op: SdfOperation, smoothness: f32) -> f32 {
+/// Public so binding layers blend with the exact same math as the core
+/// modifier stack instead of re-implementing it.
+pub fn sdf_blend(existing: f32, shape: f32, op: SdfOperation, smoothness: f32) -> f32 {
     if smoothness <= 0.0 {
         // Hard blend (no smoothing).
         return match op {

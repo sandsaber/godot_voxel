@@ -99,7 +99,15 @@ impl VoxelMemoryPool {
             // across allocate/recycle — the C++ accounts by the caller-requested
             // `size`, but since Rust recycles an owned Vec we lose that original
             // size, so capacity is the consistent metric.
-            let reused = { self.buckets[i].lock().unwrap().pop() };
+            // Poison-resilient lock, matching the rest of the crate: a
+            // poisoned bucket must not cascade into a process abort
+            // (workspace builds with `panic = "abort"`).
+            let reused = {
+                self.buckets[i]
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .pop()
+            };
             match reused {
                 Some(block) => block,
                 None => {
@@ -145,7 +153,10 @@ impl VoxelMemoryPool {
             // otherwise (e.g. Vec grew beyond its bucket) drop it to avoid
             // mismatched capacities confusing the pool.
             if capacity == 1usize << i {
-                self.buckets[i].lock().unwrap().push(block);
+                self.buckets[i]
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(block);
             } else {
                 // Doesn't match a bucket; free it.
                 self.total_memory.fetch_sub(occupied, Ordering::Relaxed);
@@ -159,7 +170,7 @@ impl VoxelMemoryPool {
     pub fn clear_unused_blocks(&self) {
         use std::sync::atomic::Ordering;
         for (i, bucket) in self.buckets.iter().enumerate() {
-            let mut b = bucket.lock().unwrap();
+            let mut b = bucket.lock().unwrap_or_else(|e| e.into_inner());
             let n = b.len();
             self.total_memory
                 .fetch_sub(((1usize << i) * n) as u64, Ordering::Relaxed);
@@ -192,7 +203,7 @@ impl VoxelMemoryPool {
     pub fn clear(&self) {
         use std::sync::atomic::Ordering;
         for bucket in self.buckets.iter() {
-            bucket.lock().unwrap().clear();
+            bucket.lock().unwrap_or_else(|e| e.into_inner()).clear();
         }
         self.used_blocks.store(0, Ordering::Relaxed);
         self.used_memory.store(0, Ordering::Relaxed);

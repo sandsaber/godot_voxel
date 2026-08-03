@@ -442,6 +442,12 @@ impl VoxelBuffer {
         self.size
     }
 
+    /// Number of allocated channels.
+    #[inline]
+    pub fn channel_count(&self) -> usize {
+        self.channels.len()
+    }
+
     /// Which allocator this buffer uses.
     #[inline]
     pub fn allocator(&self) -> Allocator {
@@ -1165,7 +1171,7 @@ fn default_channel_for_index(i: usize) -> Channel {
 }
 
 /// Recover a `ChannelId` from a linear index, or `None` if out of range.
-fn channel_id_from_index(i: usize) -> Option<ChannelId> {
+pub fn channel_id_from_index(i: usize) -> Option<ChannelId> {
     match i {
         0 => Some(ChannelId::Type),
         1 => Some(ChannelId::Sdf),

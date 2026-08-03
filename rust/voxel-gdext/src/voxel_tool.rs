@@ -40,10 +40,20 @@ impl VoxelToolBufferGD {
         VoxelFormat::new().configure_buffer(&mut self.buffer);
     }
 
-    /// Set the channel to edit (default: SDF channel).
+    /// Set the channel to edit (default: SDF channel). Out-of-range values
+    /// are rejected instead of silently remapped; the current channel is kept.
     #[func]
     fn set_channel(&mut self, channel: i32) {
-        self.channel = (channel as usize).min(7);
+        let valid = channel >= 0 && (channel as usize) < self.buffer.channel_count();
+        debug_assert!(
+            valid,
+            "VoxelToolBuffer.set_channel: {} out of range (channels={})",
+            channel,
+            self.buffer.channel_count()
+        );
+        if valid {
+            self.channel = channel as usize;
+        }
     }
 
     /// Run a sphere edit at world center with the given radius.
@@ -95,15 +105,36 @@ impl VoxelToolBufferGD {
         );
     }
 
-    /// Set a single voxel at the given position.
+    /// Set a single voxel at the given position. Out-of-range positions are
+    /// ignored (the workspace builds with `panic = "abort"`, so unchecked
+    /// indexing would kill the Godot process).
     #[func]
     fn set_voxel(&mut self, x: i32, y: i32, z: i32, value: i64) {
+        if !self.in_bounds(x, y, z) {
+            return;
+        }
         self.buffer.set_voxel(value as u64, x, y, z, self.channel);
     }
 
-    /// Get a voxel value at the given position.
+    /// Get a voxel value at the given position. Out-of-range reads return 0.
     #[func]
     fn get_voxel(&self, x: i32, y: i32, z: i32) -> i64 {
+        if !self.in_bounds(x, y, z) {
+            return 0;
+        }
         self.buffer.get_voxel(x, y, z, self.channel) as i64
+    }
+}
+
+impl VoxelToolBufferGD {
+    fn in_bounds(&self, x: i32, y: i32, z: i32) -> bool {
+        let size = self.buffer.size();
+        let valid = x >= 0 && y >= 0 && z >= 0 && x < size.x && y < size.y && z < size.z;
+        debug_assert!(
+            valid,
+            "VoxelToolBuffer access out of range: pos=({}, {}, {}) (size={:?})",
+            x, y, z, size
+        );
+        valid
     }
 }

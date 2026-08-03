@@ -8,4 +8,6 @@
 
 pub mod stack;
 
-pub use stack::{ModifierContext, ModifierStack, SdfOperation, SphereModifier, VoxelModifier};
+pub use stack::{
+    sdf_blend, ModifierContext, ModifierStack, SdfOperation, SphereModifier, VoxelModifier,
+};

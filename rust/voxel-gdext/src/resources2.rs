@@ -197,7 +197,7 @@ impl VoxelModifierSphereGD {
                     let pz = origin_z + z as f32;
                     let shape = ((px - cx).powi(2) + (py - cy).powi(2) + (pz - cz).powi(2)).sqrt()
                         - self.radius;
-                    let blended = sdf_blend_inline(sdf, shape, op, self.smoothness);
+                    let blended = voxel_core::modifiers::sdf_blend(sdf, shape, op, self.smoothness);
                     if (blended - sdf).abs() > 1e-6 {
                         core.set_voxel_f(blended, x, y, z, SDF_CHANNEL);
                         changed += 1;
@@ -206,30 +206,6 @@ impl VoxelModifierSphereGD {
             }
         }
         changed
-    }
-}
-
-/// Smooth SDF blending, mirroring `voxel_core::modifiers::sdf_blend` (which is
-/// private). Used inline by [`VoxelModifierSphereGD::apply_to_buffer`] since
-/// the core API is SoA-oriented (slice in, slice out).
-fn sdf_blend_inline(
-    existing: f32,
-    shape: f32,
-    op: voxel_core::modifiers::SdfOperation,
-    smoothness: f32,
-) -> f32 {
-    use voxel_core::modifiers::SdfOperation;
-    if smoothness <= 0.0 {
-        return match op {
-            SdfOperation::Add => existing.min(shape),
-            SdfOperation::Subtract => existing.max(-shape),
-        };
-    }
-    let h = (smoothness - (shape - existing).abs()).max(0.0) / smoothness;
-    let m = shape + (existing - shape) * h; // lerp factor
-    match op {
-        SdfOperation::Add => m - smoothness * h * h,
-        SdfOperation::Subtract => m + smoothness * h * h,
     }
 }
 
@@ -529,16 +505,23 @@ impl VoxelBlockSerializerGD {
         voxel_core::storage::VoxelFormat::new().configure_buffer(&mut self.buffer);
     }
 
-    /// Set a voxel in the internal buffer.
+    /// Set a voxel in the internal buffer. Out-of-range positions or channels
+    /// are ignored (unchecked indexing would abort the Godot process).
     #[func]
     fn set_voxel(&mut self, x: i32, y: i32, z: i32, channel: i32, value: i64) {
+        if !self.in_bounds(x, y, z, channel) {
+            return;
+        }
         self.buffer
             .set_voxel(value as u64, x, y, z, channel as usize);
     }
 
-    /// Get a voxel from the internal buffer.
+    /// Get a voxel from the internal buffer. Out-of-range reads return 0.
     #[func]
     fn get_voxel(&self, x: i32, y: i32, z: i32, channel: i32) -> i64 {
+        if !self.in_bounds(x, y, z, channel) {
+            return 0;
+        }
         self.buffer.get_voxel(x, y, z, channel as usize) as i64
     }
 
@@ -579,6 +562,26 @@ impl VoxelBlockSerializerGD {
         let raw = data.as_slice();
         voxel_core::streams::block_serializer::decompress_and_deserialize(raw, &mut self.buffer)
             .is_ok()
+    }
+}
+
+impl VoxelBlockSerializerGD {
+    fn in_bounds(&self, x: i32, y: i32, z: i32, channel: i32) -> bool {
+        let size = self.buffer.size();
+        let valid = x >= 0
+            && y >= 0
+            && z >= 0
+            && x < size.x
+            && y < size.y
+            && z < size.z
+            && channel >= 0
+            && (channel as usize) < self.buffer.channel_count();
+        debug_assert!(
+            valid,
+            "VoxelBlockSerializer access out of range: pos=({}, {}, {}), channel={} (size={:?})",
+            x, y, z, channel, size
+        );
+        valid
     }
 }
 
@@ -637,7 +640,6 @@ impl VoxelCompressedDataGD {
     /// return the original bytes. Returns an empty array on error.
     #[func]
     fn decompress_bytes(&self, data: PackedByteArray) -> PackedByteArray {
-        let comp = compression_from_mode(self.compression_mode);
         let mut out = Vec::new();
         let limits = voxel_core::streams::decode_limits::DecodeLimits::default();
         match voxel_core::streams::compressed_data::decompress_with_limits(
@@ -645,9 +647,6 @@ impl VoxelCompressedDataGD {
             &mut out,
             limits,
         ) {
-            Ok(()) if comp != compression_from_mode(self.compression_mode) => {
-                PackedByteArray::new()
-            }
             Ok(()) => PackedByteArray::from(out.as_slice()),
             Err(_) => PackedByteArray::new(),
         }
@@ -783,18 +782,23 @@ impl VoxelGraphFunctionGD {
         self.name = name;
     }
 
-    /// Build a unit-sphere SDF function (radius 1 at origin), compile it, and
-    /// sample the result at point `(px,py,pz)`. Returns NaN if compile fails.
+    /// Build a unit-sphere SDF function (radius 1, centered at the origin),
+    /// compile it once, and sample the result at point `(px,py,pz)`. Returns
+    /// NaN if compile fails.
     #[func]
     fn compile_and_sample(&mut self, px: f32, py: f32, pz: f32) -> f32 {
         use voxel_core::generators::graph::{
             CompiledGraph, CompiledScratch, Graph, GraphInputs, GraphOutput, GraphPort, NodeKind,
         };
         if self.compiled.is_none() {
+            // The sample point must flow in through the graph inputs so the
+            // compiled graph can be cached and re-evaluated at any point.
+            // (Baking the point into `Constant` nodes would freeze the result
+            // of the first call forever.)
             let mut g = Graph::new();
-            let nx = g.push(NodeKind::Constant(px));
-            let ny = g.push(NodeKind::Constant(py));
-            let nz = g.push(NodeKind::Constant(pz));
+            let nx = g.push(NodeKind::InputX);
+            let ny = g.push(NodeKind::InputY);
+            let nz = g.push(NodeKind::InputZ);
             let nr = g.push(NodeKind::Constant(1.0));
             let sphere = g.push(NodeKind::SdfSphere {
                 x: Some(GraphPort {
@@ -825,11 +829,11 @@ impl VoxelGraphFunctionGD {
         let Some(compiled) = &self.compiled else {
             return f32::NAN;
         };
-        let xs = [0.0f32];
-        let zs = [0.0f32];
+        let xs = [px];
+        let zs = [pz];
         let inputs = GraphInputs {
             x: &xs,
-            y: 0.0,
+            y: py,
             z: &zs,
         };
         let mut scratch = CompiledScratch::new();

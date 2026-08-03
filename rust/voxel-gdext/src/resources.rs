@@ -113,13 +113,13 @@ impl IResource for VoxelMesherBlockyGD {
 impl VoxelMesherBlockyGD {
     /// Whether ambient occlusion baking is enabled.
     #[func]
-    fn is_baking_occlusion(&self) -> bool {
+    pub fn is_baking_occlusion(&self) -> bool {
         self.bake_occlusion
     }
 
     /// The configured type channel index.
     #[func]
-    fn type_channel_index(&self) -> i32 {
+    pub fn type_channel_index(&self) -> i32 {
         self.type_channel
     }
 
@@ -174,13 +174,13 @@ impl IResource for VoxelMesherCubesGD {
 impl VoxelMesherCubesGD {
     /// Whether greedy rectangle merging is enabled.
     #[func]
-    fn is_greedy(&self) -> bool {
+    pub fn is_greedy(&self) -> bool {
         self.greedy
     }
 
     /// The configured color channel index.
     #[func]
-    fn color_channel_index(&self) -> i32 {
+    pub fn color_channel_index(&self) -> i32 {
         self.color_channel
     }
 

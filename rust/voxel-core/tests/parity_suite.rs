@@ -12314,9 +12314,12 @@ mod cubes_palette_parity {
     #[test]
     fn palette_has_256_entries() {
         let pal = ColorPalette::default();
-        for i in 0..255u8 {
+        let mut count = 0u32;
+        for i in u8::MIN..=u8::MAX {
             let _ = pal.get_color8(i);
+            count += 1;
         }
+        assert_eq!(count, 256);
     }
 }
 

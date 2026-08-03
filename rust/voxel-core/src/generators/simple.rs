@@ -14,7 +14,7 @@ use crate::generators::base::{
     generate_heightmap, GenResult, HeightmapParams, VoxelGenerator, VoxelQueryData,
 };
 use crate::math::funcs;
-use crate::math::{Vector2f, Vector3i};
+use crate::math::{Vector2f, Vector2i, Vector3i};
 use crate::storage::voxel_buffer::ChannelId;
 use std::sync::Arc;
 
@@ -511,6 +511,96 @@ impl VoxelGenerator for HeightmapNoise {
         };
 
         // The C++ compresses uniform channels after generation; do the same.
+        input.buffer.compress_uniform_channels();
+        result
+    }
+
+    fn used_channels_mask(&self) -> u32 {
+        1 << self.heightmap.channel.index()
+    }
+}
+
+// ===========================================================================
+// Image
+// ===========================================================================
+
+/// How world coordinates outside the image extent are sampled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ImageWrapMode {
+    /// Coordinates outside the image clamp to the nearest edge pixel.
+    #[default]
+    Clamp,
+    /// Coordinates wrap around (tiling terrain).
+    Repeat,
+}
+
+/// 2D image heightmap generator. Rust port of the `VoxelGeneratorImage`
+/// concept: a stored grayscale image (`values` in `0..1`, row-major with
+/// `x + z * width`) is sampled as the terrain height at world `(x, z)`.
+///
+/// With an SDF channel this produces smooth terrain; with a non-SDF channel
+/// (e.g. `Type`) it fills blocky terrain up to the height, which lets it
+/// drive cubes/blocky meshers.
+#[derive(Debug, Clone, Default)]
+pub struct Image {
+    /// Grayscale heights in `0..1`, row-major (`values[x + z * width]`).
+    values: Arc<[f32]>,
+    /// Image width (X) and height (Z), in pixels/voxels.
+    size: Vector2i,
+    /// Sampling behaviour outside the image extent.
+    pub wrap: ImageWrapMode,
+    /// Shared heightmap parameters (channel, range, iso_scale, offset).
+    pub heightmap: HeightmapParams,
+}
+
+impl Image {
+    /// Set the image data. `values` must contain exactly `width * height`
+    /// entries; they are clamped to `0..1`. Returns `false` on size mismatch.
+    pub fn set_image(&mut self, values: Vec<f32>, width: i32, height: i32) -> bool {
+        if width <= 0 || height <= 0 || values.len() != (width as usize) * (height as usize) {
+            return false;
+        }
+        let clamped: Vec<f32> = values.iter().map(|v| v.clamp(0.0, 1.0)).collect();
+        self.values = clamped.into();
+        self.size = Vector2i::new(width, height);
+        true
+    }
+
+    /// Whether an image is loaded.
+    pub fn has_image(&self) -> bool {
+        !self.values.is_empty()
+    }
+
+    /// Sample the normalized (`0..1`) height at world `(x, z)` applying the
+    /// configured wrap mode. Empty images sample as `0.0`.
+    pub fn height_at(&self, x: i32, z: i32) -> f32 {
+        if self.values.is_empty() {
+            return 0.0;
+        }
+        let w = self.size.x;
+        let h = self.size.y;
+        let ix = match self.wrap {
+            ImageWrapMode::Repeat => funcs::wrap_i32(x, w),
+            ImageWrapMode::Clamp => x.clamp(0, w - 1),
+        };
+        let iz = match self.wrap {
+            ImageWrapMode::Repeat => funcs::wrap_i32(z, h),
+            ImageWrapMode::Clamp => z.clamp(0, h - 1),
+        };
+        self.values[(ix + iz * w) as usize]
+    }
+}
+
+impl VoxelGenerator for Image {
+    fn generate_block(&self, input: VoxelQueryData<'_>) -> GenResult {
+        let hp = self.heightmap;
+        let result = generate_heightmap(
+            input.buffer,
+            |x, z| self.height_at(x, z),
+            &hp,
+            input.origin_in_voxels,
+            input.lod,
+        );
         input.buffer.compress_uniform_channels();
         result
     }
@@ -1049,5 +1139,93 @@ mod tests {
         let gen = HeightmapNoise::default();
         let g: &dyn VoxelGenerator = &gen;
         assert_eq!(g.used_channels_mask(), 1 << ChannelId::Sdf.index());
+    }
+
+    // ---- Image: heightmap sampling ---------------------------------------
+
+    fn ramp_image(width: i32, height: i32) -> Vec<f32> {
+        // Height 0 at z=0, 1 at the last row; constant along x.
+        (0..height)
+            .flat_map(|z| vec![z as f32 / (height - 1).max(1) as f32; width as usize])
+            .collect()
+    }
+
+    #[test]
+    fn image_set_rejects_size_mismatch() {
+        let mut gen = Image::default();
+        assert!(!gen.set_image(vec![0.5; 3], 2, 2));
+        assert!(!gen.set_image(Vec::new(), 0, 0));
+        assert!(gen.set_image(vec![0.5; 4], 2, 2));
+        assert!(gen.has_image());
+    }
+
+    #[test]
+    fn image_clamp_wraps_out_of_range_coordinates() {
+        let mut gen = Image::default();
+        gen.wrap = ImageWrapMode::Clamp;
+        assert!(gen.set_image(ramp_image(4, 4), 4, 4));
+        assert_eq!(gen.height_at(0, 0), 0.0);
+        assert_eq!(gen.height_at(0, 3), 1.0);
+        // Clamped beyond the edges.
+        assert_eq!(gen.height_at(-10, -10), 0.0);
+        assert_eq!(gen.height_at(100, 100), 1.0);
+    }
+
+    #[test]
+    fn image_repeat_wraps_around() {
+        let mut gen = Image::default();
+        gen.wrap = ImageWrapMode::Repeat;
+        assert!(gen.set_image(ramp_image(4, 4), 4, 4));
+        assert_eq!(gen.height_at(0, 4), gen.height_at(0, 0));
+        assert_eq!(gen.height_at(0, 7), gen.height_at(0, 3));
+        assert_eq!(gen.height_at(0, -1), gen.height_at(0, 3));
+    }
+
+    #[test]
+    fn image_sdf_generation_follows_heightmap() {
+        let mut gen = Image::default();
+        assert!(gen.set_image(ramp_image(4, 4), 4, 4));
+        gen.heightmap.height_start = 0.0;
+        gen.heightmap.height_range = 8.0;
+        let mut buf = sdf_buffer(Vector3i::new(4, 8, 4));
+        buf.set_channel_depth(ChannelId::Sdf.index(), crate::storage::ChannelDepth::Bit32);
+        gen.generate_block(VoxelQueryData {
+            buffer: &mut buf,
+            origin_in_voxels: Vector3i::new(0, 0, 0),
+            lod: 0,
+        });
+        // z=0 row has height 0 → solid below y=0 only; deep in the block
+        // (z=3 row, height 8) the bottom voxels must be solid (sdf < 0).
+        assert!(buf.get_voxel_f(0, 0, 3, ChannelId::Sdf.index()) < 0.0);
+        // Above the maximum height everything is air.
+        let mut buf2 = sdf_buffer(Vector3i::new(4, 8, 4));
+        buf2.set_channel_depth(ChannelId::Sdf.index(), crate::storage::ChannelDepth::Bit32);
+        gen.generate_block(VoxelQueryData {
+            buffer: &mut buf2,
+            origin_in_voxels: Vector3i::new(0, 32, 0),
+            lod: 0,
+        });
+        assert!(buf2.get_voxel_f(0, 0, 0, ChannelId::Sdf.index()) > 0.0);
+    }
+
+    #[test]
+    fn image_blocky_fills_type_channel_up_to_height() {
+        let mut gen = Image::default();
+        // Uniform image at height 1.0 → fills the whole 4-voxel column.
+        assert!(gen.set_image(vec![1.0; 16], 4, 4));
+        gen.heightmap.channel = ChannelId::Type;
+        gen.heightmap.height_start = 0.0;
+        gen.heightmap.height_range = 4.0;
+        gen.heightmap.matter_type = 7;
+        let mut buf = sdf_buffer(Vector3i::new(4, 4, 4));
+        gen.generate_block(VoxelQueryData {
+            buffer: &mut buf,
+            origin_in_voxels: Vector3i::new(0, 0, 0),
+            lod: 0,
+        });
+        assert_eq!(buf.get_voxel(1, 0, 1, ChannelId::Type.index()), 7);
+        assert_eq!(buf.get_voxel(1, 3, 1, ChannelId::Type.index()), 7);
+        let g: &dyn VoxelGenerator = &gen;
+        assert_eq!(g.used_channels_mask(), 1 << ChannelId::Type.index());
     }
 }

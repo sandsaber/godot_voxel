@@ -97,7 +97,7 @@ pub fn floordiv(x: i32, d: i32) -> i32 {
 
 /// Ceiling integer division. Expects a strictly positive divisor.
 #[inline]
-#[allow(clippy::manual_div_ceil)] // div_ceil is unstable on stable Rust 1.96
+#[allow(clippy::manual_div_ceil)] // `div_ceil` is unstable on this stable toolchain
 pub fn ceildiv(x: i32, d: i32) -> i32 {
     debug_assert!(d > 0);
     if x > 0 {
@@ -108,7 +108,7 @@ pub fn ceildiv(x: i32, d: i32) -> i32 {
 }
 
 #[inline]
-#[allow(clippy::manual_div_ceil)] // div_ceil is unstable on stable Rust 1.96
+#[allow(clippy::manual_div_ceil)] // `div_ceil` is unstable on this stable toolchain
 pub fn ceildiv_u32(x: u32, d: u32) -> u32 {
     debug_assert!(d > 0);
     (x + d - 1) / d

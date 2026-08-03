@@ -712,35 +712,9 @@ impl VoxelGraphEditorWindowGD {
     }
 }
 
-// === Stream subtypes (3) ===
-
-/// Region-files stream configuration. The functional API validates the
-/// directory path format.
-#[derive(GodotClass)]
-#[class(base = Resource, tool)]
-pub struct VoxelStreamRegionFilesGD {
-    base: Base<Resource>,
-    #[var]
-    directory: GString,
-}
-#[godot_api]
-impl IResource for VoxelStreamRegionFilesGD {
-    fn init(base: Base<Resource>) -> Self {
-        Self {
-            base,
-            directory: "res://data".to_godot(),
-        }
-    }
-}
-
-#[godot_api]
-impl VoxelStreamRegionFilesGD {
-    /// Whether the directory path is non-empty.
-    #[func]
-    fn has_directory(&self) -> bool {
-        !self.directory.is_empty()
-    }
-}
+// === Stream subtypes (2) ===
+// (The canonical `VoxelStreamRegionFiles` lives in `streams.rs`; a duplicate
+// `GD`-suffixed class registered without a rename was removed.)
 
 /// SQLite stream configuration. The functional API validates the DB path.
 #[derive(GodotClass)]
@@ -876,74 +850,10 @@ impl VoxelInstanceComponentGD {
     }
 }
 
-// === Editor inspector plugins (3) ===
-
-/// Inspector plugin handle for VoxelTerrain. The functional API reports the
-/// node type name it handles.
-#[derive(GodotClass)]
-#[class(base = Resource, tool)]
-pub struct VoxelTerrainEditorPluginGD {
-    base: Base<Resource>,
-}
-#[godot_api]
-impl IResource for VoxelTerrainEditorPluginGD {
-    fn init(base: Base<Resource>) -> Self {
-        Self { base }
-    }
-}
-
-#[godot_api]
-impl VoxelTerrainEditorPluginGD {
-    /// The node type this plugin handles.
-    #[func]
-    fn get_handled_type(&self) -> GString {
-        "VoxelTerrain".to_godot()
-    }
-}
-
-/// Inspector plugin handle for the instancer.
-#[derive(GodotClass)]
-#[class(base = Resource, tool)]
-pub struct VoxelInstancerEditorPluginGD {
-    base: Base<Resource>,
-}
-#[godot_api]
-impl IResource for VoxelInstancerEditorPluginGD {
-    fn init(base: Base<Resource>) -> Self {
-        Self { base }
-    }
-}
-
-#[godot_api]
-impl VoxelInstancerEditorPluginGD {
-    /// The node type this plugin handles.
-    #[func]
-    fn get_handled_type(&self) -> GString {
-        "VoxelInstancer".to_godot()
-    }
-}
-
-/// Inspector plugin handle for the graph editor.
-#[derive(GodotClass)]
-#[class(base = Resource, tool)]
-pub struct VoxelGraphEditorPluginGD {
-    base: Base<Resource>,
-}
-#[godot_api]
-impl IResource for VoxelGraphEditorPluginGD {
-    fn init(base: Base<Resource>) -> Self {
-        Self { base }
-    }
-}
-
-#[godot_api]
-impl VoxelGraphEditorPluginGD {
-    /// The node type this plugin handles.
-    #[func]
-    fn get_handled_type(&self) -> GString {
-        "VoxelGeneratorGraph".to_godot()
-    }
-}
+// (Three filler "editor inspector plugin" classes that registered under raw
+// `GD`-suffixed names were removed: the canonical `VoxelTerrainEditorPlugin`,
+// `VoxelInstancerEditorPlugin` and `VoxelGraphEditorPlugin` already live in
+// `editor.rs`.)
 
 // === Misc utility (3) ===
 

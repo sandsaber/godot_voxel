@@ -4,12 +4,8 @@
 //! These adapters let the terrain pipeline drive real meshers through the
 //! trait object without rewriting the algorithm code — each mesher is a thin
 //! shim that pulls voxels out of [`VoxelBuffer`] and forwards them to the
-//! existing free function.
-//!
-//! Only the transvoxel adapter is wired today. Cubes/blocky adapters are
-//! sketched as TODOs because their underlying free functions take custom
-//! voxel slices / colour callbacks and need a slightly larger porting
-//! surface than fits this commit.
+//! existing free function. All three adapters (transvoxel, cubes, blocky)
+//! are implemented below.
 
 use crate::math::Vector3i;
 use crate::meshers::transvoxel::{

@@ -170,16 +170,25 @@ impl VoxelStream for RegionFilesStream {
             query.position_in_blocks.y.rem_euclid(REGION_SIZE),
             query.position_in_blocks.z.rem_euclid(REGION_SIZE),
         );
-        let _ = std::fs::create_dir_all(&self.directory);
         let filename = format!("r.{}.{}.{}.vxr", rp.0, rp.1, rp.2);
         let path = self.directory.join(&filename);
-        let mut region = match RegionFile::open(&path, false) {
-            Ok(r) => r,
-            Err(_) => return Ok(LoadResult::NotFound),
-        };
+        // A missing region file is the normal "no data here" case. Any error
+        // on a file that DOES exist (corrupt header, I/O failure, bad block)
+        // is a real problem and must surface instead of masquerading as
+        // NotFound.
+        if !path.exists() {
+            return Ok(LoadResult::NotFound);
+        }
+        let mut region = RegionFile::open(&path, false)
+            .map_err(|e| VoxelStreamError::Io(format!("region open {path:?}: {e}")))?;
         match region.load_block(local, query.voxel_buffer) {
             Ok(()) => Ok(LoadResult::Found),
-            Err(_) => Ok(LoadResult::NotFound),
+            Err(voxel_core::streams::region::RegionError::BlockNotFound) => {
+                Ok(LoadResult::NotFound)
+            }
+            Err(e) => Err(VoxelStreamError::Io(format!(
+                "region load {path:?} block {local:?}: {e}"
+            ))),
         }
     }
 
@@ -190,7 +199,9 @@ impl VoxelStream for RegionFilesStream {
             query.position_in_blocks.y.rem_euclid(REGION_SIZE),
             query.position_in_blocks.z.rem_euclid(REGION_SIZE),
         );
-        let _ = std::fs::create_dir_all(&self.directory);
+        std::fs::create_dir_all(&self.directory).map_err(|e| {
+            VoxelStreamError::Io(format!("create stream dir {:?}: {e}", self.directory))
+        })?;
         let filename = format!("r.{}.{}.{}.vxr", rp.0, rp.1, rp.2);
         let path = self.directory.join(&filename);
         let mut region = RegionFile::open(&path, true)

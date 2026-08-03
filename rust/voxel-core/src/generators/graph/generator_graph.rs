@@ -14,7 +14,7 @@ use crate::generators::graph::{
 use crate::math::Vector3i;
 use crate::storage::voxel_buffer::ChannelId;
 use crate::storage::VoxelBuffer;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// Wraps a [`Graph`] in a [`VoxelGenerator`] that fills a `VoxelBuffer` block
 /// by executing the graph one Y-slice at a time. The graph must contain at
@@ -31,7 +31,9 @@ pub struct GraphGenerator {
     /// Per-instance scratch for the legacy free-function path.
     scratch: Mutex<GraphScratch>,
     /// Lazily-compiled analysis of `graph` (built on first `generate_block`).
-    compiled: Mutex<Option<CompiledGraph>>,
+    /// Shared via `Arc` so `generate_block` hands out cheap references
+    /// instead of deep-cloning the compiled node vector per block.
+    compiled: Mutex<Option<Arc<CompiledGraph>>>,
     /// Dense scratch for the compiled path.
     compiled_scratch: Mutex<CompiledScratch>,
     /// Optional scaling applied to world coordinates before they're fed into
@@ -71,13 +73,15 @@ impl GraphGenerator {
             .map(|n| n.id)
     }
 
-    /// Ensure the compiled graph is built (once). Returns a clone so the caller
-    /// doesn't hold the lock across generation. On a topology error (cycle /
-    /// dangling port) the legacy path is used instead.
-    fn ensure_compiled(&self) -> Option<CompiledGraph> {
+    /// Ensure the compiled graph is built (once). Returns a cheap `Arc`
+    /// handle so the caller doesn't hold the lock across generation and
+    /// doesn't pay a deep clone of the compiled nodes per block. On a
+    /// topology error (cycle / dangling port) the legacy path is used
+    /// instead.
+    fn ensure_compiled(&self) -> Option<Arc<CompiledGraph>> {
         let mut guard = self.compiled.lock().unwrap_or_else(|e| e.into_inner());
         if guard.is_none() {
-            *guard = CompiledGraph::compile(&self.graph).ok();
+            *guard = CompiledGraph::compile(&self.graph).ok().map(Arc::new);
         }
         guard.clone()
     }
@@ -133,21 +137,18 @@ pub fn generate_block_with_graph(
     let mut zs: Vec<f32> = vec![0.0; slice_size];
     let mut outputs: Vec<(GraphOutput, Vec<f32>)> = Vec::new();
 
+    // Build the X and Z coordinate slices once: they are independent of y
+    // (ZXY layout — only `world_y` changes per slice).
+    for z in 0..size.z {
+        for x in 0..size.x {
+            let i = (x as usize) + (z as usize) * (size.x as usize);
+            xs[i] = (input.origin_in_voxels.x as f32 + x as f32 * lod_stride) * coordinate_scale;
+            zs[i] = (input.origin_in_voxels.z as f32 + z as f32 * lod_stride) * coordinate_scale;
+        }
+    }
+
     for y in 0..size.y {
         let world_y = (input.origin_in_voxels.y as f32 + y as f32 * lod_stride) * coordinate_scale;
-        // Build the X and Z slices. ZXY layout: for each z, for each x, the
-        // voxel index is `y + size.y * (x + size.x * z)` — but we only need
-        // the world-space (x, z) per slice cell, which is independent of y.
-        for z in 0..size.z {
-            for x in 0..size.x {
-                let i = (x as usize) + (z as usize) * (size.x as usize);
-                xs[i] =
-                    (input.origin_in_voxels.x as f32 + x as f32 * lod_stride) * coordinate_scale;
-                zs[i] =
-                    (input.origin_in_voxels.z as f32 + z as f32 * lod_stride) * coordinate_scale;
-            }
-        }
-
         let inputs = GraphInputs {
             x: &xs,
             y: world_y,

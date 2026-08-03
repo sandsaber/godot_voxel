@@ -9,8 +9,11 @@ use godot::prelude::*;
 use std::sync::Arc;
 
 use voxel_core::generators::base::HeightmapParams;
-use voxel_core::generators::simple::{Flat, HeightmapNoise, Noise, NoiseConfig, Waves};
-use voxel_core::storage::SharedVoxelGenerator;
+use voxel_core::generators::simple::{
+    Flat, HeightmapNoise, Image, ImageWrapMode, Noise, NoiseConfig, Waves,
+};
+use voxel_core::storage::voxel_buffer::channel_id_from_index;
+use voxel_core::storage::{ChannelId, SharedVoxelGenerator};
 
 // ---------------------------------------------------------------------------
 // VoxelGeneratorWaves
@@ -216,5 +219,113 @@ impl VoxelGeneratorHeightmap {
         let n = noise.get_noise_2d(x, z);
         // Match HeightmapNoise's default (no curve): 0.5 + 0.5*noise → height_range.
         (0.5 + 0.5 * n) * self.height_range
+    }
+}
+
+// ---------------------------------------------------------------------------
+// VoxelGeneratorImage
+// ---------------------------------------------------------------------------
+
+/// A heightmap terrain generator driven by an image. Pixel luminance becomes
+/// terrain height: `height = height_start + luminance * height_range`.
+/// Wraps [`voxel_core::generators::simple::Image`].
+///
+/// With `channel = 1` (SDF) this produces smooth transvoxel terrain; with
+/// `channel = 0` (Type) it fills blocky voxels, which can drive the cubes
+/// mesher (Minecraft-style terrain from an image).
+#[derive(GodotClass)]
+#[class(base = Resource, tool)]
+pub struct VoxelGeneratorImage {
+    base: Base<Resource>,
+    /// Vertical extent of the terrain; pixel values `0..1` scale by this.
+    #[var]
+    pub height_range: f32,
+    /// World Y that a black pixel (0) maps to.
+    #[var]
+    pub height_start: f32,
+    /// Output channel: `0` = Type (blocky), `1` = Sdf (smooth).
+    #[var]
+    pub channel: i32,
+    /// Tile the image horizontally instead of clamping at its edges.
+    #[var]
+    pub repeat: bool,
+    /// Normalized heights (`0..1`), row-major `x + z * width`.
+    values: Vec<f32>,
+    /// Image size: `[width, height]`.
+    size: [i32; 2],
+}
+
+#[godot_api]
+impl IResource for VoxelGeneratorImage {
+    fn init(base: Base<Resource>) -> Self {
+        Self {
+            base,
+            height_range: 100.0,
+            height_start: -50.0,
+            channel: ChannelId::Sdf.index() as i32,
+            repeat: false,
+            values: Vec::new(),
+            size: [0, 0],
+        }
+    }
+}
+
+#[godot_api]
+impl VoxelGeneratorImage {
+    /// Load heights from a Godot `Image`: each pixel's luminance becomes the
+    /// normalized height at that `(x, z)`. Replaces any previously loaded
+    /// image.
+    #[func]
+    fn set_image(&mut self, image: Gd<godot::classes::Image>) -> bool {
+        let width = image.get_width();
+        let height = image.get_height();
+        if width <= 0 || height <= 0 {
+            return false;
+        }
+        let mut values = Vec::with_capacity((width * height) as usize);
+        for z in 0..height {
+            for x in 0..width {
+                let c = image.get_pixel(x, z);
+                // Rec. 709 luminance.
+                values.push(0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b);
+            }
+        }
+        self.values = values;
+        self.size = [width, height];
+        true
+    }
+
+    /// Load heights from raw bytes (`0..255` → `0..1`), row-major.
+    /// Returns `false` if `data.len() != width * height`.
+    #[func]
+    fn set_heights(&mut self, data: PackedByteArray, width: i32, height: i32) -> bool {
+        if width <= 0 || height <= 0 || data.len() != (width * height) as usize {
+            return false;
+        }
+        self.values = data.as_slice().iter().map(|&b| b as f32 / 255.0).collect();
+        self.size = [width, height];
+        true
+    }
+
+    /// Whether an image/heightmap is loaded.
+    #[func]
+    fn has_image(&self) -> bool {
+        !self.values.is_empty()
+    }
+
+    /// Construct the engine-agnostic generator from the current parameters.
+    pub fn create_core_generator(&self) -> SharedVoxelGenerator {
+        let mut gen = Image::default();
+        gen.set_image(self.values.clone(), self.size[0], self.size[1]);
+        gen.wrap = if self.repeat {
+            ImageWrapMode::Repeat
+        } else {
+            ImageWrapMode::Clamp
+        };
+        gen.heightmap.height_start = self.height_start;
+        gen.heightmap.height_range = self.height_range;
+        gen.heightmap.channel =
+            channel_id_from_index(self.channel.max(0) as usize).unwrap_or(ChannelId::Sdf);
+        Arc::new(gen)
     }
 }

@@ -3,11 +3,13 @@
 //! `VoxelBufferGD` exposes a VoxelBuffer as a Godot RefCounted.
 //! `VoxelInstancerGD` is a Node3D for scatter-based instance placement.
 
+use std::sync::Arc;
+
 use godot::prelude::*;
 use voxel_core::instancing::scatter::{InstanceGenerator, RandomScatterGenerator};
 use voxel_core::instancing::{InstanceLibrary, ScatterConfig};
 use voxel_core::math::{Vector3f, Vector3i};
-use voxel_core::storage::{VoxelBuffer, VoxelFormat};
+use voxel_core::storage::{SharedVoxelGenerator, VoxelBuffer, VoxelFormat};
 
 // ---------------------------------------------------------------------------
 // VoxelBufferGD — RefCounted wrapper around VoxelBuffer
@@ -31,6 +33,46 @@ impl IRefCounted for VoxelBufferGD {
     }
 }
 
+/// Validate a GDScript-supplied voxel coordinate + channel against a buffer.
+/// Out-of-range input must never reach voxel-core indexing: the workspace
+/// builds with `panic = "abort"`, so a panic here would kill the whole Godot
+/// process. Invalid calls are ignored (reads return the default, writes are
+/// dropped); debug builds assert so misuse is caught during development.
+fn is_valid_access(buffer: &VoxelBuffer, x: i32, y: i32, z: i32, channel: i32) -> bool {
+    let size = buffer.size();
+    let valid = x >= 0
+        && y >= 0
+        && z >= 0
+        && x < size.x
+        && y < size.y
+        && z < size.z
+        && channel >= 0
+        && (channel as usize) < buffer.channel_count();
+    debug_assert!(
+        valid,
+        "VoxelBuffer access out of range: pos=({}, {}, {}), channel={} (size={:?}, channels={})",
+        x,
+        y,
+        z,
+        channel,
+        size,
+        buffer.channel_count()
+    );
+    valid
+}
+
+/// Validate a GDScript-supplied channel index (see [`is_valid_access`]).
+fn is_valid_channel(buffer: &VoxelBuffer, channel: i32) -> bool {
+    let valid = channel >= 0 && (channel as usize) < buffer.channel_count();
+    debug_assert!(
+        valid,
+        "VoxelBuffer channel out of range: {} (channels={})",
+        channel,
+        buffer.channel_count()
+    );
+    valid
+}
+
 #[godot_api]
 impl VoxelBufferGD {
     #[func]
@@ -41,12 +83,18 @@ impl VoxelBufferGD {
 
     #[func]
     fn set_voxel(&mut self, x: i32, y: i32, z: i32, channel: i32, value: i64) {
+        if !is_valid_access(&self.buffer, x, y, z, channel) {
+            return;
+        }
         self.buffer
             .set_voxel(value as u64, x, y, z, channel as usize);
     }
 
     #[func]
     fn get_voxel(&self, x: i32, y: i32, z: i32, channel: i32) -> i64 {
+        if !is_valid_access(&self.buffer, x, y, z, channel) {
+            return 0;
+        }
         self.buffer.get_voxel(x, y, z, channel as usize) as i64
     }
 
@@ -67,11 +115,17 @@ impl VoxelBufferGD {
 
     #[func]
     fn fill_channel(&mut self, channel: i32, value: i64) {
+        if !is_valid_channel(&self.buffer, channel) {
+            return;
+        }
         self.buffer.fill(value as u64, channel as usize);
     }
 
     #[func]
     fn clear_channel(&mut self, channel: i32, value: i64) {
+        if !is_valid_channel(&self.buffer, channel) {
+            return;
+        }
         self.buffer.clear_channel(channel as usize, value as u64);
     }
 }
@@ -209,7 +263,9 @@ impl VoxelInstancerGD {
     /// Returns the total instance count.
     #[func]
     fn scatter_test(&self, count: i32) -> i32 {
-        if self.library.is_empty() {
+        // A negative count would wrap to a huge usize and overflow the
+        // allocation below, aborting the Godot process (panic = "abort").
+        if count <= 0 || self.library.is_empty() {
             return 0;
         }
         let positions: Vec<Vector3f> = (0..count)
@@ -391,8 +447,11 @@ impl VoxelNodeGD {
 #[class(base = Resource, tool, rename = VoxelGeneratorGraph)]
 pub struct VoxelGeneratorGraphGD {
     base: Base<Resource>,
-    /// Graph nodes serialized as a JSON string (for save/load).
+    /// Graph nodes serialized as a JSON string (save/load interchange; not
+    /// parsed back — build graphs programmatically via `add_node`).
     graph_json: GString,
+    /// The node graph under construction.
+    graph: voxel_core::generators::graph::Graph,
     /// The lazily-built engine-agnostic graph generator.
     generator: Option<voxel_core::generators::graph::GraphGenerator>,
 }
@@ -403,6 +462,7 @@ impl IResource for VoxelGeneratorGraphGD {
         Self {
             base,
             graph_json: "{}".to_godot(),
+            graph: voxel_core::generators::graph::Graph::new(),
             generator: None,
         }
     }
@@ -502,5 +562,120 @@ impl VoxelGeneratorGraphGD {
             .as_ref()
             .map(|g| g.graph().nodes().len() as i32)
             .unwrap_or(0)
+    }
+
+    /// Remove all nodes from the graph under construction.
+    #[func]
+    fn clear_graph(&mut self) {
+        self.graph = voxel_core::generators::graph::Graph::new();
+        self.generator = None;
+    }
+
+    /// Append a node to the graph under construction and return its id
+    /// (usable as a port input of later nodes). Returns `-1` for an unknown
+    /// kind.
+    ///
+    /// Kinds: `InputX`, `InputY`, `InputZ`, `Constant` (uses `value`),
+    /// `Add`/`Subtract`/`Multiply`/`Divide`/`Min`/`Max` (ports `a`,`b`),
+    /// `Sin`/`Cos`/`Abs`/`Sqrt`/`Floor`/`Fract` (port `a`),
+    /// `SdfPlane` (`a`=y, `b`=height),
+    /// `SdfSphere` (`a`=x, `b`=y, `c`=z, `d`=radius),
+    /// `SdfBox` (`a`=x, `b`=y, `c`=z; cube half-extent = `value`),
+    /// `SdfUnion`/`SdfSubtract` (ports `a`,`b`),
+    /// `SdfSmoothUnion`/`SdfSmoothSubtract` (ports `a`,`b`; `value` =
+    /// smoothness), `Noise2D` (`a`=x, `b`=y), `Noise3D` (`a`=x, `b`=y,
+    /// `c`=z), `OutputSdf` (port `a`).
+    ///
+    /// Unconnected ports: pass `-1`.
+    #[func]
+    #[allow(clippy::too_many_arguments)]
+    fn add_node(&mut self, kind: GString, a: i64, b: i64, c: i64, d: i64, value: f32) -> i64 {
+        use voxel_core::generators::graph::{GraphPort, NodeKind};
+        let port = |id: i64| -> Option<GraphPort> { (id >= 0).then(|| GraphPort::new(id as u32)) };
+        let (pa, pb, pc, pd) = (port(a), port(b), port(c), port(d));
+        let k = match kind.to_string().as_str() {
+            "InputX" => NodeKind::InputX,
+            "InputY" => NodeKind::InputY,
+            "InputZ" => NodeKind::InputZ,
+            "Constant" => NodeKind::Constant(value),
+            "Add" => NodeKind::Add { a: pa, b: pb },
+            "Subtract" => NodeKind::Subtract { a: pa, b: pb },
+            "Multiply" => NodeKind::Multiply { a: pa, b: pb },
+            "Divide" => NodeKind::Divide { a: pa, b: pb },
+            "Min" => NodeKind::Min { a: pa, b: pb },
+            "Max" => NodeKind::Max { a: pa, b: pb },
+            "Sin" => NodeKind::Sin { a: pa },
+            "Cos" => NodeKind::Cos { a: pa },
+            "Abs" => NodeKind::Abs { a: pa },
+            "Sqrt" => NodeKind::Sqrt { a: pa },
+            "Floor" => NodeKind::Floor { a: pa },
+            "Fract" => NodeKind::Fract { a: pa },
+            "SdfPlane" => NodeKind::SdfPlane { y: pa, height: pb },
+            "SdfSphere" => NodeKind::SdfSphere {
+                x: pa,
+                y: pb,
+                z: pc,
+                radius: pd,
+            },
+            "SdfBox" => NodeKind::SdfBox {
+                x: pa,
+                y: pb,
+                z: pc,
+                size_x: value,
+                size_y: value,
+                size_z: value,
+            },
+            "SdfUnion" => NodeKind::SdfUnion { a: pa, b: pb },
+            "SdfSubtract" => NodeKind::SdfSubtract { a: pa, b: pb },
+            "SdfSmoothUnion" => NodeKind::SdfSmoothUnion {
+                a: pa,
+                b: pb,
+                smoothness: value,
+            },
+            "SdfSmoothSubtract" => NodeKind::SdfSmoothSubtract {
+                a: pa,
+                b: pb,
+                smoothness: value,
+            },
+            "Noise2D" => NodeKind::Noise2D {
+                x: pa,
+                y: pb,
+                noise: voxel_core::generators::simple::NoiseConfig::default(),
+            },
+            "Noise3D" => NodeKind::Noise3D {
+                x: pa,
+                y: pb,
+                z: pc,
+                noise: voxel_core::generators::simple::NoiseConfig::default(),
+            },
+            "OutputSdf" => NodeKind::OutputSdf { a: pa },
+            _ => return -1,
+        };
+        let id = self.graph.push(k);
+        self.generator = None;
+        id as i64
+    }
+
+    /// Number of nodes in the graph under construction.
+    #[func]
+    pub fn get_graph_node_count(&self) -> i32 {
+        self.graph.nodes().len() as i32
+    }
+
+    /// Check that the graph under construction compiles (no cycles, no
+    /// dangling ports). Returns `false` for an empty graph.
+    #[func]
+    fn compile_graph(&self) -> bool {
+        !self.graph.nodes().is_empty()
+            && voxel_core::generators::graph::CompiledGraph::compile(&self.graph).is_ok()
+    }
+
+    /// Construct the engine-agnostic graph generator from the graph under
+    /// construction, so it can drive a `VoxelTerrain` through the `generator`
+    /// property. An empty/invalid graph generates nothing.
+    pub fn create_core_generator(&self) -> SharedVoxelGenerator {
+        Arc::new(voxel_core::generators::graph::GraphGenerator::new(
+            self.graph.clone(),
+        ))
     }
 }

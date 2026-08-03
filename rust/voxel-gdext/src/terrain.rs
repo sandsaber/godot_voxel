@@ -15,7 +15,9 @@ use godot::prelude::*;
 
 use voxel_core::constants::voxel_constants::MAX_LOD;
 use voxel_core::engine::MeshingDependency;
-use voxel_core::math::Vector3i;
+use voxel_core::math::{
+    Color as CoreColor, Vector2f as CoreVector2f, Vector3f as CoreVector3f, Vector3i,
+};
 use voxel_core::meshers::TransvoxelMesher;
 use voxel_core::storage::{ChannelDepth, ChannelId, VoxelData, VoxelFormat};
 use voxel_core::terrain::{ViewerUpdate, VoxelTerrainCore};
@@ -26,8 +28,9 @@ use voxel_core::terrain::{ViewerUpdate, VoxelTerrainCore};
 
 /// A Godot `Node3D` that renders voxel terrain. Wraps
 /// [`voxel_core::terrain::VoxelTerrainCore`] — the engine-agnostic paging
-/// orchestrator that loads data blocks, meshes them with the transvoxel
-/// mesher, and manages LOD + view/unview based on paired
+/// orchestrator that loads data blocks, meshes them with the configured
+/// mesher (transvoxel by default; cubes and blocky can be assigned via the
+/// `mesher` property), and manages LOD + view/unview based on paired
 /// [`VoxelViewer`](self::VoxelViewer) positions.
 ///
 /// In GDScript: add a `VoxelTerrain` node to the scene tree, then add a
@@ -39,6 +42,7 @@ pub struct VoxelTerrain {
     core: Option<VoxelTerrainCore>,
     mesh_instances: HashMap<Vector3i, Gd<MeshInstance3D>>,
     generator_resource: Option<Gd<Resource>>,
+    mesher_resource: Option<Gd<Resource>>,
     #[export]
     #[var(get = get_stream, set = set_stream)]
     stream: PhantomVar<Option<Gd<Resource>>>,
@@ -59,6 +63,7 @@ impl INode3D for VoxelTerrain {
             core: None,
             mesh_instances: HashMap::new(),
             generator_resource: None,
+            mesher_resource: None,
             stream: Default::default(),
             stream_resource: None,
             lod_count: 1,
@@ -83,7 +88,7 @@ impl INode3D for VoxelTerrain {
         let generator = self.resolve_generator();
         data.set_generator(Some(generator));
 
-        let mesher = Arc::new(TransvoxelMesher::new());
+        let mesher = self.resolve_mesher();
         let meshing_dep = MeshingDependency::new(mesher, None);
         let stream_was_assigned = self.stream_resource.is_some();
         let explicit_stream = self
@@ -139,8 +144,8 @@ impl INode3D for VoxelTerrain {
         let _events = core.process(&viewers);
 
         // Collect mesh data to upload (collect first to avoid borrow conflict).
-        /// Pending mesh upload: (position, vertices, normals, indices, lod)
-        type PendingMesh = (Vector3i, Vec<f32>, Vec<f32>, Vec<i32>, u8);
+        /// Pending mesh upload: (position, lod, surfaces).
+        type PendingMesh = (Vector3i, u8, Vec<PendingSurface>);
         let mut to_upload: Vec<PendingMesh> = Vec::new();
         let dirty = std::mem::take(&mut self.dirty_blocks);
         for lod in 0..core.lod_count() {
@@ -154,25 +159,14 @@ impl INode3D for VoxelTerrain {
                     continue;
                 }
                 if let Some(output) = &entry.output {
-                    if let Some(surface) = output.surfaces.first() {
-                        if let voxel_core::meshers::SurfaceArrays::Transvoxel(arrays) =
-                            &surface.arrays
-                        {
-                            if !arrays.indices.is_empty() {
-                                let verts: Vec<f32> = arrays
-                                    .vertices
-                                    .iter()
-                                    .flat_map(|v| [v.x, v.y, v.z])
-                                    .collect();
-                                let norms: Vec<f32> = arrays
-                                    .normals
-                                    .iter()
-                                    .flat_map(|n| [n.x, n.y, n.z])
-                                    .collect();
-                                let idx: Vec<i32> = arrays.indices.to_vec();
-                                to_upload.push((bpos, verts, norms, idx, lod));
-                            }
-                        }
+                    let surfaces: Vec<PendingSurface> = output
+                        .surfaces
+                        .iter()
+                        .filter_map(|s| extract_surface(&s.arrays))
+                        .filter(|s| !s.indices.is_empty())
+                        .collect();
+                    if !surfaces.is_empty() {
+                        to_upload.push((bpos, lod, surfaces));
                     }
                 }
             }
@@ -180,12 +174,55 @@ impl INode3D for VoxelTerrain {
 
         // Upload after releasing the core borrow. For dirty blocks, remove old
         // MeshInstance3D first so we replace it with the new mesh.
-        for (bpos, verts, norms, idx, lod) in to_upload {
+        for (bpos, lod, surfaces) in to_upload {
             if let Some(mut old) = self.mesh_instances.remove(&bpos) {
                 old.queue_free();
             }
-            self.upload_mesh(bpos, &verts, &norms, &idx, lod);
+            self.upload_mesh(bpos, &surfaces, lod);
         }
+    }
+}
+
+/// Mesher-agnostic vertex attributes of one surface, ready for upload.
+struct PendingSurface {
+    positions: Vec<CoreVector3f>,
+    normals: Vec<CoreVector3f>,
+    colors: Vec<CoreColor>,
+    uvs: Vec<CoreVector2f>,
+    /// Godot-style tangents: 4 floats per vertex (blocky mesher only).
+    tangents: Vec<f32>,
+    indices: Vec<i32>,
+}
+
+/// Convert any mesher's surface arrays into the upload representation.
+fn extract_surface(arrays: &voxel_core::meshers::SurfaceArrays) -> Option<PendingSurface> {
+    use voxel_core::meshers::SurfaceArrays;
+    match arrays {
+        SurfaceArrays::Transvoxel(a) => Some(PendingSurface {
+            positions: a.vertices.clone(),
+            normals: a.normals.clone(),
+            colors: Vec::new(),
+            uvs: Vec::new(),
+            tangents: Vec::new(),
+            indices: a.indices.to_vec(),
+        }),
+        SurfaceArrays::Cubes(a) => Some(PendingSurface {
+            positions: a.positions.clone(),
+            normals: a.normals.clone(),
+            colors: a.colors.clone(),
+            uvs: a.uvs.clone(),
+            tangents: Vec::new(),
+            indices: a.indices.clone(),
+        }),
+        SurfaceArrays::Blocky(a) => Some(PendingSurface {
+            positions: a.positions.clone(),
+            normals: a.normals.clone(),
+            colors: a.colors.clone(),
+            uvs: a.uvs.clone(),
+            tangents: a.tangents.clone(),
+            indices: a.indices.clone(),
+        }),
+        SurfaceArrays::Empty => None,
     }
 }
 
@@ -268,6 +305,22 @@ impl VoxelTerrain {
     #[func]
     fn set_generator(&mut self, value: Gd<Resource>) {
         self.generator_resource = Some(value);
+    }
+
+    /// The mesher resource (VoxelMesherTransvoxel, VoxelMesherCubes or
+    /// VoxelMesherBlocky). Defaults to transvoxel when unset. Must be set
+    /// before `_ready`.
+    #[func]
+    fn get_mesher(&self) -> Variant {
+        match &self.mesher_resource {
+            Some(m) => m.to_variant(),
+            None => Variant::nil(),
+        }
+    }
+
+    #[func]
+    fn set_mesher(&mut self, value: Gd<Resource>) {
+        self.mesher_resource = Some(value);
     }
 
     #[func]
@@ -395,10 +448,11 @@ impl VoxelTerrain {
         }
     }
 
-    /// SDF raycast: march along a ray from `origin` in `direction` (normalized)
-    /// up to `max_distance` voxels. Returns the hit position as
-    /// `[x, y, z, hit]` where `hit` is 1.0 if the ray hit terrain, 0.0 otherwise.
-    /// Uses a simple fixed-step SDF march (no spatial acceleration — MVP).
+    /// SDF raycast: traverse voxels along a ray from `origin` in `direction`
+    /// up to `max_distance` voxels. Returns the hit voxel position as
+    /// `[x, y, z, hit]` where `hit` is 1.0 if the ray hit terrain, 0.0
+    /// otherwise. Uses the Amanatides & Woo DDA traversal from voxel-core
+    /// (`edition::raycast`), hitting the first voxel whose SDF is solid.
     #[func]
     #[allow(clippy::too_many_arguments)]
     fn raycast(
@@ -420,31 +474,20 @@ impl VoxelTerrain {
         let depth = settings.format.depths[channel];
         let block_size_po2 = data.block_size_po2();
 
-        let ox = origin_x as f32;
-        let oy = origin_y as f32;
-        let oz = origin_z as f32;
-        let dx = dir_x as f32;
-        let dy = dir_y as f32;
-        let dz = dir_z as f32;
-        let max_d = max_distance as f32;
-
         // Normalise direction.
-        let dlen = (dx * dx + dy * dy + dz * dz).sqrt();
+        let dlen = (dir_x * dir_x + dir_y * dir_y + dir_z * dir_z).sqrt();
         if dlen < 1e-6 {
             return PackedFloat32Array::from(&[0.0, 0.0, 0.0, 0.0]);
         }
-        let ndx = dx / dlen;
-        let ndy = dy / dlen;
-        let ndz = dz / dlen;
+        let origin = CoreVector3f::new(origin_x as f32, origin_y as f32, origin_z as f32);
+        let direction = CoreVector3f::new(
+            (dir_x / dlen) as f32,
+            (dir_y / dlen) as f32,
+            (dir_z / dlen) as f32,
+        );
 
-        // March with 1-voxel steps.
-        let step = 1.0f32;
-        let mut t = 0.0f32;
-        while t < max_d {
-            let px = ox + ndx * t;
-            let py = oy + ndy * t;
-            let pz = oz + ndz * t;
-            let vi = Vector3i::new(px as i32, py as i32, pz as i32);
+        // Whether a voxel's SDF marks it solid.
+        let is_solid = |vi: Vector3i| -> bool {
             let block_pos = voxel_core::storage::voxel_data_map::VoxelDataMap::voxel_to_block_b(
                 vi,
                 block_size_po2,
@@ -462,14 +505,23 @@ impl VoxelTerrain {
                     })
                     .unwrap_or(0)
             });
-            let sdf = voxel_core::storage::voxel_buffer::raw_voxel_to_real(raw, depth);
-            // SDF < 0 means inside solid → hit.
-            if sdf < 0.0 {
-                return PackedFloat32Array::from(&[px, py, pz, 1.0]);
-            }
-            t += step;
+            voxel_core::storage::voxel_buffer::raw_voxel_to_real(raw, depth) < 0.0
+        };
+
+        match voxel_core::edition::raycast::voxel_raycast(
+            origin,
+            direction,
+            max_distance as f32,
+            |s| is_solid(s.position),
+        ) {
+            Some(hit) => PackedFloat32Array::from(&[
+                hit.position.x as f32,
+                hit.position.y as f32,
+                hit.position.z as f32,
+                1.0,
+            ]),
+            None => PackedFloat32Array::from(&[0.0, 0.0, 0.0, 0.0]),
         }
-        PackedFloat32Array::from(&[0.0, 0.0, 0.0, 0.0])
     }
 }
 
@@ -478,8 +530,10 @@ impl VoxelTerrain {
     /// If no resource is set, defaults to Waves(60, 128).
     fn resolve_generator(&self) -> voxel_core::storage::SharedVoxelGenerator {
         use crate::generators::{
-            VoxelGeneratorFlat, VoxelGeneratorHeightmap, VoxelGeneratorNoise, VoxelGeneratorWaves,
+            VoxelGeneratorFlat, VoxelGeneratorHeightmap, VoxelGeneratorImage, VoxelGeneratorNoise,
+            VoxelGeneratorWaves,
         };
+        use crate::voxel_buffer::VoxelGeneratorGraphGD;
 
         if let Some(res) = &self.generator_resource {
             if let Ok(waves) = res.clone().try_cast::<VoxelGeneratorWaves>() {
@@ -494,6 +548,19 @@ impl VoxelTerrain {
             if let Ok(hm) = res.clone().try_cast::<VoxelGeneratorHeightmap>() {
                 return hm.bind().create_core_generator();
             }
+            if let Ok(img) = res.clone().try_cast::<VoxelGeneratorImage>() {
+                return img.bind().create_core_generator();
+            }
+            if let Ok(graph) = res.clone().try_cast::<VoxelGeneratorGraphGD>() {
+                let bound = graph.bind();
+                if bound.get_graph_node_count() > 0 {
+                    return bound.create_core_generator();
+                }
+                godot_error!(
+                    "VoxelGeneratorGraph assigned to VoxelTerrain has no nodes; \
+                     build one with add_node()/OutputSdf"
+                );
+            }
         }
         // Default: Waves with sensible parameters.
         let mut waves = voxel_core::generators::simple::Waves::default();
@@ -501,38 +568,118 @@ impl VoxelTerrain {
         waves.heightmap.height_range = 60.0;
         Arc::new(waves)
     }
+
+    /// Resolve the Godot mesher resource into a voxel-core mesher. Defaults
+    /// to [`TransvoxelMesher`] when unset or unrecognised.
+    fn resolve_mesher(&self) -> Arc<dyn voxel_core::meshers::VoxelMesher> {
+        use crate::resources::{VoxelMesherBlockyGD, VoxelMesherCubesGD, VoxelMesherTransvoxelGD};
+
+        if let Some(res) = &self.mesher_resource {
+            if let Ok(m) = res.clone().try_cast::<VoxelMesherTransvoxelGD>() {
+                let _ = m;
+                return Arc::new(TransvoxelMesher::new());
+            }
+            if let Ok(m) = res.clone().try_cast::<VoxelMesherCubesGD>() {
+                let bound = m.bind();
+                return Arc::new(
+                    voxel_core::meshers::CubesMesher::new()
+                        .with_greedy(bound.is_greedy())
+                        .with_type_channel(bound.color_channel_index().max(0) as usize),
+                );
+            }
+            if let Ok(m) = res.clone().try_cast::<VoxelMesherBlockyGD>() {
+                let bound = m.bind();
+                // The blocky mesher needs a baked model library; the binding
+                // doesn't expose one yet, so terrain renders nothing until a
+                // library can be assigned (mirrors upstream with an empty
+                // library).
+                return Arc::new(
+                    voxel_core::meshers::BlockyMesher::new(Arc::new(
+                        voxel_core::meshers::blocky::BakedLibrary::default(),
+                    ))
+                    .with_type_channel(bound.type_channel_index().max(0) as usize)
+                    .with_occlusion(bound.is_baking_occlusion(), 0.8),
+                );
+            }
+            godot_error!(
+                "VoxelTerrain.mesher must be VoxelMesherTransvoxel, VoxelMesherCubes \
+                 or VoxelMesherBlocky; falling back to transvoxel"
+            );
+        }
+        Arc::new(TransvoxelMesher::new())
+    }
 }
 
 impl VoxelTerrain {
-    /// Upload a transvoxel mesh array as an `ArrayMesh` into a child
-    /// `MeshInstance3D` node positioned at the block's world origin.
-    fn upload_mesh(&mut self, bpos: Vector3i, verts: &[f32], norms: &[f32], idx: &[i32], lod: u8) {
-        let mut mesh_arrays = Array::new();
+    /// Upload the surfaces of one mesh block as an `ArrayMesh` (one Godot
+    /// surface per mesher surface) into a child `MeshInstance3D` node
+    /// positioned at the block's world origin. Works for every mesher:
+    /// transvoxel (positions/normals), cubes (+ colors/UVs) and blocky
+    /// (+ tangents, per-material surfaces).
+    fn upload_mesh(&mut self, bpos: Vector3i, surfaces: &[PendingSurface], lod: u8) {
+        let mut array_mesh = ArrayMesh::new_gd();
+        for surface in surfaces {
+            let mut mesh_arrays = Array::new();
 
-        // Positions (PackedVector3Array).
-        let positions: Vec<Vector3> = verts
-            .chunks_exact(3)
-            .map(|c| Vector3::new(c[0], c[1], c[2]))
-            .collect();
-        mesh_arrays.push(&PackedVector3Array::from(positions.as_slice()));
+            // ARRAY_VERTEX (0): positions.
+            let positions: Vec<Vector3> = surface
+                .positions
+                .iter()
+                .map(|v| Vector3::new(v.x, v.y, v.z))
+                .collect();
+            mesh_arrays.push(&PackedVector3Array::from(positions.as_slice()));
 
-        // Normals.
-        let normals: Vec<Vector3> = norms
-            .chunks_exact(3)
-            .map(|c| Vector3::new(c[0], c[1], c[2]))
-            .collect();
-        mesh_arrays.push(&PackedVector3Array::from(normals.as_slice()));
+            // ARRAY_NORMAL (1).
+            let normals: Vec<Vector3> = surface
+                .normals
+                .iter()
+                .map(|n| Vector3::new(n.x, n.y, n.z))
+                .collect();
+            mesh_arrays.push(&PackedVector3Array::from(normals.as_slice()));
 
-        // Empty UV, UV2, color, etc. (indices 2..11).
-        for _ in 2..12 {
-            mesh_arrays.push(&Variant::nil());
+            // ARRAY_TANGENT (2): 4 floats per vertex, blocky mesher only.
+            if !surface.tangents.is_empty() {
+                mesh_arrays.push(&PackedFloat32Array::from(surface.tangents.as_slice()));
+            } else {
+                mesh_arrays.push(&Variant::nil());
+            }
+
+            // ARRAY_COLOR (3): cubes/blocky mesher.
+            if !surface.colors.is_empty() {
+                let colors: Vec<Color> = surface
+                    .colors
+                    .iter()
+                    .map(|c| Color::from_rgba(c.r, c.g, c.b, c.a))
+                    .collect();
+                mesh_arrays.push(&PackedColorArray::from(colors.as_slice()));
+            } else {
+                mesh_arrays.push(&Variant::nil());
+            }
+
+            // ARRAY_TEXCOORD (4): cubes/blocky mesher.
+            if !surface.uvs.is_empty() {
+                let uvs: Vec<Vector2> = surface
+                    .uvs
+                    .iter()
+                    .map(|uv| Vector2::new(uv.x, uv.y))
+                    .collect();
+                mesh_arrays.push(&PackedVector2Array::from(uvs.as_slice()));
+            } else {
+                mesh_arrays.push(&Variant::nil());
+            }
+
+            // Slots 5..12 (uv2, customs, bones, weights) unused.
+            for _ in 5..12 {
+                mesh_arrays.push(&Variant::nil());
+            }
+
+            // ARRAY_INDEX (12).
+            mesh_arrays.push(&PackedInt32Array::from(surface.indices.as_slice()));
+
+            array_mesh.add_surface_from_arrays(PrimitiveType::TRIANGLES, &mesh_arrays);
         }
 
-        // Indices (PackedInt32Array).
-        mesh_arrays.push(&PackedInt32Array::from(idx));
-
-        // Create ArrayMesh.
-        let mut array_mesh = ArrayMesh::new_gd();
+        // Create MeshInstance3D child.
         let block_size = 16i32;
         let lod_stride = 1i32 << lod;
         let origin = Vector3::new(
@@ -540,9 +687,6 @@ impl VoxelTerrain {
             (bpos.y * block_size * lod_stride) as f32,
             (bpos.z * block_size * lod_stride) as f32,
         );
-        array_mesh.add_surface_from_arrays(PrimitiveType::TRIANGLES, &mesh_arrays);
-
-        // Create MeshInstance3D child.
         let mut instance = MeshInstance3D::new_alloc();
         instance.set_mesh(&array_mesh);
         instance.set_position(origin);
