@@ -5,7 +5,7 @@ A voxel terrain engine for Godot Engine 4, **fully ported from C++ to Rust**.
 
 This fork is a **pure Rust GDExtension** — no C++ module code remains. The
 engine core (`voxel-core`) is engine-agnostic and fully unit-testable; the
-thin Godot binding (`voxel-gdext`) exposes 82 functional classes via
+thin Godot binding (`voxel-gdext`) exposes 79 functional classes via
 `#[func]` methods. Loads in Godot 4.7+.
 
 > **Verified by independent audit (2026-07-30):** 1489 tests pass (0 failed),
@@ -49,7 +49,7 @@ Testing
 
 ```bash
 cd rust
-cargo test --workspace                      # 1489 tests (0 failed)
+cargo test --workspace                      # 1494 tests (0 failed)
 cargo clippy --workspace --all-targets      # warning-clean
 cargo fmt --check                           # clean
 ```
@@ -60,13 +60,13 @@ Project structure
 ```
 rust/
 ├── voxel-core/          # Engine-agnostic Rust core (all logic)
-│   ├── src/             # 795 unit tests
+│   ├── src/             # 800 unit tests
 │   └── tests/           # 674 parity tests + integration + transvoxel parity
-├── voxel-gdext/         # Godot GDExtension binding (82 classes)
+├── voxel-gdext/         # Godot GDExtension binding (79 classes)
 │   ├── src/             # #[func] methods delegating to voxel-core
 │   └── smoke_test/      # Godot 4.7 project + VoxelGeneratorGraph addon
 ├── cpp-baseline/        # C++ parity harness (reference data generation)
-├── tsan/                # ThreadSanifier tests
+├── tsan/                # ThreadSanitizer tests
 └── fuzz/                # cargo-fuzz targets
 ```
 
@@ -76,12 +76,16 @@ Status
 The C++ → Rust migration is **complete**. The original C++ module is fully
 removed; the project is a pure-Rust GDExtension verified in Godot 4.7.1:
 
-- **1489 tests pass** (795 unit + 674 parity + 5 integration + 5 transvoxel
+- **1494 tests pass** (800 unit + 674 parity + 5 integration + 5 transvoxel
   parity + 1 stress + 5 TSan + 3 gdext unit + 1 doc-test), clippy/fmt clean.
-- **82 Godot classes** functional, registered under canonical upstream names
+- **79 Godot classes** functional, registered under canonical upstream names
   (`VoxelBuffer`, `VoxelMesherBlocky`, `VoxelTerrain`, …).
 - Full paging + generation + meshing pipeline runs end-to-end (verified headless:
   210 mesh blocks generated).
+
+Remaining big features (blocky model library on terrain, `VoxelLodTerrain`
+paging/rendering, multiplayer areas, full terrain tools, instancing
+rendering, graph editor) are tracked in **[ROADMAP.md](ROADMAP.md)**.
 
 Class names follow upstream godot_voxel (`#[class(rename=…)]`); see
 [`AGENTS.md`](AGENTS.md) for the naming scheme.

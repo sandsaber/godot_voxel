@@ -1,0 +1,31 @@
+site_name: Voxel Tools for Godot (Rust)
+site_description: >
+  Documentation for the Rust port of the godot_voxel engine — a voxel
+  terrain engine for Godot 4, shipped as a GDExtension.
+repo_url: https://github.com/sandsaber/godot_voxel_rust
+edit_uri: ""
+
+theme:
+  name: readthedocs
+
+docs_dir: source
+
+nav:
+  - Home: index.md
+  - Getting started:
+      - Building the extension: setup/building.md
+      - Loading in Godot: setup/loading_in_godot.md
+  - Concepts:
+      - Architecture: concepts/architecture.md
+  - Terrain quickstart: terrain_setup.md
+  - Generators: generators.md
+  - Streams: streams.md
+  - Meshers: meshers.md
+  - Editing voxels: editing.md
+  - Instancing: instancing.md
+  - Physics & collision: physics_collision.md
+  - API reference:
+      - Class reference: api/class_reference.md
+  - Project:
+      - Status & roadmap: status.md
+      - Contributing: contributing.md

@@ -7,7 +7,7 @@ in [`voxel-core`](../voxel-core); this crate wraps it into Godot classes.
 
 ## Status
 
-**Phase 5 — complete.** 82 Godot classes are registered and functional (all carry
+**Phase 5 — complete.** 79 Godot classes are registered and functional (all carry
 `#[func]` methods delegating to `voxel-core`). The extension loads in Godot 4.7+
 and the full paging/generation/meshing pipeline runs end-to-end.
 
